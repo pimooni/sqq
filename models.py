@@ -1,0 +1,141 @@
+﻿from __future__ import annotations
+
+"""Shared data models for one SQQ analysis run."""
+
+from dataclasses import dataclass, field
+from pathlib import Path
+
+import numpy as np
+
+
+# Atom, Frame, Water, and Guest describe parsed trajectory input.
+@dataclass(frozen=True)
+class Atom:
+    index: int
+    resid: int
+    resname: str
+    atomname: str
+    atomid: int
+    xyz: np.ndarray
+
+
+@dataclass
+class Frame:
+    name: str
+    atoms: list[Atom]
+    box: np.ndarray | None = None
+    time_ps: float | None = None
+    source: Path | None = None
+
+
+@dataclass(frozen=True)
+class Water:
+    resid: int
+    resname: str
+    oxygen: int
+    hydrogens: tuple[int, ...]
+    atoms: tuple[int, ...]
+
+
+@dataclass(frozen=True)
+class Guest:
+    resid: int
+    resname: str
+    atoms: tuple[int, ...]
+    center_atom: int | None = None
+
+
+# Ring, Cup, and Cage describe detected topology objects by oxygen-node ids.
+@dataclass(frozen=True)
+class Ring:
+    object_id: str
+    nodes: tuple[int, ...]
+
+    @property
+    def size(self) -> int:
+        return len(self.nodes)
+
+    @property
+    def edges(self) -> frozenset[tuple[int, int]]:
+        """Return undirected graph edges around the ring."""
+        pairs = []
+        for i, a in enumerate(self.nodes):
+            b = self.nodes[(i + 1) % len(self.nodes)]
+            pairs.append((a, b) if a < b else (b, a))
+        return frozenset(pairs)
+
+
+@dataclass(frozen=True)
+class Cup:
+    object_id: str
+    cup_type: str
+    rings: tuple[str, ...]
+    waters: tuple[int, ...]
+    center: np.ndarray
+
+
+@dataclass(frozen=True)
+class Cage:
+    object_id: str
+    cage_type: str
+    rings: tuple[str, ...]
+    waters: tuple[int, ...]
+    center: np.ndarray
+    guest_ids: tuple[str, ...] = ()
+    isomer: str | None = None
+
+    @property
+    def occupied(self) -> bool:
+        """Whether at least one guest is assigned to the cage."""
+        return bool(self.guest_ids)
+
+
+@dataclass(frozen=True)
+class WaterOrder:
+    oxygen: int
+    resid: int
+    atomid: int
+    xyz: np.ndarray
+    f3: float | None
+    f4: float | None
+
+
+@dataclass(frozen=True)
+class F3F4Result:
+    per_water: tuple[WaterOrder, ...]
+    f3_mean: float | None
+    f4_mean: float | None
+    f3_valid: int
+    f4_valid: int
+    focus_resids: tuple[int, ...] = ()
+    f3_focus_mean: float | None = None
+    f4_focus_mean: float | None = None
+    f3_focus_valid: int = 0
+    f4_focus_valid: int = 0
+
+
+# FrameResult carries both raw selections and derived topology for exporters.
+@dataclass
+class GraphResult:
+    mode: str
+    edges: list[tuple[int, int]]
+    adjacency: dict[int, set[int]]
+
+
+@dataclass
+class FrameResult:
+    frame: Frame
+    waters: list[Water]
+    guests: list[Guest]
+    graph: GraphResult
+    rings: dict[int, list[Ring]]
+    cups: list[Cup] = field(default_factory=list)
+    cages: list[Cage] = field(default_factory=list)
+    f3f4: F3F4Result | None = None
+    ice_like_waters: tuple[int, ...] = ()
+    ice_i_waters: tuple[int, ...] = ()
+    interfacial_ice_waters: tuple[int, ...] = ()
+    warnings: list[str] = field(default_factory=list)
+
+
+

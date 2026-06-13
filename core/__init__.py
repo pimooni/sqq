@@ -1,0 +1,1 @@
+"""Core SQQ topology algorithms."""
