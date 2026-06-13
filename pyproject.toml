@@ -1,0 +1,42 @@
+[build-system]
+requires = ["setuptools >= 77.0.3", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "sqq"
+version = "0.1.0"
+description = "Shell Quant Qualifier for water-shell topology analysis in MD trajectories."
+readme = "README.md"
+requires-python = ">=3.10"
+authors = [
+  { name = "pimooni", email = "pimooni@gmail.com" },
+]
+dependencies = [
+  "numpy",
+  "pandas",
+  "openpyxl",
+  "pyyaml",
+  "tqdm",
+  "MDAnalysis",
+]
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3 :: Only",
+  "Operating System :: OS Independent",
+]
+
+[project.optional-dependencies]
+dev = ["pytest", "networkx"]
+
+[project.scripts]
+sqq = "sqq.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/pimooni/sqq"
+Repository = "https://github.com/pimooni/sqq"
+
+[tool.setuptools.package-data]
+sqq = ["example/gro/*.gro"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
