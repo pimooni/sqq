@@ -1,6 +1,6 @@
 ﻿from __future__ import annotations
 
-"""Build the water graph used by rings, cups, cages, and order metrics."""
+"""Build the water graph used by rings, open cage patches, cages, and order metrics."""
 
 from collections import defaultdict
 from itertools import combinations

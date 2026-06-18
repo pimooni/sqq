@@ -88,13 +88,13 @@ def farthest_hydrogen_pair(atoms: list[Atom], water_a: Water, water_b: Water, bo
     """Match the shell script by choosing the largest inter-water H-H distance."""
     best_pair = (water_a.hydrogens[0], water_b.hydrogens[0])
     best_dist2 = -1.0
-    for ha in water_a.hydrogens[:2]:
-        for hb in water_b.hydrogens[:2]:
-            delta = minimum_image(atoms[hb].xyz - atoms[ha].xyz, box)
+    for h_a in water_a.hydrogens[:2]:
+        for h_b in water_b.hydrogens[:2]:
+            delta = minimum_image(atoms[h_b].xyz - atoms[h_a].xyz, box)
             dist2 = float(np.dot(delta, delta))
             if dist2 > best_dist2:
                 best_dist2 = dist2
-                best_pair = (ha, hb)
+                best_pair = (h_a, h_b)
     return best_pair
 
 

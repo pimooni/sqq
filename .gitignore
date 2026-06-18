@@ -7,5 +7,7 @@ __pycache__/
 build/
 dist/
 result_sqq/
+result_sqq*/
+**/result_sqq*/
 config.yaml
 .env

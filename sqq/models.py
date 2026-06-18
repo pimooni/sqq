@@ -45,7 +45,7 @@ class Guest:
     center_atom: int | None = None
 
 
-# Ring, Cup, and Cage describe detected topology objects by oxygen-node ids.
+# Ring, CagePatch, and Cage describe detected topology objects by oxygen-node ids.
 @dataclass(frozen=True)
 class Ring:
     object_id: str
@@ -66,12 +66,14 @@ class Ring:
 
 
 @dataclass(frozen=True)
-class Cup:
+class CagePatch:
     object_id: str
-    cup_type: str
+    patch_type: str
+    kind: str
     rings: tuple[str, ...]
     waters: tuple[int, ...]
     center: np.ndarray
+    layers: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -129,7 +131,8 @@ class FrameResult:
     guests: list[Guest]
     graph: GraphResult
     rings: dict[int, list[Ring]]
-    cups: list[Cup] = field(default_factory=list)
+    half_cages: list[CagePatch] = field(default_factory=list)
+    quasi_cages: list[CagePatch] = field(default_factory=list)
     cages: list[Cage] = field(default_factory=list)
     f3f4: F3F4Result | None = None
     ice_like_waters: tuple[int, ...] = ()

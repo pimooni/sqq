@@ -15,9 +15,13 @@ SUPPORTED_SUFFIXES = {".gro", ".xyz", ".xtc", ".trr"}
 
 
 def expand_inputs(input_path: Path, pattern: str, recursive: bool) -> list[Path]:
-    """Expand either a single input file or a directory pattern."""
+    """Expand a single input file, a directory pattern, or a direct glob."""
     if input_path.is_dir():
         iterator = input_path.rglob(pattern) if recursive else input_path.glob(pattern)
+        paths = [path for path in iterator if path.is_file() and path.suffix.lower() in SUPPORTED_SUFFIXES]
+    elif has_glob_magic(str(input_path)):
+        parent = input_path.parent if str(input_path.parent) not in {"", "."} else Path(".")
+        iterator = parent.glob(input_path.name)
         paths = [path for path in iterator if path.is_file() and path.suffix.lower() in SUPPORTED_SUFFIXES]
     else:
         paths = [input_path]
@@ -25,6 +29,11 @@ def expand_inputs(input_path: Path, pattern: str, recursive: bool) -> list[Path]
     if not paths:
         raise FileNotFoundError(f"No input files matched: {input_path} / {pattern}")
     return paths
+
+
+def has_glob_magic(text: str) -> bool:
+    """Return whether an input path contains glob wildcards."""
+    return any(char in text for char in "*?[")
 
 
 def natural_key(path: Path) -> list[object]:
