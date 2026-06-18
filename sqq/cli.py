@@ -33,6 +33,7 @@ Analyze options:
       --sizes 4,5,6              Set ring/quasi/cage sizes; 4 enables other cages
       --ring-sizes 4,5,6         Override ring.sizes
       --quasi-sizes 4,5,6        Override quasi_cage base/side sizes
+      --quasi-max-layers N       Quasi-cage layers to report; default 1, use 2/3 for outer dangling layers
       --cage-sizes 4,5,6         Override cage sizes; 4 enables other cages
       --other-cages              Include generated unconventional 4/5/6 cages
       --recursive                Read input directories recursively
@@ -91,6 +92,7 @@ def build_parser() -> argparse.ArgumentParser:
     analyze_parser.add_argument("--quasi-sizes", metavar="4,5,6", help="Override quasi_cage base_sizes and side_sizes together.")
     analyze_parser.add_argument("--quasi-base-sizes", metavar="4,5,6", help="Override quasi_cage.base_sizes.")
     analyze_parser.add_argument("--quasi-side-sizes", metavar="4,5,6", help="Override quasi_cage.side_sizes.")
+    analyze_parser.add_argument("--quasi-max-layers", metavar="N", type=int, help="Override quasi_cage.max_layers; default 1 reports L1 quasi_cage and standard half_cage only.")
     analyze_parser.add_argument(
         "--cage-sizes",
         dest="cage_sizes",

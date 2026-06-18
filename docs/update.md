@@ -2,6 +2,40 @@
 
 This file records versioned update notes. New releases should be appended above older entries.
 
+## Version 0.1.2
+
+### Main Changes
+
+1. Faster default quasi-cage search
+   - `quasi_cage.max_layers` now defaults to `1`.
+   - Routine runs report L1 quasi-cages and standard half-cages by default.
+   - L2/L3 dangling outer layers remain available with `quasi_cage.max_layers: 2/3` or `--quasi-max-layers 2/3`.
+
+2. New CLI option
+   - Added `--quasi-max-layers N` for temporary layer-depth control without editing `config.yaml`.
+
+3. Faster cage grow search
+   - Standard target cages now share one grow pass instead of repeating the DFS separately for `512`, `51262`, `51263`, and `51264`.
+   - Boundary growth first uses exact shared-edge topology.
+   - The grow step chooses the boundary edge with the fewest addable rings.
+   - Ring-center distances are calculated only when candidate truncation is needed.
+
+4. Documentation cleanup
+   - Simplified `README.md` for installation, quick start, common options, defaults, and output layout.
+   - Kept algorithm details in `docs/design.md`.
+
+5. Report and terminal usability
+   - Reworked the first `summary.xlsx` sheet into a dashboard-style run overview.
+   - Added live per-frame stage text in the default terminal progress display, such as graph building, ring search, cage search, and output writing.
+
+6. Strict L1 quasi-cage fix
+   - Default quasi-cage output now remains strict L1 when `quasi_cage.max_layers = 1`.
+   - The special L2 `6^1` check is restricted to the standard `hc_6r_5^6_6^1` half-cage and is no longer reported as a quasi-cage.
+
+### Short Summary
+
+Version 0.1.2 is mainly a speed and usability update. The closed-cage rules are unchanged: accepted cages still require every edge to be used exactly twice, `V - E + F = 2`, and target face-count matching.
+
 ## Version 0.1.1
 
 Comparison baseline: GitHub `pimooni/sqq` 0.1.0 -> local 0.1.1.

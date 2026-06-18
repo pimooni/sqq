@@ -6,7 +6,7 @@ from argparse import Namespace
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from time import perf_counter
-from typing import Any
+from typing import Any, Callable
 
 try:
     from tqdm import tqdm
@@ -143,7 +143,7 @@ def analyze_paths_serial(
     for frame_index, frame in enumerate(progress):
         if hasattr(progress, "set_description_str"):
             progress.set_description_str(f"SQQ {frame.name}")
-        rows.append(process_frame(frame_index, frame, config, outdir, strict=strict))
+        rows.append(process_frame(frame_index, frame, config, outdir, strict=strict, stage_callback=progress_stage_callback(progress, frame.name)))
     return rows
 
 
@@ -179,20 +179,48 @@ def process_single_file_path(
     return frame_index, process_frame(frame_index, frame, config, outdir, strict=strict)
 
 
-def process_frame(frame_index: int, frame: Frame, config: dict[str, Any], outdir: Path, strict: bool) -> dict[str, Any]:
+def process_frame(
+    frame_index: int,
+    frame: Frame,
+    config: dict[str, Any],
+    outdir: Path,
+    strict: bool,
+    stage_callback: Callable[[str], None] | None = None,
+) -> dict[str, Any]:
     """Analyze one frame, write per-frame files, and return a summary row."""
     if frame.time_ps is None:
         frame.time_ps = config["input"]["first_file_time_ps"] + frame_index * config["input"]["frame_time_step_ps"]
     try:
-        result = analyze_frame(frame, config)
+        result = analyze_frame(frame, config, stage_callback=stage_callback)
         frame_dir = outdir / frame.name
         frame_dir.mkdir(parents=True, exist_ok=True)
+        report_stage(stage_callback, "writing outputs")
         write_frame_outputs(result, frame_dir, config)
+        report_stage(stage_callback, "done")
         return result_row(result)
     except Exception as exc:
         if strict:
             raise
         return failed_row(frame.name, str(frame.source or ""), str(exc))
+
+
+def progress_stage_callback(progress: Any, frame_name: str) -> Callable[[str], None] | None:
+    """Build a tqdm-aware callback for the current frame stage."""
+    if not hasattr(progress, "set_postfix_str"):
+        return None
+
+    def update(stage: str) -> None:
+        if hasattr(progress, "set_description_str"):
+            progress.set_description_str(f"SQQ {frame_name}")
+        progress.set_postfix_str(stage, refresh=True)
+
+    return update
+
+
+def report_stage(callback: Callable[[str], None] | None, stage: str) -> None:
+    """Update the terminal stage display when a callback is available."""
+    if callback is not None:
+        callback(stage)
 
 
 def write_frame_outputs(result: FrameResult, frame_dir: Path, config: dict[str, Any]) -> None:
@@ -281,6 +309,10 @@ def apply_cli_overrides(config: dict[str, Any], args: Namespace) -> None:
         config["quasi_cage"]["base_sizes"] = args.quasi_base_sizes
     if getattr(args, "quasi_side_sizes", None):
         config["quasi_cage"]["side_sizes"] = args.quasi_side_sizes
+    if getattr(args, "quasi_max_layers", None) is not None:
+        if args.quasi_max_layers < 1:
+            raise ValueError("--quasi-max-layers must be at least 1.")
+        config["quasi_cage"]["max_layers"] = args.quasi_max_layers
     if getattr(args, "cage_sizes", None):
         config["cage"]["ring_sizes"] = args.cage_sizes
         cage_size_overridden = True
@@ -327,12 +359,18 @@ def cage_sizes_need_other_outputs(value: Any) -> bool:
         return False
 
 
-def analyze_frame(frame: Frame, config: dict[str, Any]) -> FrameResult:
+def analyze_frame(
+    frame: Frame,
+    config: dict[str, Any],
+    stage_callback: Callable[[str], None] | None = None,
+) -> FrameResult:
     """Analyze one frame and return all topology objects for export."""
+    report_stage(stage_callback, "resolving settings")
     ring_sizes = resolve_size_list(config["ring"]["sizes"], fallback=[], key="ring.sizes")
     quasi_base_sizes = resolve_size_list(config["quasi_cage"].get("base_sizes", "auto"), fallback=ring_sizes, key="quasi_cage.base_sizes")
     quasi_side_sizes = resolve_size_list(config["quasi_cage"].get("side_sizes", "auto"), fallback=ring_sizes, key="quasi_cage.side_sizes")
     cage_ring_sizes = resolve_size_list(config["cage"].get("ring_sizes", [5, 6]), fallback=ring_sizes, key="cage.ring_sizes")
+    report_stage(stage_callback, "selecting molecules")
     waters = select_waters(
         frame.atoms,
         resnames=set(config["water"]["resnames"]),
@@ -345,6 +383,7 @@ def analyze_frame(frame: Frame, config: dict[str, Any]) -> FrameResult:
         center_atoms=config["guest"].get("center_atoms", {}),
     )
     # Ring, half-cage, quasi-cage, cage, F3/F4, and ice all consume the same water graph.
+    report_stage(stage_callback, "building water graph")
     graph = build_water_graph(
         frame.atoms,
         waters,
@@ -356,11 +395,13 @@ def analyze_frame(frame: Frame, config: dict[str, Any]) -> FrameResult:
         pair_file=config["graph"].get("pair_file"),
         pair_id=str(config["graph"].get("pair_id", "resid")),
     )
+    report_stage(stage_callback, "searching rings")
     rings = find_rings(
         graph.adjacency,
         sizes=ring_sizes,
         chordless=bool(config["ring"]["chordless"]),
     )
+    report_stage(stage_callback, "searching half/quasi cage")
     half_cages, quasi_cages = find_cage_patches(
         frame,
         rings,
@@ -368,7 +409,7 @@ def analyze_frame(frame: Frame, config: dict[str, Any]) -> FrameResult:
         base_sizes=quasi_base_sizes,
         side_sizes=quasi_side_sizes,
         max_combinations_per_base=int(config["quasi_cage"].get("max_combinations_per_base", 50000)),
-        max_layers=int(config["quasi_cage"].get("max_layers", 3)),
+        max_layers=int(config["quasi_cage"].get("max_layers", 1)),
         max_rings_per_layer=int(config["quasi_cage"].get("max_rings_per_layer", config["quasi_cage"].get("max_outer_layer_rings", 6))),
         max_layer_states_per_seed=int(config["quasi_cage"].get("max_layer_states_per_seed", 200)),
         max_candidates_per_edge=int(config["quasi_cage"].get("max_candidates_per_edge", 4)),
@@ -376,6 +417,7 @@ def analyze_frame(frame: Frame, config: dict[str, Any]) -> FrameResult:
     )
     warnings = []
     cage_seed_patches = [*half_cages, *quasi_cages]
+    report_stage(stage_callback, "searching cage")
     cages = find_cages(
         frame,
         rings,
@@ -395,10 +437,13 @@ def analyze_frame(frame: Frame, config: dict[str, Any]) -> FrameResult:
         occupancy_mode=str(config["cage"].get("occupancy_mode", "polyhedron")),
         warnings=warnings,
     )
+    report_stage(stage_callback, "filtering free patches")
     quasi_cages = filter_free_patches(quasi_cages, cages)
     half_cages = filter_free_patches(half_cages, cages, higher_priority_patches=quasi_cages)
     focus_resids = {int(item) for item in config["order"].get("focus_waters", [])}
+    report_stage(stage_callback, "computing F3/F4")
     f3f4 = compute_f3f4(frame, waters, graph, focus_resids=focus_resids) if bool(config["order"].get("f3f4_enabled", True)) else None
+    report_stage(stage_callback, "classifying ice")
     ice_classes = classify_ice_waters(
         graph,
         waters,

@@ -21,7 +21,7 @@ def find_cage_patches(
     base_sizes: list[int] | None = None,
     side_sizes: list[int] | None = None,
     max_combinations_per_base: int = 50000,
-    max_layers: int = 3,
+    max_layers: int = 1,
     max_rings_per_layer: int = 6,
     max_layer_states_per_seed: int = 200,
     max_candidates_per_edge: int = 4,
@@ -66,18 +66,6 @@ def find_cage_patches(
                 continue
 
             l1_sequence = canonical_sequence([ring.size for ring in side_rings])
-            l2_rings = next_layer_candidates(
-                base_patch_rings,
-                side_rings,
-                edge_to_rings,
-                side_allowed,
-                ring_centers,
-                frame.box,
-                lower_rings=[base],
-                max_candidates=max_layer_candidates,
-            )
-            l2_sixes = [ring for ring in l2_rings if ring.size == 6]
-
             # Classify the closed L1 side wall first; standard forms become half_cage.
             add_classified_patch(
                 frame,
@@ -91,8 +79,23 @@ def find_cage_patches(
                 seen_quasi,
                 type_counts,
             )
+            if half_cage_type(base.size, (l1_sequence, "6")) is not None:
+                l2_rings = next_layer_candidates(
+                    base_patch_rings,
+                    side_rings,
+                    edge_to_rings,
+                    side_allowed,
+                    ring_centers,
+                    frame.box,
+                    lower_rings=[base],
+                    max_candidates=max_layer_candidates,
+                )
+                l2_sixes = [ring for ring in l2_rings if ring.size == 6]
+            else:
+                l2_sixes = []
             for l2_ring in l2_sixes:
-                # The standard 6r + 5^6 + 6^1 patch is also a half_cage.
+                # Only the standard 6r + 5^6 + 6^1 form may bypass the
+                # max_layers=1 strict-L1 quasi-cage default.
                 add_classified_patch(
                     frame,
                     ring_by_id,

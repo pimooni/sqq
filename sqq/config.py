@@ -55,7 +55,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "base_sizes": "auto",
         "side_sizes": "auto",
         "max_combinations_per_base": 50000,
-        "max_layers": 3,
+        "max_layers": 1,
         "max_rings_per_layer": 6,
         "max_layer_states_per_seed": 200,
         "max_candidates_per_edge": 4,

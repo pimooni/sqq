@@ -53,7 +53,7 @@ L2 = rings grown outward from L1
 L3 = rings grown outward from L2
 ```
 
-L2 and L3 may be dangling rings or connected dangling ring chains. They do not need to close.
+L2 and L3 may be dangling rings or connected dangling ring chains. They do not need to close. The default v0.1.2 configuration reports L1 quasi-cages and standard half-cages only; L2/L3 remain available by setting `quasi_cage.max_layers` or `--quasi-max-layers`.
 
 `half_cage` is the standard subset of open patches:
 
@@ -87,7 +87,7 @@ Search order:
    - if it matches a standard `half_cage`, store it as `half_cage`;
    - otherwise store it as `quasi_cage`.
 7. For possible `hc_6r_5^6_6^1`, inspect L2 candidates and classify that larger standard patch as `half_cage`.
-8. Grow L2/L3 from the current frontier:
+8. If `quasi_cage.max_layers >= 2`, grow L2/L3 from the current frontier:
    - find exposed frontier edges;
    - use `edge_to_rings` to get rings sharing those edges;
    - reject rings already in the patch;
@@ -100,7 +100,7 @@ The algorithm intentionally avoids scanning all rings for L1/L2/L3 once `edge_to
 
 Important limits:
 
-- `quasi_cage.max_layers`: default 3, so L1/L2/L3 are reported.
+- `quasi_cage.max_layers`: default 1 for fast routine analysis; use 2 or 3 to report outer dangling quasi-cage layers.
 - `quasi_cage.max_rings_per_layer`: maximum rings in one L2/L3 growth unit.
 - `quasi_cage.max_layer_states_per_seed`: per-seed cap for finite growth.
 - `quasi_cage.max_candidates_per_edge`: L1 candidate cap per base edge.
@@ -132,17 +132,19 @@ Grow logic:
 
 1. Build `edge_to_ring_ids` from all allowed cage rings.
 2. Start from a seed face set, usually one ring.
-3. Count how many ring faces use each edge in the current patch.
-4. Edges used once are open boundary edges; edges used twice are closed; edges used more than twice are invalid.
-5. Choose the most constrained boundary edge, meaning the boundary edge with the fewest addable rings.
-6. For that edge, use `edge_to_ring_ids` to find rings sharing the boundary edge.
-7. Reject a candidate ring if:
+3. Merge all requested target face-count limits into one grow pass. Standard `512`, `51262`, `51263`, and `51264` therefore share the same DFS branches instead of being searched separately.
+4. Count how many ring faces use each edge in the current patch.
+5. Edges used once are open boundary edges; edges used twice are closed; edges used more than twice are invalid.
+6. Choose the most constrained boundary edge, meaning the boundary edge with the fewest addable rings.
+7. For that edge, use `edge_to_ring_ids` to find rings sharing the boundary edge.
+8. Reject a candidate ring if:
    - it is already in the patch;
-   - it would exceed the target face count;
+   - it would exceed the merged target face-count limit;
    - it would make any edge used more than twice;
    - it violates the single-ring seed rank pruning.
-8. Sort remaining candidates by ring-center distance to the current patch and keep at most `cage.max_boundary_candidates`. Set this parameter to `0` to keep all topology-valid candidates.
-9. Continue DFS growth until either the shell closes or the branch can no longer match the target face counts.
+9. Only when the most constrained edge still has more candidates than `cage.max_boundary_candidates`, sort candidates by ring-center distance to the current patch and keep the nearest candidates. Set this parameter to `0` to keep all topology-valid candidates.
+10. Continue DFS growth until the shell closes or the branch can no longer fit the merged target limits.
+11. When a shell closes, classify it by exact face counts and then validate the polyhedron.
 
 Single-ring seed rank pruning avoids rediscovering the same cage from every face: when the seed is one ring, later growth cannot add a ring whose stable id ranks before the seed ring.
 

@@ -6,7 +6,10 @@ from pathlib import Path
 from typing import Any
 
 import pandas as pd
+from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
+from openpyxl.utils import get_column_letter
 
+from ..banner import SQQ_BANNER
 from ..config import dump_config
 from ..core.cage import KNOWN_CAGE_TYPES, parse_cage_face_label
 from ..models import FrameResult
@@ -569,35 +572,202 @@ def write_summary(
         dump_config(config, handle)
     if write_xlsx:
         with pd.ExcelWriter(outdir / "summary.xlsx", engine="openpyxl") as writer:
-            summary_info_table(data, run_info or {}).to_excel(writer, sheet_name="summary", index=False)
+            summary_dashboard_table(data, run_info or {}, config).to_excel(writer, sheet_name="summary", index=False, header=False)
             for sheet_name, table in summary_sheet_tables(data).items():
                 table.to_excel(writer, sheet_name=sheet_name, index=False)
             pd.DataFrame(flatten_config(config)).to_excel(writer, sheet_name="config", index=False)
+            format_summary_workbook(writer.book)
 
 
-def summary_info_table(data: pd.DataFrame, run_info: dict[str, Any]) -> pd.DataFrame:
-    """Build the workbook summary sheet with run and molecule information."""
-    rows: list[dict[str, Any]] = []
-    for key, value in run_info.items():
-        rows.append({"section": "run", "frame": "", "item": key, "value": excel_scalar(value)})
+def summary_dashboard_table(data: pd.DataFrame, run_info: dict[str, Any], config: dict[str, Any]) -> pd.DataFrame:
+    """Build a compact human-facing dashboard for the summary sheet."""
+    banner_lines = [line.strip("| ") for line in SQQ_BANNER.splitlines() if line.startswith("|")]
+    title = banner_lines[0] if banner_lines else "Shell  Quant  Qualifier"
+    author = banner_lines[1] if len(banner_lines) > 1 else "by J. PANG & Q. SUN"
+    rows: list[list[Any]] = []
     rows.extend(
         [
-            {"section": "run", "frame": "", "item": "frames_ok", "value": int((data.get("status") == "ok").sum()) if "status" in data else len(data)},
-            {"section": "run", "frame": "", "item": "frames_total", "value": len(data)},
+            [title, "", "", "", "", ""],
+            [author, "", "", "", "", ""],
+            ["", "", "", "", "", ""],
+            ["Run Overview", "", "", "Frame Status", "", ""],
+            ["Working directory", run_info.get("working_dir", ""), "", "Frames total", len(data), ""],
+            ["Input", run_info.get("input", ""), "", "Frames ok", frames_ok_count(data), ""],
+            ["Output directory", run_info.get("output_dir", ""), "", "Frames failed", frames_failed_count(data), ""],
+            ["Config", run_info.get("config_file", "<built-in defaults>"), "", "Elapsed seconds", run_info.get("elapsed_seconds", ""), ""],
+            ["Topology", run_info.get("topology", "<none>"), "", "Workers", run_info.get("workers", ""), ""],
+            ["", "", "", "", "", ""],
+            ["Analysis Settings", "", "", "Main Counts", "", ""],
+            ["Graph mode", first_data_value(data, "connection_mode", run_info.get("graph_mode", "")), "", "Water molecules", sum_numeric_column(data, "n_waters"), ""],
+            ["Ring sizes", excel_scalar(config.get("ring", {}).get("sizes", "")), "", "Guest molecules", sum_numeric_column(data, "n_guests"), ""],
+            ["Quasi-cage sizes", f"{excel_scalar(config.get('quasi_cage', {}).get('base_sizes', 'auto'))} / {excel_scalar(config.get('quasi_cage', {}).get('side_sizes', 'auto'))}", "", "Connections", sum_numeric_column(data, "connection_count"), ""],
+            ["Quasi max layers", config.get("quasi_cage", {}).get("max_layers", ""), "", "Ring5 / Ring6", f"{sum_numeric_column(data, 'ring5')} / {sum_numeric_column(data, 'ring6')}", ""],
+            ["Cage sizes", excel_scalar(config.get("cage", {}).get("ring_sizes", "")), "", "Half / Quasi cage", f"{sum_numeric_column(data, 'half_cage_total')} / {sum_numeric_column(data, 'quasi_cage_total')}", ""],
+            ["Cage targets", dashboard_cage_targets(config), "", "Cage total", sum_numeric_column(data, "cage_total"), ""],
+            ["", "", "", "Empty / Occupied cage", f"{sum_numeric_column(data, 'cage_empty')} / {sum_numeric_column(data, 'cage_occupied')}", ""],
+            ["", "", "", "", "", ""],
+            ["Output Files", "", "", "Molecules", "", ""],
+            ["summary.xlsx", run_info.get("summary_xlsx", ""), "", "resname", "atoms total", ""],
+            ["run_config.yaml", run_info.get("run_config", ""), "", "", "", ""],
         ]
     )
-    molecule_columns = [column for column in data.columns if column.startswith("mol_")]
-    for _, record in data.iterrows():
-        for column in molecule_columns:
-            rows.append(
-                {
-                    "section": "molecule",
-                    "frame": record.get("frame", ""),
-                    "item": column.removeprefix("mol_"),
-                    "value": count_cell(record.get(column, 0)),
-                }
-            )
-    return pd.DataFrame(rows, columns=["section", "frame", "item", "value"])
+    for resname, total in molecule_totals(data).items():
+        rows.append(["", "", "", resname, total, ""])
+    rows.extend(
+        [
+            ["", "", "", "", "", ""],
+            ["Detailed sheets", "frame, graph, ring, half_cage, quasi_cage, cage, cage_occupancy, cage_isomer, f3f4, ice, config", "", "", "", ""],
+        ]
+    )
+    return pd.DataFrame(rows)
+
+
+def frames_ok_count(data: pd.DataFrame) -> int:
+    """Count successfully analyzed frames."""
+    return int((data.get("status") == "ok").sum()) if "status" in data else len(data)
+
+
+def frames_failed_count(data: pd.DataFrame) -> int:
+    """Count failed frames."""
+    return int((data.get("status") == "failed").sum()) if "status" in data else 0
+
+
+def first_data_value(data: pd.DataFrame, column: str, fallback: Any = "") -> Any:
+    """Return the first non-empty value in a summary column."""
+    if column not in data:
+        return fallback
+    for value in data[column]:
+        if pd.notna(value) and value != "":
+            return value
+    return fallback
+
+
+def sum_numeric_column(data: pd.DataFrame, column: str) -> int:
+    """Sum a numeric summary column while ignoring blanks."""
+    if column not in data:
+        return 0
+    return int(pd.to_numeric(data[column], errors="coerce").fillna(0).sum())
+
+
+def molecule_totals(data: pd.DataFrame) -> dict[str, int]:
+    """Collect total atom counts by residue name for the dashboard."""
+    totals: dict[str, int] = {}
+    for column in data.columns:
+        if not column.startswith("mol_") or column == "mol_TOTAL":
+            continue
+        totals[column.removeprefix("mol_")] = sum_numeric_column(data, column)
+    if "mol_TOTAL" in data:
+        totals["TOTAL"] = sum_numeric_column(data, "mol_TOTAL")
+    return totals
+
+
+def dashboard_cage_targets(config: dict[str, Any]) -> str:
+    """Render configured cage targets with human-facing superscripts."""
+    cage_config = config.get("cage", {})
+    targets = cage_config.get("target_types", "")
+    if isinstance(targets, str):
+        raw_targets = [item.strip() for item in targets.split(",") if item.strip()]
+    else:
+        raw_targets = [str(item) for item in targets or []]
+    labels = [cage_display_label(target) for target in raw_targets]
+    if cage_config.get("output_other", False):
+        labels.append(f"other 4/5/6 cages <= {cage_config.get('other_max_faces', 20)} faces")
+    return ", ".join(labels)
+
+
+def format_summary_workbook(workbook) -> None:
+    """Apply readable formatting to the generated summary workbook."""
+    for worksheet in workbook.worksheets:
+        worksheet.sheet_view.showGridLines = False
+        if worksheet.title == "summary":
+            format_summary_dashboard_sheet(worksheet)
+        else:
+            format_table_sheet(worksheet)
+
+
+def format_summary_dashboard_sheet(worksheet) -> None:
+    """Style the human-facing dashboard sheet."""
+    title_fill = PatternFill("solid", fgColor="F7E7C6")
+    author_fill = PatternFill("solid", fgColor="FFF7E6")
+    section_fill = PatternFill("solid", fgColor="2563EB")
+    label_fill = PatternFill("solid", fgColor="EFF6FF")
+    thin_border = Border(
+        left=Side(style="thin", color="CBD5E1"),
+        right=Side(style="thin", color="CBD5E1"),
+        top=Side(style="thin", color="CBD5E1"),
+        bottom=Side(style="thin", color="CBD5E1"),
+    )
+    widths = {"A": 24, "B": 72, "C": 4, "D": 24, "E": 20, "F": 4}
+    for column, width in widths.items():
+        worksheet.column_dimensions[column].width = width
+    worksheet.row_dimensions[1].height = 30
+    worksheet.row_dimensions[2].height = 22
+    worksheet.freeze_panes = "A4"
+
+    worksheet.merge_cells("A1:F1")
+    worksheet.merge_cells("A2:F2")
+    for row in (1, 2):
+        for cell in worksheet[row]:
+            cell.fill = title_fill if row == 1 else author_fill
+            cell.font = Font(color="3B2A14", bold=True, size=18 if row == 1 else 11)
+            cell.alignment = Alignment(horizontal="center", vertical="center")
+
+    section_labels = {"Run Overview", "Frame Status", "Analysis Settings", "Main Counts", "Output Files", "Molecules"}
+    for row in worksheet.iter_rows():
+        if row[0].row <= 2:
+            continue
+        for cell in row:
+            cell.alignment = Alignment(vertical="top", wrap_text=True)
+            if cell.value not in (None, ""):
+                cell.border = thin_border
+        if row[0].value in section_labels or row[3].value in section_labels:
+            for cell in row:
+                if cell.value not in (None, ""):
+                    cell.fill = section_fill
+                    cell.font = Font(color="FFFFFF", bold=True)
+                    cell.alignment = Alignment(horizontal="center", vertical="center")
+        else:
+            for cell in (row[0], row[3]):
+                if cell.value not in (None, ""):
+                    cell.fill = label_fill
+                    cell.font = Font(bold=True, color="0F172A")
+            for cell in (row[1], row[4]):
+                if cell.value not in (None, ""):
+                    cell.font = Font(color="111827")
+
+
+def format_table_sheet(worksheet) -> None:
+    """Style plotting-friendly data sheets without changing their data shape."""
+    if worksheet.max_row < 1 or worksheet.max_column < 1:
+        return
+    header_fill = PatternFill("solid", fgColor="1E3A8A")
+    header_font = Font(color="FFFFFF", bold=True)
+    thin_border = Border(bottom=Side(style="thin", color="CBD5E1"))
+    worksheet.freeze_panes = "A2"
+    worksheet.auto_filter.ref = worksheet.dimensions
+    for cell in worksheet[1]:
+        cell.fill = header_fill
+        cell.font = header_font
+        cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+        cell.border = thin_border
+    for column_index in range(1, worksheet.max_column + 1):
+        letter = get_column_letter(column_index)
+        width = estimated_column_width(worksheet, column_index)
+        worksheet.column_dimensions[letter].width = width
+    for row in worksheet.iter_rows(min_row=2):
+        for cell in row:
+            cell.alignment = Alignment(vertical="top", wrap_text=True)
+
+
+def estimated_column_width(worksheet, column_index: int) -> int:
+    """Estimate a bounded Excel column width from visible cell values."""
+    max_length = 8
+    for row_index in range(1, min(worksheet.max_row, 200) + 1):
+        value = worksheet.cell(row=row_index, column=column_index).value
+        if value is None:
+            continue
+        max_length = max(max_length, len(str(value)))
+    return min(max(max_length + 2, 10), 48)
 
 
 def stable_extra_columns(rows: list[dict[str, Any]], base_columns: list[str]) -> list[str]:

@@ -239,7 +239,8 @@ def grow_cage_candidates(
     ring_ids = sorted(ring_by_id)
     rank = {ring_id: idx for idx, ring_id in enumerate(ring_ids)}
     seed_index_by_anchor = build_seed_index_by_anchor(seed_face_sets)
-    seen_states: set[tuple[str, frozenset[str]]] = set()
+    max_counts = max_target_face_counts(targets)
+    seen_states: set[frozenset[str]] = set()
     total_states = 0
 
     for seed_index, seed_face_ids in enumerate(seed_face_sets):
@@ -252,65 +253,65 @@ def grow_cage_candidates(
         if any(count > 2 for count in seed_edge_counts.values()):
             continue
         seed_counts = face_counts(seed_face_ids, ring_by_id)
-        for cage_type, target_counts in targets.items():
-            if total_states >= max_total_states:
-                if status is not None:
-                    status["hit_total_limit"] = True
-                return
-            if not counts_fit(seed_counts, target_counts):
+        if total_states >= max_total_states:
+            if status is not None:
+                status["hit_total_limit"] = True
+            return
+        if not counts_fit(seed_counts, max_counts):
+            continue
+
+        stack = [(seed_face_ids, seed_edge_counts, seed_counts)]
+        local_states = 0
+
+        while stack and local_states < max_states_per_seed and total_states < max_total_states:
+            face_ids, edge_counts, counts = stack.pop()
+            if face_ids in seen_states:
                 continue
-            stack = [(seed_face_ids, seed_edge_counts, seed_counts)]
-            local_states = 0
+            if len(seed_face_ids) > 1 and contains_earlier_seed(face_ids, seed_index, seed_index_by_anchor):
+                continue
+            seen_states.add(face_ids)
+            local_states += 1
+            total_states += 1
 
-            while stack and local_states < max_states_per_seed and total_states < max_total_states:
-                face_ids, edge_counts, counts = stack.pop()
-                state_key = (cage_type, face_ids)
-                if state_key in seen_states:
-                    continue
-                if len(seed_face_ids) > 1 and contains_earlier_seed(face_ids, seed_index, seed_index_by_anchor):
-                    continue
-                seen_states.add(state_key)
-                local_states += 1
-                total_states += 1
+            boundary_edges = [edge for edge, count in edge_counts.items() if count == 1]
+            if not boundary_edges:
+                cage_type = target_type_for_counts(counts, targets)
+                if cage_type is not None:
+                    yield face_ids, cage_type
+                continue
 
-                boundary_edges = [edge for edge, count in edge_counts.items() if count == 1]
-                if not boundary_edges:
-                    if counts_match(counts, target_counts):
-                        yield face_ids, cage_type
+            # Grow once against the union of target limits, then classify only
+            # closed shells. This avoids repeating the same branch for every
+            # standard cage type.
+            next_ids = ordered_boundary_candidates(
+                face_ids,
+                edge_counts,
+                counts,
+                max_counts,
+                edge_to_ring_ids,
+                ring_by_id,
+                rank,
+                seed_rank,
+                ring_centers,
+                box,
+                max_boundary_candidates,
+            )
+            for next_id in reversed(next_ids):
+                ring = ring_by_id[next_id]
+                next_edge_counts = add_ring_edges(edge_counts, ring)
+                if next_edge_counts is None:
                     continue
-                if counts_match(counts, target_counts):
+                next_counts = dict(counts)
+                next_counts[ring.size] = next_counts.get(ring.size, 0) + 1
+                if not counts_fit(next_counts, max_counts):
                     continue
-
-                # Add one face through the most constrained open boundary edge.
-                next_ids = ordered_boundary_candidates(
-                    face_ids,
-                    edge_counts,
-                    counts,
-                    target_counts,
-                    edge_to_ring_ids,
-                    ring_by_id,
-                    rank,
-                    seed_rank,
-                    ring_centers,
-                    box,
-                    max_boundary_candidates,
-                )
-                for next_id in reversed(next_ids):
-                    ring = ring_by_id[next_id]
-                    next_edge_counts = add_ring_edges(edge_counts, ring)
-                    if next_edge_counts is None:
-                        continue
-                    next_counts = dict(counts)
-                    next_counts[ring.size] = next_counts.get(ring.size, 0) + 1
-                    if not counts_fit(next_counts, target_counts):
-                        continue
-                    stack.append((frozenset([*face_ids, next_id]), next_edge_counts, next_counts))
-            if stack and local_states >= max_states_per_seed and status is not None:
-                status["hit_seed_limit"] = True
-            if stack and total_states >= max_total_states:
-                if status is not None:
-                    status["hit_total_limit"] = True
-                return
+                stack.append((frozenset([*face_ids, next_id]), next_edge_counts, next_counts))
+        if stack and local_states >= max_states_per_seed and status is not None:
+            status["hit_seed_limit"] = True
+        if stack and total_states >= max_total_states:
+            if status is not None:
+                status["hit_total_limit"] = True
+            return
 
 
 def grow_seed_face_sets(patches: list[CagePatch], ring_by_id: dict[str, Ring], seed_mode: str) -> list[frozenset[str]]:
@@ -379,7 +380,8 @@ def ordered_boundary_candidates(
     for edge, edge_count in edge_counts.items():
         if edge_count != 1:
             continue
-        # First use exact shared-edge topology, then rank by ring-center distance.
+        # First use exact shared-edge topology. Ring-center distance is only
+        # needed if the most constrained edge still has too many candidates.
         candidates = candidate_ids_for_boundary_edge(
             edge,
             face_ids,
@@ -393,12 +395,14 @@ def ordered_boundary_candidates(
         )
         if not candidates:
             return []
-        candidates.sort(key=lambda ring_id: (candidate_distance_to_patch(ring_id, face_ids, ring_centers, box), rank[ring_id]))
-        if max_boundary_candidates > 0:
-            candidates = candidates[:max_boundary_candidates]
         if best is None or len(candidates) < len(best):
             best = candidates
-    return best or []
+    if not best:
+        return []
+    if max_boundary_candidates > 0 and len(best) > max_boundary_candidates:
+        best.sort(key=lambda ring_id: (candidate_distance_to_patch(ring_id, face_ids, ring_centers, box), rank[ring_id]))
+        return best[:max_boundary_candidates]
+    return sorted(best, key=lambda ring_id: rank[ring_id])
 
 
 def candidate_ids_for_boundary_edge(
@@ -509,10 +513,24 @@ def build_edge_to_ring_ids(rings: list[Ring]) -> dict[tuple[int, int], set[str]]
 def target_type_for_faces(face_ids: frozenset[str], ring_by_id: dict[str, Ring], targets: dict[str, dict[int, int]]) -> str | None:
     """Return the target cage type matching a face set, if any."""
     counts = face_counts(face_ids, ring_by_id)
+    return target_type_for_counts(counts, targets)
+
+
+def target_type_for_counts(counts: dict[int, int], targets: dict[str, dict[int, int]]) -> str | None:
+    """Return the target cage type matching a face-count map, if any."""
     for cage_type, target_counts in targets.items():
         if counts_match(counts, target_counts):
             return cage_type
     return None
+
+
+def max_target_face_counts(targets: dict[str, dict[int, int]]) -> dict[int, int]:
+    """Merge target cage limits so multiple cage types can share one grow pass."""
+    merged: dict[int, int] = {}
+    for target_counts in targets.values():
+        for size, count in target_counts.items():
+            merged[size] = max(merged.get(size, 0), count)
+    return merged
 
 
 def face_counts(face_ids: frozenset[str], ring_by_id: dict[str, Ring]) -> dict[int, int]:
