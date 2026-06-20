@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 """Markdown, TSV, VMD, and XLSX summary writers."""
 
@@ -584,43 +584,70 @@ def summary_dashboard_table(data: pd.DataFrame, run_info: dict[str, Any], config
     banner_lines = [line.strip("| ") for line in SQQ_BANNER.splitlines() if line.startswith("|")]
     title = banner_lines[0] if banner_lines else "Shell  Quant  Qualifier"
     author = banner_lines[1] if len(banner_lines) > 1 else "by J. PANG & Q. SUN"
-    rows: list[list[Any]] = []
-    rows.extend(
-        [
-            [title, "", "", "", "", ""],
-            [author, "", "", "", "", ""],
-            ["", "", "", "", "", ""],
-            ["Run Overview", "", "", "Frame Status", "", ""],
-            ["Working directory", run_info.get("working_dir", ""), "", "Frames total", len(data), ""],
-            ["Input", run_info.get("input", ""), "", "Frames ok", frames_ok_count(data), ""],
-            ["Output directory", run_info.get("output_dir", ""), "", "Frames failed", frames_failed_count(data), ""],
-            ["Config", run_info.get("config_file", "<built-in defaults>"), "", "Elapsed seconds", run_info.get("elapsed_seconds", ""), ""],
-            ["Topology", run_info.get("topology", "<none>"), "", "Workers", run_info.get("workers", ""), ""],
-            ["", "", "", "", "", ""],
-            ["Analysis Settings", "", "", "Main Counts", "", ""],
-            ["Graph mode", first_data_value(data, "connection_mode", run_info.get("graph_mode", "")), "", "Water molecules", sum_numeric_column(data, "n_waters"), ""],
-            ["Ring sizes", excel_scalar(config.get("ring", {}).get("sizes", "")), "", "Guest molecules", sum_numeric_column(data, "n_guests"), ""],
-            ["Quasi-cage sizes", f"{excel_scalar(config.get('quasi_cage', {}).get('base_sizes', 'auto'))} / {excel_scalar(config.get('quasi_cage', {}).get('side_sizes', 'auto'))}", "", "Connections", sum_numeric_column(data, "connection_count"), ""],
-            ["Quasi max layers", config.get("quasi_cage", {}).get("max_layers", ""), "", "Ring5 / Ring6", f"{sum_numeric_column(data, 'ring5')} / {sum_numeric_column(data, 'ring6')}", ""],
-            ["Cage sizes", excel_scalar(config.get("cage", {}).get("ring_sizes", "")), "", "Half / Quasi cage", f"{sum_numeric_column(data, 'half_cage_total')} / {sum_numeric_column(data, 'quasi_cage_total')}", ""],
-            ["Cage targets", dashboard_cage_targets(config), "", "Cage total", sum_numeric_column(data, "cage_total"), ""],
-            ["", "", "", "Empty / Occupied cage", f"{sum_numeric_column(data, 'cage_empty')} / {sum_numeric_column(data, 'cage_occupied')}", ""],
-            ["", "", "", "", "", ""],
-            ["Output Files", "", "", "Molecules", "", ""],
-            ["summary.xlsx", run_info.get("summary_xlsx", ""), "", "resname", "atoms total", ""],
-            ["run_config.yaml", run_info.get("run_config", ""), "", "", "", ""],
-        ]
-    )
-    for resname, total in molecule_totals(data).items():
-        rows.append(["", "", "", resname, total, ""])
-    rows.extend(
-        [
-            ["", "", "", "", "", ""],
-            ["Detailed sheets", "frame, graph, ring, half_cage, quasi_cage, cage, cage_occupancy, cage_isomer, f3f4, ice, config", "", "", "", ""],
-        ]
-    )
-    return pd.DataFrame(rows)
+    matched_files = run_info.get("matched_files", "")
+    try:
+        matched_count = int(matched_files)
+    except (TypeError, ValueError):
+        matched_count = 0
 
+    rows: list[list[Any]] = [
+        [title, ""],
+        [author, ""],
+        ["", ""],
+        ["Basic Information", ""],
+        ["Date", run_info.get("date", "")],
+        ["Start time", run_info.get("start_time", "")],
+        ["Finish time", run_info.get("finish_time", "")],
+        ["Time zone", run_info.get("time_zone", "")],
+        ["Duration (s)", run_info.get("elapsed_seconds", "")],
+        ["Working directory", run_info.get("working_dir", "")],
+        ["Input", run_info.get("input", "")],
+        ["Matched files", matched_files],
+    ]
+    if matched_count > 1:
+        rows.extend([
+            ["First file", run_info.get("first_file", "")],
+            ["Last file", run_info.get("last_file", "")],
+        ])
+    else:
+        rows.append(["Current file", run_info.get("first_file", "")])
+    rows.extend([
+        ["Output directory", run_info.get("output_dir", "")],
+        ["summary.xlsx", run_info.get("summary_xlsx", "")],
+        ["run_config.yaml", run_info.get("run_config", "")],
+        ["", ""],
+        ["Configuration", ""],
+        ["Config", run_info.get("config_file", "<built-in defaults>")],
+        ["Topology", run_info.get("topology", "<none>")],
+        ["Mode", run_info.get("mode", "")],
+        ["Graph mode", first_data_value(data, "connection_mode", run_info.get("graph_mode", ""))],
+        ["Ring sizes", excel_scalar(config.get("ring", {}).get("sizes", ""))],
+        ["Quasi-cage sizes", f"{excel_scalar(config.get('quasi_cage', {}).get('base_sizes', 'auto'))} / {excel_scalar(config.get('quasi_cage', {}).get('side_sizes', 'auto'))}"],
+        ["Quasi max layers", config.get("quasi_cage", {}).get("max_layers", "")],
+        ["Cage sizes", excel_scalar(config.get("cage", {}).get("ring_sizes", ""))],
+        ["Cage targets", dashboard_cage_targets(config)],
+        ["Other cages", config.get("cage", {}).get("output_other", False)],
+        ["Output layout", run_info.get("output_layout", "")],
+        ["Worker policy", run_info.get("worker_policy", "")],
+        ["Workers", run_info.get("workers", "")],
+        ["", ""],
+        ["Analysis Results", ""],
+        ["Frames total / ok / failed", f"{len(data)} / {frames_ok_count(data)} / {frames_failed_count(data)}"],
+        ["Water molecules", sum_numeric_column(data, "n_waters")],
+        ["Guest molecules", sum_numeric_column(data, "n_guests")],
+        ["Connections", sum_numeric_column(data, "connection_count")],
+    ])
+    for size in config.get("ring", {}).get("sizes", [5, 6]):
+        rows.append([f"Ring{size}", sum_numeric_column(data, f"ring{size}")])
+    rows.extend([
+        ["Half cage", sum_numeric_column(data, "half_cage_total")],
+        ["Quasi cage", sum_numeric_column(data, "quasi_cage_total")],
+        ["Cage total", sum_numeric_column(data, "cage_total")],
+        ["Empty cage", sum_numeric_column(data, "cage_empty")],
+        ["Occupied cage", sum_numeric_column(data, "cage_occupied")],
+        ["Ice-like waters", sum_numeric_column(data, "ice_like_waters")],
+    ])
+    return pd.DataFrame(rows)
 
 def frames_ok_count(data: pd.DataFrame) -> int:
     """Count successfully analyzed frames."""
@@ -697,44 +724,41 @@ def format_summary_dashboard_sheet(worksheet) -> None:
         top=Side(style="thin", color="CBD5E1"),
         bottom=Side(style="thin", color="CBD5E1"),
     )
-    widths = {"A": 24, "B": 72, "C": 4, "D": 24, "E": 20, "F": 4}
+    widths = {"A": 28, "B": 120}
     for column, width in widths.items():
         worksheet.column_dimensions[column].width = width
     worksheet.row_dimensions[1].height = 30
     worksheet.row_dimensions[2].height = 22
     worksheet.freeze_panes = "A4"
 
-    worksheet.merge_cells("A1:F1")
-    worksheet.merge_cells("A2:F2")
+    worksheet.merge_cells("A1:B1")
+    worksheet.merge_cells("A2:B2")
     for row in (1, 2):
         for cell in worksheet[row]:
             cell.fill = title_fill if row == 1 else author_fill
             cell.font = Font(color="3B2A14", bold=True, size=18 if row == 1 else 11)
             cell.alignment = Alignment(horizontal="center", vertical="center")
 
-    section_labels = {"Run Overview", "Frame Status", "Analysis Settings", "Main Counts", "Output Files", "Molecules"}
+    section_labels = {"Basic Information", "Configuration", "Analysis Results"}
     for row in worksheet.iter_rows():
         if row[0].row <= 2:
             continue
         for cell in row:
-            cell.alignment = Alignment(vertical="top", wrap_text=True)
+            cell.alignment = Alignment(horizontal="left", vertical="top", wrap_text=True)
             if cell.value not in (None, ""):
                 cell.border = thin_border
-        if row[0].value in section_labels or row[3].value in section_labels:
+        if row[0].value in section_labels:
             for cell in row:
-                if cell.value not in (None, ""):
-                    cell.fill = section_fill
-                    cell.font = Font(color="FFFFFF", bold=True)
-                    cell.alignment = Alignment(horizontal="center", vertical="center")
+                cell.fill = section_fill
+                cell.font = Font(color="FFFFFF", bold=True)
+                cell.alignment = Alignment(horizontal="left", vertical="center")
         else:
-            for cell in (row[0], row[3]):
-                if cell.value not in (None, ""):
-                    cell.fill = label_fill
-                    cell.font = Font(bold=True, color="0F172A")
-            for cell in (row[1], row[4]):
-                if cell.value not in (None, ""):
-                    cell.font = Font(color="111827")
-
+            if row[0].value not in (None, ""):
+                row[0].fill = label_fill
+                row[0].font = Font(bold=True, color="0F172A")
+            if row[1].value not in (None, ""):
+                row[1].font = Font(color="111827")
+                row[1].alignment = Alignment(horizontal="left", vertical="top", wrap_text=True)
 
 def format_table_sheet(worksheet) -> None:
     """Style plotting-friendly data sheets without changing their data shape."""
@@ -756,7 +780,7 @@ def format_table_sheet(worksheet) -> None:
         worksheet.column_dimensions[letter].width = width
     for row in worksheet.iter_rows(min_row=2):
         for cell in row:
-            cell.alignment = Alignment(vertical="top", wrap_text=True)
+            cell.alignment = Alignment(horizontal="left", vertical="top", wrap_text=True)
 
 
 def estimated_column_width(worksheet, column_index: int) -> int:

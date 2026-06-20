@@ -17,6 +17,28 @@ input frames
 
 The shared water graph is used by ring, half_cage, quasi_cage, cage, F3/F4, and ice analysis. The graph node is the water oxygen. A graph edge is an O-H...O hydrogen bond in `hbond` mode, an O-O neighbor in `oo` mode, or a user-supplied pair in `pairs` mode.
 
+## Analysis Modes and Workers
+
+Modes are discrete base presets, not a continuous 00-99 scale. The default mode is `50`.
+
+| Mode | Label | Graph | Ring sizes | Cage sizes | Other cages | Auto worker fraction |
+| --- | --- | --- | --- | --- | --- | --- |
+| `00` | rigorous | `hbond` | 4/5/6 | 4/5/6 | enabled | 25% |
+| `50` | standard | `auto` | 5/6 | 5/6 | disabled | 50% |
+| `99` | performance | `oo` | 5/6 | 5/6 | disabled | 90% |
+
+Mode application order is:
+
+```text
+built-in defaults -> mode preset -> config.yaml -> explicit CLI options
+```
+
+The mode preset controls graph mode, ring/cage size ranges, unconventional cage output, and the automatic worker fraction. It does not control `quasi_cage.max_layers` or output switches. L1 is therefore the default quasi-cage depth in every mode; L2/L3 require `--quasi-max-layers` or an explicit config value.
+
+An explicit `-b` / `--bond-mode {auto,hbond,oo,pairs}` overrides the graph mode from both the preset and `config.yaml`. `--pairs PAIRS.txt` implies pairs mode unless `-b pairs` is already given; it cannot be combined with another explicit bond mode.
+
+`parallel.workers: auto` calculates `floor(logical_cpu_count * mode_fraction)`, with a minimum of one and a maximum equal to the number of independent input files. `--workers N` overrides that calculation. Parallel execution is file-level and currently uses `ThreadPoolExecutor` for standalone GRO/XYZ files. A single file and XTC/TRR input run with one worker.
+
 ## Modules
 
 - `sqq/pipeline.py`: top-level analysis order, config merging, frame loop, output dispatch.
@@ -53,7 +75,7 @@ L2 = rings grown outward from L1
 L3 = rings grown outward from L2
 ```
 
-L2 and L3 may be dangling rings or connected dangling ring chains. They do not need to close. The default v0.1.2 configuration reports L1 quasi-cages and standard half-cages only; L2/L3 remain available by setting `quasi_cage.max_layers` or `--quasi-max-layers`.
+L2 and L3 may be dangling rings or connected dangling ring chains. They do not need to close. The default configuration reports L1 quasi-cages and standard half-cages only; L2/L3 remain available by setting `quasi_cage.max_layers` or `--quasi-max-layers`.
 
 `half_cage` is the standard subset of open patches:
 
@@ -203,4 +225,5 @@ The global workbook is `summary.xlsx`. It contains run metadata, per-frame count
 - Orthorhombic boxes are supported in the implemented PBC path.
 - Cage detection supports 4/5/6 faces only; 7-member rings remain available for ring and quasi_cage analysis.
 - L2/L3 quasi_cage growth is bounded for speed and is not an exhaustive enumeration of all possible outer-layer subsets.
+- Automatic workers parallelize independent GRO/XYZ files only; they do not parallelize topology search inside one frame.
 - CHILL-style ice classification is implemented, but separate atomistic Ih/Ic stacking assignment can be refined later.

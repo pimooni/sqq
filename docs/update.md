@@ -2,6 +2,34 @@
 
 This file records versioned update notes. New releases should be appended above older entries.
 
+## Version 0.1.3
+
+### Main Changes
+
+1. Added analysis mode presets
+   - `-m 00`: rigorous hydrogen-bond analysis with 4/5/6 ring and cage faces, unconventional cages enabled, and 25% automatic workers.
+   - `-m 50`: standard default using `auto` graph selection, 5/6 faces, standard cages, and 50% automatic workers.
+   - `-m 99`: performance screening using O-O connectivity, 5/6 faces, standard cages, and 90% automatic workers.
+   - Modes do not change `quasi_cage.max_layers`; all modes retain the L1 default.
+
+2. Unified parallel terminology
+   - Replaced `--n-jobs` and `parallel.n_jobs` with `--workers` and `parallel.workers`.
+   - Automatic worker counts use the mode CPU fraction and are capped by the number of independent GRO/XYZ files.
+   - Single-file and XTC/TRR runs remain serial.
+
+3. CLI and reporting updates
+   - Added `-s` as the short alias for `--sizes`.
+   - Added `-b` / `--bond-mode {auto,hbond,oo,pairs}` as an explicit graph-mode override.
+   - Documented `--no-info` beside `--no-gro` and `--no-xlsx`.
+   - Terminal and `summary.xlsx` configuration sections now report the active mode, worker policy, and actual worker count.
+
+4. Project description
+   - Standardized the README description as `SQQ: Python Joint Toolkit for Water-Shell Topology Analysis.`
+
+### Short Summary
+
+Version 0.1.3 adds reproducible analysis presets and mode-based file-level worker allocation while keeping quasi-cage layer depth and output selection under explicit user control.
+
 ## Version 0.1.2
 
 ### Main Changes

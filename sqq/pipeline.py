@@ -1,9 +1,13 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 """Top-level analysis pipeline for the SQQ command line."""
 
 from argparse import Namespace
+from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from threading import Event, Lock, Thread
+import os
+import sys
 from pathlib import Path
 from time import perf_counter
 from typing import Any, Callable
@@ -11,11 +15,21 @@ from typing import Any, Callable
 try:
     from tqdm import tqdm
 except ImportError:  # pragma: no cover - exercised in minimal source-tree runs.
-    def tqdm(iterable, total=None, desc=None):
-        return iterable
+    class _NullProgress:
+        def update(self, n: int = 1) -> None:
+            pass
+
+        def set_postfix_str(self, text: str, refresh: bool = True) -> None:
+            pass
+
+        def close(self) -> None:
+            pass
+
+    def tqdm(iterable=None, total=None, desc=None, **kwargs):
+        return iterable if iterable is not None else _NullProgress()
 
 from .banner import SQQ_BANNER
-from .config import load_config
+from .config import load_config, mode_label, mode_worker_fraction
 from .core.cage import find_cages
 from .core.f3f4 import compute_f3f4
 from .core.graph import build_water_graph
@@ -24,7 +38,7 @@ from .core.quasi_cage import find_cage_patches
 from .core.ring import find_rings
 from .core.selection import select_guests, select_waters
 from .io.gro_writer import write_cage_gro_files, write_half_cage_gro_files, write_ice_gro_file, write_quasi_cage_gro_files, write_ring_gro_files
-from .io.summary import failed_row, result_row, write_f3f4, write_frame_info, write_membership, write_summary, write_vmd_script
+from .io.summary import dashboard_cage_targets, failed_row, result_row, write_f3f4, write_frame_info, write_membership, write_summary, write_vmd_script
 from .io.trajectory import expand_inputs, read_frames
 from .models import Cage, CagePatch, Frame, FrameResult
 
@@ -34,8 +48,9 @@ PARALLEL_SUFFIXES = {".gro", ".xyz"}
 
 def analyze(args: Namespace) -> None:
     """Run SQQ analysis from parsed command-line arguments."""
+    run_started_at = datetime.now().astimezone()
     started_at = perf_counter()
-    config = load_config(Path(args.config) if args.config else None)
+    config = load_config(Path(args.config) if args.config else None, mode=getattr(args, "mode", None))
     apply_cli_overrides(config, args)
 
     # Directory input follows a one-file-per-frame workflow.
@@ -47,16 +62,18 @@ def analyze(args: Namespace) -> None:
     outdir = Path(args.output)
     outdir.mkdir(parents=True, exist_ok=True)
 
-    n_jobs = resolve_n_jobs(config["parallel"].get("n_jobs"), len(paths))
     topology = Path(args.topology) if args.topology else None
-    print_run_header(args, config, input_path, outdir, paths, topology, n_jobs)
-    if n_jobs > 1 and can_parallelize_paths(paths, topology):
-        rows = analyze_paths_parallel(paths, outdir, config, n_jobs=n_jobs, strict=bool(args.strict))
+    parallelizable = can_parallelize_paths(paths, topology)
+    workers = resolve_workers(config["parallel"].get("workers"), len(paths), mode=config.get("mode", "50")) if parallelizable else 1
+    print_run_header(args, config, input_path, outdir, paths, topology, workers, run_started_at)
+    if workers > 1 and parallelizable:
+        rows = analyze_paths_parallel(paths, outdir, config, workers=workers, strict=bool(args.strict))
     else:
-        rows = analyze_paths_serial(paths, outdir, config, topology=topology, strict=bool(args.strict))
+        rows = analyze_paths_serial(paths, outdir, config, topology=topology, strict=bool(args.strict), total_started_at=started_at)
 
     elapsed_seconds = perf_counter() - started_at
-    run_info = build_run_info(args, config, input_path, outdir, paths, topology, n_jobs, elapsed_seconds)
+    run_finished_at = datetime.now().astimezone()
+    run_info = build_run_info(args, config, input_path, outdir, paths, topology, workers, elapsed_seconds, run_started_at, run_finished_at)
     write_summary(rows, outdir, config, write_xlsx=config["output"]["write_xlsx_summary"], run_info=run_info)
     print(f"Wrote SQQ results: {outdir}")
 
@@ -68,15 +85,25 @@ def build_run_info(
     outdir: Path,
     paths: list[Path],
     topology: Path | None,
-    n_jobs: int,
+    workers: int,
     elapsed_seconds: float,
+    started_at_wall: datetime,
+    finished_at_wall: datetime,
 ) -> dict[str, Any]:
     """Collect run-level metadata for the summary workbook."""
     info: dict[str, Any] = {
         "working_dir": str(Path.cwd()),
         "input": str(input_path),
         "output_dir": str(outdir.resolve()),
+        "date": started_at_wall.strftime("%Y-%m-%d"),
+        "start_time": started_at_wall.strftime("%H:%M:%S"),
+        "finish_time": finished_at_wall.strftime("%H:%M:%S"),
+        "started_at": started_at_wall.isoformat(timespec="seconds"),
+        "finished_at": finished_at_wall.isoformat(timespec="seconds"),
+        "time_zone": started_at_wall.tzname() or "",
         "config_file": args.config or "<built-in defaults>",
+        "mode": f"{config.get('mode', '50')} ({mode_label(config.get('mode', '50'))})",
+        "worker_policy": worker_policy_text(config),
         "topology": str(topology) if topology else "<none>",
         "matched_files": len(paths),
         "elapsed_seconds": round(elapsed_seconds, 3),
@@ -86,7 +113,7 @@ def build_run_info(
         "quasi_cage_side_sizes": config["quasi_cage"].get("side_sizes", "auto"),
         "cage_sizes": config["cage"].get("ring_sizes", [5, 6]),
         "output_layout": config["output"].get("structure_layout", "grouped"),
-        "workers": n_jobs,
+        "workers": workers,
         "summary_xlsx": str((outdir / "summary.xlsx").resolve()),
         "run_config": str((outdir / "run_config.yaml").resolve()),
     }
@@ -103,30 +130,225 @@ def print_run_header(
     outdir: Path,
     paths: list[Path],
     topology: Path | None,
-    n_jobs: int,
+    workers: int,
+    started_at_wall: datetime,
 ) -> None:
-    """Print a compact run header before tqdm starts."""
+    """Print static run information before the live progress display starts."""
     print(SQQ_BANNER)
-    print("Run information")
-    print(f"  working_dir        : {Path.cwd()}")
-    print(f"  input              : {input_path}")
-    print(f"  output             : {outdir}")
-    print(f"  config             : {args.config or '<built-in defaults>'}")
-    print(f"  topology           : {topology or '<none>'}")
-    print(f"  matched_files      : {len(paths)}")
-    if len(paths) == 1:
-        print(f"  current_file       : {paths[0]}")
-    else:
-        print(f"  first_file         : {paths[0]}")
-        print(f"  last_file          : {paths[-1]}")
-    print(f"  graph_mode         : {config['graph']['bond_mode']}")
-    print(f"  ring_sizes         : {config['ring']['sizes']}")
-    print(f"  quasi_base/side    : {config['quasi_cage'].get('base_sizes', 'auto')} / {config['quasi_cage'].get('side_sizes', 'auto')}")
-    print(f"  cage_sizes         : {config['cage'].get('ring_sizes', [5, 6])}")
-    print(f"  other_cages        : {config['cage'].get('output_other', False)}")
-    print(f"  output_layout      : {config['output'].get('structure_layout', 'grouped')}")
-    print(f"  workers            : {n_jobs}")
+    print("Basic Information")
+    print_terminal_field("date", started_at_wall.strftime("%Y-%m-%d"))
+    print_terminal_field("start_time", started_at_wall.strftime("%H:%M:%S"))
+    print_terminal_field("working_dir", Path.cwd())
+    print_terminal_field("input", input_path)
+    print_terminal_field("matched_files", len(paths))
+    print_terminal_field("output", outdir)
     print("")
+    print("Configuration")
+    print_terminal_field("config", args.config or "<built-in defaults>")
+    print_terminal_field("topology", topology or "<none>")
+    print_terminal_field("mode", f"{config.get('mode', '50')} ({mode_label(config.get('mode', '50'))})")
+    print_terminal_field("graph_mode", config["graph"]["bond_mode"])
+    print_terminal_field("ring_sizes", config["ring"]["sizes"])
+    print_terminal_field("quasi_cage_sizes", f"{config['quasi_cage'].get('base_sizes', 'auto')} / {config['quasi_cage'].get('side_sizes', 'auto')}")
+    print_terminal_field("quasi_max_layers", config["quasi_cage"].get("max_layers", ""))
+    print_terminal_field("cage_sizes", config["cage"].get("ring_sizes", [5, 6]))
+    print_terminal_field("cage_targets", dashboard_cage_targets(config))
+    print_terminal_field("other_cages", config["cage"].get("output_other", False))
+    print_terminal_field("output_layout", config["output"].get("structure_layout", "grouped"))
+    print_terminal_field("worker_policy", worker_policy_text(config))
+    print_terminal_field("workers", workers)
+    print("")
+
+
+TERMINAL_LABEL_WIDTH = 22
+PROGRESS_BAR_WIDTH = 25
+
+
+def print_terminal_field(label: str, value: Any) -> None:
+    """Print one aligned terminal key-value row."""
+    print(f"  {label:<{TERMINAL_LABEL_WIDTH}}: {safe_terminal_text(value)}")
+
+
+def format_terminal_value(value: Any) -> str:
+    """Format terminal values compactly without Python container brackets."""
+    if isinstance(value, bool):
+        return str(value).lower()
+    if isinstance(value, (list, tuple, set)):
+        return ",".join(str(item) for item in value)
+    return str(value)
+
+
+def safe_terminal_text(value: Any) -> str:
+    """Avoid UnicodeEncodeError on legacy Windows consoles."""
+    text = ascii_superscript_text(format_terminal_value(value))
+    encoding = getattr(sys.stdout, "encoding", None) or "utf-8"
+    return text.encode(encoding, errors="replace").decode(encoding, errors="replace")
+
+
+SUPERSCRIPT_DIGITS = {
+    "⁰": "0",
+    "¹": "1",
+    "²": "2",
+    "³": "3",
+    "⁴": "4",
+    "⁵": "5",
+    "⁶": "6",
+    "⁷": "7",
+    "⁸": "8",
+    "⁹": "9",
+    "⁻": "-",
+}
+
+
+def ascii_superscript_text(text: str) -> str:
+    """Convert Unicode superscripts to compact ASCII exponents for terminal output."""
+    result: list[str] = []
+    in_superscript = False
+    for char in text:
+        if char in SUPERSCRIPT_DIGITS:
+            if not in_superscript:
+                result.append("^")
+            result.append(SUPERSCRIPT_DIGITS[char])
+            in_superscript = True
+            continue
+        if in_superscript and char.isdigit():
+            result.append(" ")
+        in_superscript = False
+        result.append(char)
+    return "".join(result)
+
+
+def format_seconds(seconds: float) -> str:
+    """Format elapsed seconds for the live terminal display."""
+    return f"{max(seconds, 0.0):.1f} s"
+
+
+class RunProgressDisplay:
+    """Render per-run progress with current stage, frame, and total timings."""
+
+    def __init__(self, total: int, total_started_at: float) -> None:
+        self.total = total
+        self.total_started_at = total_started_at
+        self.completed = 0
+        self.failed = 0
+        self.current_index: int | None = None
+        self.current_file = "waiting"
+        self.stage = "waiting"
+        self.frame_started_at = perf_counter()
+        self.stage_started_at = perf_counter()
+        self._lock = Lock()
+        self._stop_event = Event()
+        self._rendered_lines = 0
+        self._interactive = bool(getattr(sys.stdout, "isatty", lambda: False)())
+        self._progress = None if self._interactive else tqdm(total=total, desc="Files", unit="file")
+        self._thread: Thread | None = None
+        self._render()
+        if self._interactive:
+            self._thread = Thread(target=self._tick, daemon=True)
+            self._thread.start()
+
+    def start_frame(self, frame_index: int, frame_name: str) -> Callable[[str], None]:
+        """Select the active frame and return its stage callback."""
+        with self._lock:
+            now = perf_counter()
+            self.current_index = frame_index
+            self.current_file = frame_name
+            self.stage = "reading frame"
+            self.frame_started_at = now
+            self.stage_started_at = now
+            self._render_locked()
+        return self.update_stage
+
+    def update_stage(self, stage: str) -> None:
+        """Update the active stage and reset the stage timer when it changes."""
+        with self._lock:
+            if stage != self.stage:
+                self.stage = stage
+                self.stage_started_at = perf_counter()
+            self._render_locked()
+
+    def complete_frame(self, success: bool) -> None:
+        """Mark the current frame as finished and refresh the display."""
+        with self._lock:
+            self.completed += 1
+            if not success:
+                self.failed += 1
+            if self._progress is not None:
+                self._progress.update(1)
+            self._render_locked()
+
+    def close(self) -> None:
+        """Stop background refresh and close any progress backend."""
+        self._stop_event.set()
+        if self._thread is not None:
+            self._thread.join(timeout=0.2)
+        with self._lock:
+            self._render_locked()
+        if self._progress is not None:
+            self._progress.close()
+
+    def _tick(self) -> None:
+        while not self._stop_event.wait(1.0):
+            self._render()
+
+    def _render(self) -> None:
+        with self._lock:
+            self._render_locked()
+
+    def _render_locked(self) -> None:
+        if self._interactive:
+            lines = self._panel_lines()
+            if self._rendered_lines:
+                sys.stdout.write(f"\033[{self._rendered_lines}F")
+            for line in lines:
+                sys.stdout.write("\r\033[K" + line + "\n")
+            sys.stdout.flush()
+            self._rendered_lines = len(lines)
+            return
+        if self._progress is not None and hasattr(self._progress, "set_postfix_str"):
+            self._progress.set_postfix_str(self._postfix_text(), refresh=True)
+
+    def _panel_lines(self) -> list[str]:
+        return [
+            "Analysis Progress",
+            f"  {'completed_files':<{TERMINAL_LABEL_WIDTH}}: {self.completed} / {self.total}  [ {self.failed} failed ]",
+            f"  {'current_file':<{TERMINAL_LABEL_WIDTH}}: {self._current_file_text()}",
+            f"  {'stage':<{TERMINAL_LABEL_WIDTH}}: {self.stage}",
+            f"  {'stage / frame / total':<{TERMINAL_LABEL_WIDTH}}: {self._time_text()}",
+            "",
+            self._files_bar(),
+        ]
+
+    def _postfix_text(self) -> str:
+        return (
+            f"completed_files: {self.completed} / {self.total} [ {self.failed} failed ]; "
+            f"current_file: {self._current_file_text()}; "
+            f"stage: {self.stage}; "
+            f"stage / frame / total: {self._time_text()}"
+        )
+
+    def _current_file_text(self) -> str:
+        if self.current_index is None:
+            return "waiting"
+        if self.total <= 1:
+            return self.current_file
+        return f"{self.current_index + 1} / {self.total}  {self.current_file}"
+
+    def _time_text(self) -> str:
+        now = perf_counter()
+        stage_elapsed = now - self.stage_started_at
+        frame_elapsed = now - self.frame_started_at if self.current_index is not None else 0.0
+        total_elapsed = now - self.total_started_at
+        return f"{format_seconds(stage_elapsed)} / {format_seconds(frame_elapsed)} / {format_seconds(total_elapsed)}"
+
+    def _files_bar(self) -> str:
+        if self.total <= 0:
+            fraction = 1.0
+        else:
+            fraction = min(max(self.completed / self.total, 0.0), 1.0)
+        filled = int(round(PROGRESS_BAR_WIDTH * fraction))
+        bar = "█" * filled + " " * (PROGRESS_BAR_WIDTH - filled)
+        return f"Files: {fraction * 100:3.0f}%|{bar}| {self.completed}/{self.total} completed"
 
 
 def analyze_paths_serial(
@@ -135,33 +357,37 @@ def analyze_paths_serial(
     config: dict[str, Any],
     topology: Path | None,
     strict: bool,
+    total_started_at: float,
 ) -> list[dict[str, Any]]:
     """Analyze frames in input order."""
     rows: list[dict[str, Any]] = []
     frames = read_frames(paths, topology=topology, xtc_stride=int(config["input"].get("xtc_stride", 1)))
-    progress = tqdm(frames, total=len(paths), desc="SQQ analyze")
-    for frame_index, frame in enumerate(progress):
-        if hasattr(progress, "set_description_str"):
-            progress.set_description_str(f"SQQ {frame.name}")
-        rows.append(process_frame(frame_index, frame, config, outdir, strict=strict, stage_callback=progress_stage_callback(progress, frame.name)))
+    progress = RunProgressDisplay(total=len(paths), total_started_at=total_started_at)
+    try:
+        for frame_index, frame in enumerate(frames):
+            callback = progress.start_frame(frame_index, frame.name)
+            row = process_frame(frame_index, frame, config, outdir, strict=strict, stage_callback=callback)
+            rows.append(row)
+            progress.complete_frame(row.get("status") == "ok")
+    finally:
+        progress.close()
     return rows
-
 
 def analyze_paths_parallel(
     paths: list[Path],
     outdir: Path,
     config: dict[str, Any],
-    n_jobs: int,
+    workers: int,
     strict: bool,
 ) -> list[dict[str, Any]]:
     """Analyze independent coordinate files concurrently."""
     rows_by_index: dict[int, dict[str, Any]] = {}
-    with ThreadPoolExecutor(max_workers=n_jobs) as executor:
+    with ThreadPoolExecutor(max_workers=workers) as executor:
         futures = {
             executor.submit(process_single_file_path, frame_index, path, config, outdir, strict): frame_index
             for frame_index, path in enumerate(paths)
         }
-        for future in tqdm(as_completed(futures), total=len(futures), desc=f"SQQ analyze ({n_jobs} jobs)"):
+        for future in tqdm(as_completed(futures), total=len(futures), desc=f"SQQ analyze ({workers} workers)"):
             frame_index, row = future.result()
             rows_by_index[frame_index] = row
     return [rows_by_index[index] for index in sorted(rows_by_index)]
@@ -203,18 +429,6 @@ def process_frame(
             raise
         return failed_row(frame.name, str(frame.source or ""), str(exc))
 
-
-def progress_stage_callback(progress: Any, frame_name: str) -> Callable[[str], None] | None:
-    """Build a tqdm-aware callback for the current frame stage."""
-    if not hasattr(progress, "set_postfix_str"):
-        return None
-
-    def update(stage: str) -> None:
-        if hasattr(progress, "set_description_str"):
-            progress.set_description_str(f"SQQ {frame_name}")
-        progress.set_postfix_str(stage, refresh=True)
-
-    return update
 
 
 def report_stage(callback: Callable[[str], None] | None, stage: str) -> None:
@@ -269,15 +483,28 @@ def remove_optional_vmd_output(result: FrameResult, frame_dir: Path) -> None:
     (frame_dir / f"{result.frame.name}_view.vmd.tcl").unlink(missing_ok=True)
 
 
-def resolve_n_jobs(value: Any, n_paths: int) -> int:
-    """Parse the frame-level worker count."""
+def worker_policy_text(config: dict[str, Any]) -> str:
+    """Describe the active automatic or explicit worker policy."""
+    value = config.get("parallel", {}).get("workers", "auto")
     if value in (None, "", "auto"):
-        return 1
-    try:
-        jobs = int(value)
-    except (TypeError, ValueError) as exc:
-        raise ValueError("parallel.n_jobs / --n-jobs must be 'auto' or a positive integer.") from exc
-    return max(1, min(jobs, max(1, n_paths)))
+        percent = int(round(mode_worker_fraction(config.get("mode", "50")) * 100))
+        return f"auto ({percent}% of logical CPUs)"
+    return f"explicit ({value})"
+
+
+def resolve_workers(value: Any, n_paths: int, mode: Any = "50", cpu_total: int | None = None) -> int:
+    """Resolve the frame-level worker count and cap it by independent files."""
+    if value in (None, "", "auto"):
+        logical_cpus = max(1, int(cpu_total if cpu_total is not None else (os.cpu_count() or 1)))
+        requested = max(1, int(logical_cpus * mode_worker_fraction(mode)))
+    else:
+        try:
+            requested = int(value)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("parallel.workers / --workers must be 'auto' or a positive integer.") from exc
+        if requested < 1:
+            raise ValueError("parallel.workers / --workers must be 'auto' or a positive integer.")
+    return min(requested, max(1, n_paths))
 
 
 def can_parallelize_paths(paths: list[Path], topology: Path | None) -> bool:
@@ -324,13 +551,20 @@ def apply_cli_overrides(config: dict[str, Any], args: Namespace) -> None:
         config["cage"]["output_other"] = False
     if getattr(args, "other_max_faces", None) is not None:
         config["cage"]["other_max_faces"] = args.other_max_faces
+    bond_mode = getattr(args, "bond_mode", None)
     if args.pairs:
-        config["graph"]["bond_mode"] = "pairs"
+        if bond_mode not in (None, "pairs"):
+            raise ValueError("--pairs can only be combined with --bond-mode pairs.")
         config["graph"]["pair_file"] = args.pairs
+        config["graph"]["bond_mode"] = "pairs"
+    elif bond_mode is not None:
+        config["graph"]["bond_mode"] = bond_mode
+    if config["graph"]["bond_mode"] == "pairs" and not config["graph"].get("pair_file"):
+        raise ValueError("--bond-mode pairs requires --pairs PAIRS.txt or graph.pair_file in config.yaml.")
     if args.pair_id:
         config["graph"]["pair_id"] = args.pair_id
-    if args.n_jobs is not None:
-        config["parallel"]["n_jobs"] = args.n_jobs
+    if args.workers is not None:
+        config["parallel"]["workers"] = args.workers
     if getattr(args, "output_layout", None):
         config["output"]["structure_layout"] = args.output_layout
     if getattr(args, "no_info", False):

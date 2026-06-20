@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 """Configuration defaults and YAML/JSON loading."""
 
@@ -13,9 +13,39 @@ except ImportError:  # pragma: no cover - exercised in minimal source-tree runs.
     yaml = None
 
 
+DEFAULT_MODE = "50"
+MODE_PRESETS: dict[str, dict[str, Any]] = {
+    "00": {
+        "label": "rigorous",
+        "worker_fraction": 0.25,
+        "bond_mode": "hbond",
+        "ring_sizes": [4, 5, 6],
+        "cage_sizes": [4, 5, 6],
+        "output_other_cages": True,
+    },
+    "50": {
+        "label": "standard",
+        "worker_fraction": 0.50,
+        "bond_mode": "auto",
+        "ring_sizes": [5, 6],
+        "cage_sizes": [5, 6],
+        "output_other_cages": False,
+    },
+    "99": {
+        "label": "performance",
+        "worker_fraction": 0.90,
+        "bond_mode": "oo",
+        "ring_sizes": [5, 6],
+        "cage_sizes": [5, 6],
+        "output_other_cages": False,
+    },
+}
+
+
 # Defaults are intentionally explicit so a run can be reproduced from
 # run_config.yaml without relying on hidden command-line assumptions.
 DEFAULT_CONFIG: dict[str, Any] = {
+    "mode": DEFAULT_MODE,
     "input": {
         "pattern": "*.gro",
         "recursive": False,
@@ -102,7 +132,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "center_resname": "CNT",
     },
     "parallel": {
-        "n_jobs": "auto",
+        "workers": "auto",
     },
     "debug": {
         "use_networkx_checks": False,
@@ -110,24 +140,63 @@ DEFAULT_CONFIG: dict[str, Any] = {
 }
 
 
-def load_config(path: Path | None) -> dict[str, Any]:
-    """Load a config file and merge it over built-in defaults."""
-    config = deepcopy(DEFAULT_CONFIG)
-    if path is None:
-        return config
-    with path.open("r", encoding="utf-8-sig") as handle:
-        text = handle.read()
-    if yaml is not None:
-        user_config = yaml.safe_load(text) or {}
-    else:
-        # Source-tree smoke tests can run without PyYAML; installed SQQ uses YAML.
-        try:
-            user_config = json.loads(text) if text.strip() else {}
-        except json.JSONDecodeError as exc:
-            raise RuntimeError("Reading YAML config files requires PyYAML. Install with `pip install -e .`.") from exc
-    if not isinstance(user_config, dict):
-        raise ValueError(f"Config file must contain a YAML mapping: {path}")
-    return merge_config(config, user_config)
+def normalize_mode(value: Any) -> str:
+    """Normalize and validate a two-digit analysis mode."""
+    text = str(value).strip()
+    if text.isdigit():
+        text = text.zfill(2)
+    if text not in MODE_PRESETS:
+        choices = ", ".join(MODE_PRESETS)
+        raise ValueError(f"mode must be one of: {choices}")
+    return text
+
+
+def mode_label(mode: Any) -> str:
+    """Return the human-readable mode label."""
+    return str(MODE_PRESETS[normalize_mode(mode)]["label"])
+
+
+def mode_worker_fraction(mode: Any) -> float:
+    """Return the automatic worker fraction for a mode."""
+    return float(MODE_PRESETS[normalize_mode(mode)]["worker_fraction"])
+
+
+def apply_mode_preset(config: dict[str, Any], mode: Any) -> dict[str, Any]:
+    """Apply the scientific and worker-policy base settings for one mode."""
+    normalized = normalize_mode(mode)
+    preset = MODE_PRESETS[normalized]
+    config["mode"] = normalized
+    config["graph"]["bond_mode"] = preset["bond_mode"]
+    config["ring"]["sizes"] = list(preset["ring_sizes"])
+    config["quasi_cage"]["base_sizes"] = "auto"
+    config["quasi_cage"]["side_sizes"] = "auto"
+    config["cage"]["ring_sizes"] = list(preset["cage_sizes"])
+    config["cage"]["output_other"] = bool(preset["output_other_cages"])
+    return config
+
+
+def load_config(path: Path | None, mode: Any = None) -> dict[str, Any]:
+    """Load a mode preset, then merge user configuration over it."""
+    user_config: dict[str, Any] = {}
+    if path is not None:
+        with path.open("r", encoding="utf-8-sig") as handle:
+            text = handle.read()
+        if yaml is not None:
+            user_config = yaml.safe_load(text) or {}
+        else:
+            # Source-tree smoke tests can run without PyYAML; installed SQQ uses YAML.
+            try:
+                user_config = json.loads(text) if text.strip() else {}
+            except json.JSONDecodeError as exc:
+                raise RuntimeError("Reading YAML config files requires PyYAML. Install with `pip install -e .`.") from exc
+        if not isinstance(user_config, dict):
+            raise ValueError(f"Config file must contain a YAML mapping: {path}")
+
+    selected_mode = normalize_mode(mode if mode is not None else user_config.get("mode", DEFAULT_MODE))
+    config = apply_mode_preset(deepcopy(DEFAULT_CONFIG), selected_mode)
+    merge_config(config, user_config)
+    config["mode"] = selected_mode
+    return config
 
 
 def merge_config(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:

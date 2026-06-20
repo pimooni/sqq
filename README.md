@@ -1,8 +1,8 @@
 # SQQ
 
-**SQQ (Shell Quant Qualifier)** analyzes water-shell topology in molecular dynamics frames.
+**SQQ: Python Joint Toolkit for Water-Shell Topology Analysis.**
 
-It builds a water network, finds rings, standard half-cages, quasi-cages, closed cages, cage guest occupancy, F3/F4 metrics, and ice-like waters. Detailed algorithms are documented in `docs/design.md`; version notes are documented in `docs/update.md`.
+SQQ builds a water network, finds rings, standard half-cages, quasi-cages, closed cages, cage guest occupancy, F3/F4 metrics, and ice-like waters. Detailed algorithms are documented in `docs/design.md`; version notes are documented in `docs/update.md`.
 
 ## Install
 
@@ -64,6 +64,24 @@ XTC/TRR trajectory with a topology file:
 sqq analyze -i traj.xtc --top topol.gro -c config.yaml -o ./result_sqq
 ```
 
+## Analysis Modes
+
+`-m` / `--mode` selects one of three base presets:
+
+| Mode | Purpose | Water graph | Ring/cage sizes | Other cages | Automatic workers |
+| --- | --- | --- | --- | --- | --- |
+| `00` | Rigorous | Hydrogen bond | 4, 5, 6 | Enabled | 25% of logical CPUs |
+| `50` | Standard (default) | Auto | 5, 6 | Disabled | 50% of logical CPUs |
+| `99` | Performance screening | O-O connectivity | 5, 6 | Disabled | 90% of logical CPUs |
+
+```bash
+sqq analyze -i ./gro -m 00 -o ./result_rigorous
+sqq analyze -i ./gro -m 50 -o ./result_standard
+sqq analyze -i ./gro -m 99 -o ./result_performance
+```
+
+Modes do not change `quasi_cage.max_layers`; L1 remains the default in every mode. Use `--quasi-max-layers` explicitly for L2/L3. Automatic workers are capped by the number of independent GRO/XYZ files. A single coordinate file or XTC/TRR trajectory still runs with one worker. `--workers N` overrides the mode percentage.
+
 ## Common Commands
 
 Write a default configuration file:
@@ -75,7 +93,7 @@ sqq init -o config.yaml
 Analyze 4/5/6 rings, quasi-cages, and cages:
 
 ```bash
-sqq analyze -i md.gro --sizes 4,5,6 -o ./result_sqq_456
+sqq analyze -i md.gro -s 4,5,6 -o ./result_sqq_456
 ```
 
 Enable outer quasi-cage layers:
@@ -84,21 +102,24 @@ Enable outer quasi-cage layers:
 sqq analyze -i md.gro --quasi-max-layers 3 -o ./result_sqq_l3
 ```
 
-Disable structure GRO output and keep only reports:
+Disable per-frame info or structure GRO output:
 
 ```bash
+sqq analyze -i md.gro --no-info -o ./result_sqq_no_info
 sqq analyze -i md.gro --no-gro -o ./result_sqq_report
 ```
 
 Parallelize independent GRO/XYZ files:
 
 ```bash
-sqq analyze -i ./gro --pattern "*.gro" --n-jobs 4 -o ./result_sqq
+sqq analyze -i ./gro --pattern "*.gro" --workers 4 -o ./result_sqq
 ```
 
 ## Important Defaults
 
 ```yaml
+mode: "50"
+
 graph:
   bond_mode: auto
   oo_cutoff_nm: 0.35
@@ -129,32 +150,65 @@ output:
   write_gro: true
   write_xlsx_summary: true
   structure_layout: grouped
+
+parallel:
+  workers: auto
 ```
 
 Configuration priority:
 
 ```text
-built-in defaults < config.yaml < command-line options
+built-in defaults < mode preset < config.yaml < explicit command-line options
 ```
 
 ## Useful Options
 
-| Option | Meaning |
-| --- | --- |
-| `-i, --input` | Input file, directory, or glob pattern |
-| `--pattern "*.gro"` | File pattern for directory input |
-| `--top topol.gro` | Topology/structure file for XTC/TRR input |
-| `-c, --config config.yaml` | User configuration file |
-| `-o, --output DIR` | Output directory |
-| `--sizes 4,5,6` | Set ring, quasi-cage, and cage ring sizes together |
-| `--ring-sizes 4,5,6` | Override only ring search sizes |
-| `--quasi-sizes 4,5,6` | Override quasi-cage base and side sizes |
-| `--quasi-max-layers N` | Report quasi-cage layers up to N; default is 1 |
-| `--cage-sizes 4,5,6` | Override cage face sizes |
-| `--other-cages` | Include generated unconventional 4/5/6 cage targets |
-| `--no-gro` | Disable all structure GRO files |
-| `--no-xlsx` | Disable `summary.xlsx` |
-| `--output-layout flat` | Write all per-frame GRO files in one folder |
+| Option | Possible values | Meaning |
+| --- | --- | --- |
+| `-i, --input INPUT` | GRO/XYZ/XTC/TRR file, directory, or glob | Input coordinate file or trajectory source |
+| `-c, --config FILE` | YAML or JSON file | User configuration file |
+| `-o, --output DIR` | Directory path | Output directory |
+| `-m, --mode MODE` | `00`, `50`, `99` | Select rigorous, standard, or performance preset |
+| `-b, --bond-mode MODE` | `auto`, `hbond`, `oo`, `pairs` | Override the water-graph connection mode |
+| `-s, --sizes SIZES` | Comma-separated `4,5,6` subset | Set ring, quasi-cage, and cage face sizes together |
+| `--pattern PATTERN` | Glob such as `*.gro` | File pattern for directory input |
+| `--top FILE.gro` | GRO topology file | Topology/structure file for XTC/TRR input |
+| `--recursive` | Flag: present or omitted | Search input directories recursively |
+| `--ring-sizes SIZES` | Comma-separated `4,5,6,7` subset | Override only ring search sizes |
+| `--quasi-sizes SIZES` | Comma-separated `4,5,6,7` subset | Override quasi-cage base and side sizes together |
+| `--quasi-base-sizes SIZES` | Comma-separated `4,5,6,7` subset | Override quasi-cage base-ring sizes |
+| `--quasi-side-sizes SIZES` | Comma-separated `4,5,6,7` subset | Override quasi-cage side-ring sizes |
+| `--quasi-max-layers N` | Positive integer; `1`-`3` documented | Report quasi-cage layers up to N; default is 1 |
+| `--cage-sizes SIZES` | Comma-separated `4,5,6` subset | Override cage face sizes |
+| `--other-cages` | Flag: present or omitted | Include generated unconventional cages |
+| `--no-other-cages` | Flag: present or omitted | Disable generated unconventional cages |
+| `--other-max-faces N` | Positive integer | Maximum face count for unconventional cages |
+| `--pairs FILE` | Text pair-map file | Supply explicit water-network edges and enable pairs mode |
+| `--pair-id KIND` | `resid`, `atomid`, `oxygen_index` | Select the identifier type used in the pair file |
+| `--workers N` | `auto` or positive integer | Override the mode-based automatic worker count |
+| `--strict` | Flag: present or omitted | Stop on the first failed frame |
+| `--output-layout LAYOUT` | `grouped`, `flat` | Select the per-frame structure-file layout |
+| `--no-info` | Flag: present or omitted | Disable per-frame `*_info.md` files |
+| `--no-gro` | Flag: present or omitted | Disable all structure GRO files |
+| `--no-ring-gro` | Flag: present or omitted | Disable ring GRO files |
+| `--no-half-cage-gro` | Flag: present or omitted | Disable half-cage GRO files |
+| `--no-quasi-cage-gro` | Flag: present or omitted | Disable quasi-cage GRO files |
+| `--no-cage-gro` | Flag: present or omitted | Disable cage GRO files |
+| `--no-ice-gro` | Flag: present or omitted | Disable ice GRO files |
+| `--no-xlsx` | Flag: present or omitted | Disable `summary.xlsx` |
+
+### Bond Mode
+
+Use `-b` / `--bond-mode` to override the graph setting supplied by the selected mode or `config.yaml`:
+
+```bash
+sqq analyze -i md.gro -b auto
+sqq analyze -i md.gro --bond-mode hbond
+sqq analyze -i md.gro -b oo
+sqq analyze -i md.gro -b pairs --pairs pairs.txt
+```
+
+Available values are `auto`, `hbond`, `oo`, and `pairs`. `--pairs PAIRS.txt` used alone remains shorthand for pairs mode. Combining `--pairs` with `-b auto`, `-b hbond`, or `-b oo` is rejected. Pairs mode requires either `--pairs` or `graph.pair_file` in `config.yaml`.
 
 ## Output Structure
 
