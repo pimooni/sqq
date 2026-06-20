@@ -80,7 +80,7 @@ sqq analyze -i ./gro -m 50 -o ./result_standard
 sqq analyze -i ./gro -m 99 -o ./result_performance
 ```
 
-Modes do not change `quasi_cage.max_layers`; L1 remains the default in every mode. Use `--quasi-max-layers` explicitly for L2/L3. Automatic workers are capped by the number of independent GRO/XYZ files. A single coordinate file or XTC/TRR trajectory still runs with one worker. `--workers N` overrides the mode percentage.
+Modes do not change `quasi_cage.max_layers`; L1 remains the default in every mode. Use `--quasi-max-layers` explicitly for L2/L3. Automatic workers are capped by the number of independent GRO/XYZ files. A single coordinate file or XTC/TRR trajectory still runs with one worker. `--workers N` overrides the mode percentage. Parallel runs display live aggregate stages and up to six active files with per-stage and per-file timings.
 
 ## Common Commands
 
@@ -237,6 +237,10 @@ result_sqq/
     ice/
       test1_ice.gro
 ```
+
+Each per-frame `*_info.md` report is arranged for inspection: it shows only configured ring sizes, reports final free-ring counts, groups half-cage and quasi-cage isomers below composition totals, lists cage types vertically, and expands exact guest compositions across the cage-occupancy table. Internal `hc_` and `qc_` prefixes are omitted from report labels.
+
+`summary.xlsx` remains plotting-oriented. Each analysis sheet keeps one input file or trajectory frame per row.
 
 Output ownership is:
 

@@ -11,74 +11,44 @@ from .config import write_default_config
 from .pipeline import analyze
 
 
-HELP_EPILOG = """
-Quick commands:
+ROOT_EPILOG = """
+Quick start:
   sqq init -o config.yaml
-  sqq analyze -i ./gro -c config.yaml -o ./result_sqq
-  sqq analyze -i ./gro -c config.yaml --pattern "*.gro" -o ./result_sqq
-  sqq analyze -i "./gro/*.gro" -c config.yaml -o ./result_sqq
-  sqq analyze -i traj.xtc --top topol.gro -c config.yaml -o ./result_sqq
+  sqq analyze -i test.gro -o ./result_sqq
+  sqq analyze -i ./gro --pattern "*.gro" -o ./result_sqq
 
-Modes:
+Use `sqq analyze -h` for analysis options and examples.
+""".strip()
+
+
+ANALYZE_EPILOG = """
+Examples:
+  sqq analyze -i test.gro -o ./result_sqq
+  sqq analyze -i ./gro --pattern "*.gro" -o ./result_sqq
+  sqq analyze -i "./gro/*.gro" -o ./result_sqq
+  sqq analyze -i traj.xtc --top topol.gro -c config.yaml -o ./result_sqq
+  sqq analyze -i ./gro -m 00 -b hbond --workers 4 -o ./result_sqq
+
+Analysis modes:
   -m 00  Rigorous: hbond, 4/5/6 rings and cages, other cages, 25% CPU workers
   -m 50  Standard: auto graph, 5/6 rings and cages, standard cages, 50% CPU workers
   -m 99  Performance: O-O graph, 5/6 rings and cages, standard cages, 90% CPU workers
-  Modes do not change quasi_cage.max_layers; its default remains 1.
-  -b/--bond-mode overrides the graph setting supplied by the selected mode.
 
-Multiple GRO input:
-  sqq analyze -i 1.gro -o ./result_one
-  sqq analyze -i ./gro --pattern "*.gro" -o ./result_100
-  sqq analyze -i "./gro/*.gro" -o ./result_100
-
-Analyze options:
-  -i, --input INPUT              Input file or directory (.gro/.xyz/.xtc/.trr)
-      --pattern PATTERN          Pattern for directory input, e.g. "*.gro"
-      --top TOPOLOGY.gro         Topology/structure file for .xtc/.trr input
-  -c, --config CONFIG.yaml       YAML/JSON config file, e.g. config.yaml
-  -o, --output RESULT_DIR        Output directory, default: result_sqq
-  -m, --mode {00,50,99}          Analysis preset, default: 50
-  -b, --bond-mode MODE           Water graph: auto, hbond, oo, or pairs
-  -s, --sizes 4,5,6              Set ring/quasi/cage sizes; 4 enables other cages
-      --ring-sizes 4,5,6         Override ring.sizes
-      --quasi-sizes 4,5,6        Override quasi_cage base/side sizes
-      --quasi-max-layers N       Quasi-cage layers to report; default 1, use 2/3 for outer dangling layers
-      --cage-sizes 4,5,6         Override cage sizes; 4 enables other cages
-      --other-cages              Include generated unconventional 4/5/6 cages
-      --recursive                Read input directories recursively
-      --pairs PAIRS.txt          Pair file for graph.bond_mode=pairs
-      --pair-id KIND             Pair ids: resid, oxygen_index, or atomid
-      --workers N                 Explicit worker count; overrides mode auto percentage
-      --strict                   Stop on the first failed frame
-      --output-layout grouped    GRO layout: grouped or flat
-      --no-info                  Disable per-frame *_info.md
-      --no-gro                   Disable GRO structure output
-      --no-ring-gro              Disable ring GRO files
-      --no-half-cage-gro         Disable half_cage GRO files
-      --no-quasi-cage-gro        Disable quasi_cage GRO files
-      --no-cage-gro              Disable cage GRO files
-      --no-ice-gro               Disable ice GRO files
-      --no-xlsx                  Disable summary.xlsx output
+Modes do not change quasi_cage.max_layers; its default remains 1.
+-b/--bond-mode overrides the graph setting supplied by the selected mode.
 
 Output layout:
-  grouped: frame/ring/frame_ring_5.gro,
-           frame/half_cage/hc_5r_5^5/frame_hc_5r_5^5.gro,
-           frame/quasi_cage/qc_5r_5^3-6^2_55566/frame_qc_5r_5^3-6^2_55566.gro,
-           frame/cage/5^12-6^2/frame_cage_5^12-6^2_occupied.gro
-  flat   : frame/frame_ring_5.gro, frame/frame_hc_5r_5^5.gro,
-           frame/frame_qc_5r_5^3-6^2_55566.gro,
-           frame/frame_cage_5^12-6^2.gro
-
-Use `sqq analyze -h` for the full analyze help.
+  grouped: frame/ring/, frame/half_cage/<type>/,
+           frame/quasi_cage/<type>/, frame/cage/<type>/, frame/ice/
+  flat:    all per-frame structure files in the frame folder
 """.strip()
-
 
 def build_parser() -> argparse.ArgumentParser:
     """Create the two-command CLI: init and analyze."""
     parser = argparse.ArgumentParser(
         prog="sqq",
         description=HELP_BANNER,
-        epilog=HELP_EPILOG,
+        epilog=ROOT_EPILOG,
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -86,7 +56,12 @@ def build_parser() -> argparse.ArgumentParser:
     init_parser = subparsers.add_parser("init", help="Write a default config.yaml file.")
     init_parser.add_argument("-o", "--output", metavar="CONFIG.yaml", default="config.yaml", help="Output config path.")
 
-    analyze_parser = subparsers.add_parser("analyze", help="Analyze MD frames.")
+    analyze_parser = subparsers.add_parser(
+        "analyze",
+        help="Analyze MD frames.",
+        epilog=ANALYZE_EPILOG,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
     analyze_parser.add_argument("-i", "--input", metavar="INPUT", required=True, help="Input file or directory (.gro/.xyz/.xtc/.trr).")
     analyze_parser.add_argument("--pattern", metavar="PATTERN", help='Input pattern when --input is a directory, e.g. "*.gro".')
     analyze_parser.add_argument("--top", "--topology", metavar="TOPOLOGY.gro", dest="topology", help="Topology/structure file for .xtc/.trr input.")

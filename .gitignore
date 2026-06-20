@@ -11,6 +11,5 @@ result_sqq*/
 **/result_sqq*/
 config.yaml
 .env
-SQQ_design_CN.docx
-SQQ_design_EN.docx
+*.docx
 sqq/example/

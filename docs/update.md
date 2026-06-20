@@ -2,6 +2,53 @@
 
 This file records versioned update notes. New releases should be appended above older entries.
 
+## Version 0.1.4
+
+### Main Changes
+
+1. Clearer command-line help hierarchy
+   - Updated the help description to `SQQ (Shell Qualification Quantifier): Python Joint Toolkit for Water-Shell Topology Analysis.`
+   - Reduced `sqq` and `sqq -h` to a concise top-level overview with subcommands and quick-start examples.
+   - Moved analysis examples, mode descriptions, and output-layout guidance to `sqq analyze -h`.
+   - Removed the duplicated manually listed analysis options from the top-level help; argparse remains the authoritative detailed option reference.
+
+2. Live progress for parallel file analysis
+   - Added thread-safe per-worker stage reporting for multi-file GRO/XYZ runs.
+   - The live panel reports completed, failed, active, and queued files plus total elapsed time.
+   - Run metadata now formats time zones with their UTC offset, for example `China Standard Time (+8)`; the full China name is applied only to UTC+8.
+   - `stage_summary` always shows all 11 work stages in three logical rows: preparation, topology search, and post-processing/output.
+   - Up to six active files show their current stage, stage elapsed time, and file elapsed time; additional active files are summarized.
+   - The serial one-worker progress display is unchanged.
+
+3. Clearer per-frame Markdown reports
+   - Ring counts now show only configured sizes and use the final free-ring population; cage counts list one topology type per row.
+   - Half-cage and quasi-cage labels omit internal prefixes and group isomers below composition totals.
+   - Cage occupancy now lists cage types by row and exact guest compositions by column.
+   - Cage isomers now use nested readable labels instead of a wide type-by-isomer matrix.
+   - Frame, molecule, active-connection, F3/F4, and ice information is separated into compact sections.
+   - `summary.xlsx` remains unchanged with one input file per row in analysis sheets.
+
+4. Code and documentation cleanup
+   - Removed obsolete Markdown-report helpers and simplified canonical cage ordering without changing counts.
+   - Tightened time-zone alias handling so non-China `CST` offsets retain their original name.
+   - Updated README, design documentation, and the English/Chinese DOCX design guides.
+
+5. Broader local-document ignore rule
+   - Replaced two filename-specific DOCX ignore entries with the global `*.docx` rule.
+   - Design DOCX files remain local and are not included in repository uploads.
+
+6. Version metadata
+   - Updated `pyproject.toml` and `sqq.__version__` from `0.1.3` to `0.1.4`.
+
+### Compatibility
+
+- Analysis algorithms, scientific defaults, `summary.xlsx` schemas, mode presets, worker allocation, and bond-mode behavior are unchanged from `0.1.3`. The per-frame Markdown layout and parallel progress reporting changed.
+- Existing `sqq analyze` commands and configuration files remain compatible.
+
+### Short Summary
+
+Version 0.1.4 improves CLI help, live per-worker progress, and per-frame Markdown readability. It also broadens the local DOCX ignore rule without changing topology-analysis results or workbook schemas.
+
 ## Version 0.1.3
 
 ### Main Changes

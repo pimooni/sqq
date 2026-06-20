@@ -38,6 +38,7 @@ The mode preset controls graph mode, ring/cage size ranges, unconventional cage 
 An explicit `-b` / `--bond-mode {auto,hbond,oo,pairs}` overrides the graph mode from both the preset and `config.yaml`. `--pairs PAIRS.txt` implies pairs mode unless `-b pairs` is already given; it cannot be combined with another explicit bond mode.
 
 `parallel.workers: auto` calculates `floor(logical_cpu_count * mode_fraction)`, with a minimum of one and a maximum equal to the number of independent input files. `--workers N` overrides that calculation. Parallel execution is file-level and currently uses `ThreadPoolExecutor` for standalone GRO/XYZ files. A single file and XTC/TRR input run with one worker.
+Parallel GRO/XYZ runs use a thread-safe progress aggregator. Every worker reports its active file and current pipeline stage. The interactive panel shows completed/failed/active/queued counts, a fixed 11-stage summary in three logical rows, total elapsed time, and up to six active-file rows with stage/file timings. Additional active files are summarized so high-worker modes do not fill the terminal. The serial progress panel remains unchanged.
 
 ## Modules
 
@@ -219,6 +220,16 @@ frame_name/
 ```
 
 The global workbook is `summary.xlsx`. It contains run metadata, per-frame counts, graph statistics, ring/half_cage/quasi_cage/cage tables, occupancy tables, F3/F4, ice, and config sheets.
+
+Each per-frame `*_info.md` report is optimized for inspection rather than plotting:
+
+- the Ring table shows only configured ring sizes and reports final free-ring counts;
+- Half Cage and Quasi Cage omit internal `hc_`/`qc_` prefixes, aggregate each composition on a parent row, and list exact isomers on synchronized child rows;
+- Cage and Cage Isomer use one topology type per row;
+- Cage Occupancy uses one cage type per row and dynamic exact guest-composition columns in source guest order;
+- Frame Information, Molecules, the active connection mode, F3/F4, and Ice are separated into compact sections.
+
+The global `summary.xlsx` workbook is intentionally unchanged: plotting-oriented analysis sheets retain one input file or trajectory frame per row.
 
 ## Current Limits
 

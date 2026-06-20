@@ -12,7 +12,7 @@ from openpyxl.utils import get_column_letter
 from ..banner import SQQ_BANNER
 from ..config import dump_config
 from ..core.cage import KNOWN_CAGE_TYPES, parse_cage_face_label
-from ..models import FrameResult
+from ..models import CagePatch, FrameResult
 from .occupancy import guest_composition_label, guest_lookup as build_guest_lookup, guest_resname_order as guest_resname_order_from_guests
 
 
@@ -65,7 +65,10 @@ SUMMARY_COLUMNS = [
     "interfacial_ice_waters",
 ]
 
-INFO_PATCH_MAX_COLUMNS = 18
+TREE_MIDDLE = "\u251c"
+TREE_LAST = "\u2514"
+COLUMN_CHILD = "\u21b3"
+SUBSCRIPT_DIGIT_DELETE = dict.fromkeys(range(0x2080, 0x208A))
 
 
 def result_row(result: FrameResult) -> dict[str, Any]:
@@ -210,24 +213,28 @@ def failed_row(frame_name: str, source: str, error: str) -> dict[str, Any]:
     return row
 
 
-def write_frame_info(result: FrameResult, frame_dir: Path) -> None:
-    """Write the per-frame markdown report with grouped topology tables."""
+def write_frame_info(result: FrameResult, frame_dir: Path, ring_sizes: list[int] | None = None) -> None:
+    """Write the per-frame Markdown report with inspection-oriented tables."""
     frame_dir.mkdir(parents=True, exist_ok=True)
     row = result_row(result)
-    cage_types = ordered_cage_types(cage.cage_type for cage in result.cages)
+    cage_values = {cage.cage_type for cage in result.cages}
+    cage_types = [cage_type for cage_type in ordered_cage_types(cage_values) if cage_type in cage_values]
+    enabled_ring_sizes = sorted(set(ring_sizes if ring_sizes is not None else result.rings))
     lines = [
-        f"# {result.frame.name} info",
+        f"# SQQ Frame Report: {result.frame.name}",
         "",
     ]
 
     lines.extend(
         section_table(
-            "Frame",
+            "Frame Information",
             ["item", "value"],
             [
                 ["frame", result.frame.name],
                 ["time_ps", result.frame.time_ps],
                 ["source", source_label(result.frame.source)],
+                ["bond_mode", row["connection_mode"]],
+                ["ring_sizes", ", ".join(str(size) for size in enabled_ring_sizes)],
                 ["status", "ok"],
                 ["n_atoms", len(result.frame.atoms)],
                 ["n_waters", len(result.waters)],
@@ -235,60 +242,38 @@ def write_frame_info(result: FrameResult, frame_dir: Path) -> None:
             ],
         )
     )
-    lines.extend(section_table("Molecules", ["resname", "atoms"], molecule_count_rows(result)))
-    lines.extend(
-        section_table(
-            "Graph",
-            ["item", "value"],
-            [
-                ["connection_mode", row["connection_mode"]],
-                ["connection_count", row["connection_count"]],
-                ["hbond_count", row["hbond_count"]],
-                ["oo_connection_count", row["oo_connection_count"]],
-                ["pair_connection_count", row["pair_connection_count"]],
-            ],
-        )
-    )
-    lines.extend(
-        section_table(
-            "Rings",
-            ["scope", "ring4", "ring5", "ring6", "ring7"],
-            [
-                ["all", row["ring4"], row["ring5"], row["ring6"], row["ring7"]],
-                ["free", row["free_ring4"], row["free_ring5"], row["free_ring6"], row["free_ring7"]],
-            ],
-        )
-    )
+    lines.extend(section_table("Molecules", ["resname", "molecules", "atoms"], molecule_count_rows(result)))
+    lines.extend(connection_info_section(result, row))
+
+    ring_rows = [[size, row.get(f"free_ring{size}", 0)] for size in enabled_ring_sizes]
+    ring_rows.append(["total", sum(int(item[1]) for item in ring_rows)])
+    lines.extend(section_table("Ring", ["ring type", "count"], ring_rows))
     lines.extend(patch_info_section("Half Cage", result.half_cages))
     lines.extend(patch_info_section("Quasi Cage", result.quasi_cages))
-    lines.extend(
-        section_table(
-            "Cages",
-            ["scope", *[cage_display_label(cage_type) for cage_type in cage_types], "total"],
-            [
-                ["all", *[row[f"cage_{cage_type}"] for cage_type in cage_types], len(result.cages)],
-            ],
-        )
-    )
+
+    cage_rows = [[cage_display_label(cage_type), row.get(f"cage_{cage_type}", 0)] for cage_type in cage_types]
+    cage_rows.append(["total", len(result.cages)])
+    lines.extend(section_table("Cage", ["cage type", "count"], cage_rows))
     lines.extend(cage_occupancy_section(result, cage_types))
     lines.extend(cage_isomer_section(result, cage_types))
-    lines.extend(
-        section_table(
-            "F3/F4",
-            ["metric", "mean", "valid_waters", "focus_mean", "focus_valid_waters"],
-            [
-                ["F3", row["F3_mean"], row["F3_valid_waters"], row["F3_focus_mean"], row["F3_focus_valid_waters"]],
-                ["F4", row["F4_mean"], row["F4_valid_waters"], row["F4_focus_mean"], row["F4_focus_valid_waters"]],
-            ],
-        )
-    )
-    lines.extend(
-        section_table(
-            "Ice",
-            ["ice_like_waters", "ice_i_waters", "interfacial_ice_waters"],
-            [[row["ice_like_waters"], row["ice_i_waters"], row["interfacial_ice_waters"]]],
-        )
-    )
+
+    f3f4_headers = ["metric", "valid_waters", "mean"]
+    f3f4_rows = [
+        ["F3", row["F3_valid_waters"], row["F3_mean"]],
+        ["F4", row["F4_valid_waters"], row["F4_mean"]],
+    ]
+    if result.f3f4 is not None and result.f3f4.focus_resids:
+        f3f4_headers.extend(["focus_valid_waters", "focus_mean"])
+        f3f4_rows[0].extend([row["F3_focus_valid_waters"], row["F3_focus_mean"]])
+        f3f4_rows[1].extend([row["F4_focus_valid_waters"], row["F4_focus_mean"]])
+    lines.extend(section_table("F3/F4", f3f4_headers, f3f4_rows))
+
+    ice_rows = [
+        ["ice_like_waters", row["ice_like_waters"]],
+        ["ice_i_waters", row["ice_i_waters"]],
+        ["interfacial_ice_waters", row["interfacial_ice_waters"]],
+    ]
+    lines.extend(section_table("Ice", ["structure", "water molecules"], ice_rows))
     if result.warnings:
         lines.extend(["", "## Warnings", ""])
         lines.extend(f"- {warning}" for warning in result.warnings)
@@ -320,9 +305,36 @@ def markdown_rows(headers: list[str], rows: list[list[Any]]) -> str:
 
 
 def molecule_count_rows(result: FrameResult) -> list[list[Any]]:
-    """Count atoms by residue name for the frame overview."""
-    counts = atom_resname_counts(result)
-    return [[resname, counts[resname]] for resname in counts] + [["TOTAL", len(result.frame.atoms)]]
+    """Count contiguous molecules and atoms by residue name in source order."""
+    atom_counts = atom_resname_counts(result)
+    molecule_counts: dict[str, int] = {}
+    previous_residue: tuple[int, str] | None = None
+    for atom in result.frame.atoms:
+        residue = (atom.resid, atom.resname)
+        if residue != previous_residue:
+            molecule_counts[atom.resname] = molecule_counts.get(atom.resname, 0) + 1
+            previous_residue = residue
+    rows = [[resname, molecule_counts.get(resname, 0), atom_counts[resname]] for resname in atom_counts]
+    rows.append(["total", sum(molecule_counts.values()), len(result.frame.atoms)])
+    return rows
+
+
+def connection_info_section(result: FrameResult, row: dict[str, Any]) -> list[str]:
+    """Render the active water-network connection mode without empty fields."""
+    mode = result.graph.mode
+    title, count_label = {
+        "hbond": ("Hydrogen Bonds", "hydrogen bonds"),
+        "oo": ("O-O Connections", "O-O connections"),
+        "pairs": ("Pair Connections", "pair connections"),
+    }.get(mode, ("Connections", "connections"))
+    water_count = len(result.waters)
+    mean_degree = 0.0 if water_count == 0 else (2.0 * len(result.graph.edges)) / water_count
+    rows = [
+        ["water molecules", water_count],
+        [count_label, row["connection_count"]],
+        ["mean connections per water", mean_degree],
+    ]
+    return section_table(title, ["item", "value"], rows)
 
 
 def atom_resname_counts(result: FrameResult) -> dict[str, int]:
@@ -333,14 +345,39 @@ def atom_resname_counts(result: FrameResult) -> dict[str, int]:
     return counts
 
 
-def patch_info_section(title: str, patches) -> list[str]:
-    """Render one compact half_cage or quasi_cage markdown section."""
+def patch_info_section(title: str, patches: list[CagePatch]) -> list[str]:
+    """Render open patches as composition totals with nested isomers."""
     counts = patch_counts(patches)
+    type_header = f"{title.lower().replace(' ', '-')} type"
     if not counts:
-        return section_table(title, ["total"], [[0]])
-    rows = [[patch_type, counts[patch_type]] for patch_type in sorted(counts)]
+        return section_table(title, [type_header, "count"], [["total", 0]])
+
+    grouped: dict[str, dict[str, int]] = {}
+    for patch_type, count in counts.items():
+        label = patch_display_label(patch_type)
+        parent = label.translate(SUBSCRIPT_DIGIT_DELETE)
+        children = grouped.setdefault(parent, {})
+        children[label] = children.get(label, 0) + count
+
+    rows: list[list[Any]] = []
+    for parent in sorted(grouped):
+        children = grouped[parent]
+        rows.append([parent, sum(children.values())])
+        if any(child != parent for child in children):
+            labels = sorted(children)
+            for index, label in enumerate(labels):
+                branch = TREE_LAST if index == len(labels) - 1 else TREE_MIDDLE
+                rows.append([f"{branch} {label}", f"{branch} {children[label]}"])
     rows.append(["total", sum(counts.values())])
-    return section_table(title, ["type", "count"], rows)
+    return section_table(title, [type_header, "count"], rows)
+
+
+def patch_display_label(patch_type: str) -> str:
+    """Remove internal HC/QC prefixes from human-facing patch labels."""
+    for prefix in ("hc_", "qc_"):
+        if patch_type.startswith(prefix):
+            return patch_type.removeprefix(prefix)
+    return patch_type
 
 
 def superscript_number(value: int) -> str:
@@ -352,7 +389,7 @@ def superscript_number(value: int) -> str:
 def ordered_cage_types(types) -> list[str]:
     """Return canonical hydrate cages first, followed by other cage labels."""
     values = set(types.keys() if isinstance(types, dict) else types)
-    ordered = [cage_type for cage_type in KNOWN_CAGE_TYPES if cage_type in values or cage_type in KNOWN_CAGE_TYPES]
+    ordered = list(KNOWN_CAGE_TYPES)
     extras = sorted((cage_type for cage_type in values if cage_type not in KNOWN_CAGE_TYPES), key=cage_sort_key)
     return ordered + extras
 
@@ -382,42 +419,82 @@ def cage_display_label(cage_type: str) -> str:
 
 
 def cage_occupancy_section(result: FrameResult, cage_types: list[str]) -> list[str]:
-    """Show empty/occupied/guest counts with cage types aligned as columns."""
+    """Show one cage type per row with dynamic guest-composition columns."""
     guests_by_id = build_guest_lookup(result.guests)
     guest_order = guest_resname_order(result)
-    rows: dict[str, dict[str, int]] = {
-        "empty": {cage_type: 0 for cage_type in cage_types},
-        "occupied": {cage_type: 0 for cage_type in cage_types},
-        "multi": {cage_type: 0 for cage_type in cage_types},
+    counts: dict[str, dict[str, int]] = {
+        cage_type: {"empty": 0, "occupied": 0} for cage_type in cage_types
     }
+    compositions: set[str] = set()
     for cage in result.cages:
-        rows["occupied" if cage.occupied else "empty"][cage.cage_type] += 1
+        cage_counts = counts.setdefault(cage.cage_type, {"empty": 0, "occupied": 0})
+        cage_counts["occupied" if cage.occupied else "empty"] += 1
         if not cage.occupied:
             continue
-        composition = guest_composition_label(cage, guests_by_id, guest_order)
-        if composition:
-            rows.setdefault(composition, {cage_type: 0 for cage_type in cage_types})
-            rows[composition][cage.cage_type] += 1
-        if len(cage.guest_ids) > 1:
-            rows["multi"][cage.cage_type] += 1
+        composition = guest_composition_label(cage, guests_by_id, guest_order) or "unknown"
+        compositions.add(composition)
+        cage_counts[composition] = cage_counts.get(composition, 0) + 1
 
-    guest_labels = [label for label in guest_order if label in rows]
-    extra_guest_labels = sorted(label for label in rows if label not in {"empty", "occupied", "multi", *guest_labels})
+    guest_labels = [label for label in guest_order if label in compositions]
+    extra_guest_labels = sorted(
+        compositions.difference(guest_labels),
+        key=lambda label: guest_composition_sort_key(label, guest_order),
+    )
     child_labels = [*guest_labels, *extra_guest_labels]
-    if sum(rows["multi"].values()) > 0:
-        child_labels.append("multi")
+    headers = [
+        "cage type",
+        "total",
+        "empty",
+        "occupied",
+        *[f"{COLUMN_CHILD} {label}" for label in child_labels],
+    ]
+    table_rows: list[list[Any]] = []
+    for cage_type in cage_types:
+        cage_counts = counts.get(cage_type, {})
+        empty = cage_counts.get("empty", 0)
+        occupied = cage_counts.get("occupied", 0)
+        table_rows.append(
+            [
+                cage_display_label(cage_type),
+                empty + occupied,
+                empty,
+                occupied,
+                *[f"{COLUMN_CHILD} {cage_counts.get(label, 0)}" for label in child_labels],
+            ]
+        )
 
-    table_rows = []
-    for label in ["empty", "occupied"]:
-        counts = [rows[label].get(cage_type, 0) for cage_type in cage_types]
-        table_rows.append([label, *counts, sum(counts)])
-    for idx, label in enumerate(child_labels):
-        branch = "└" if idx == len(child_labels) - 1 else "├"
-        counts = [rows[label].get(cage_type, 0) for cage_type in cage_types]
-        table_rows.append([f"{branch} {label}", *[f"{branch} {count}" for count in counts], f"{branch} {sum(counts)}"])
-    total_counts = [sum(rows[label].get(cage_type, 0) for label in ("empty", "occupied")) for cage_type in cage_types]
-    table_rows.append(["total", *total_counts, sum(total_counts)])
-    return section_table("Cage Occupancy", ["occupancy", *[cage_display_label(cage_type) for cage_type in cage_types], "total"], table_rows)
+    total_empty = sum(counts.get(cage_type, {}).get("empty", 0) for cage_type in cage_types)
+    total_occupied = sum(counts.get(cage_type, {}).get("occupied", 0) for cage_type in cage_types)
+    table_rows.append(
+        [
+            "total",
+            total_empty + total_occupied,
+            total_empty,
+            total_occupied,
+            *[
+                f"{COLUMN_CHILD} {sum(counts.get(cage_type, {}).get(label, 0) for cage_type in cage_types)}"
+                for label in child_labels
+            ],
+        ]
+    )
+    return section_table("Cage Occupancy", headers, table_rows)
+
+
+def guest_composition_sort_key(label: str, guest_order: list[str]) -> tuple[Any, ...]:
+    """Sort exact guest compositions by occupancy size and source guest order."""
+    order_index = {name: index for index, name in enumerate(guest_order)}
+    components: list[tuple[int, str, int]] = []
+    total_guests = 0
+    for part in label.split("+"):
+        name, separator, count_text = part.rpartition("x")
+        if separator and count_text.isdigit():
+            count = int(count_text)
+        else:
+            name = part
+            count = 1
+        total_guests += count
+        components.append((order_index.get(name, 10_000), name, count))
+    return total_guests, len(components), tuple(components), label
 
 
 def guest_resname_order(result: FrameResult) -> list[str]:
@@ -426,30 +503,27 @@ def guest_resname_order(result: FrameResult) -> list[str]:
 
 
 def cage_isomer_section(result: FrameResult, cage_types: list[str]) -> list[str]:
-    """Show cage isomers in aligned columns instead of semicolon lists."""
+    """Show cage composition totals with nested structural isomers."""
     isomers: dict[str, dict[str, int]] = {cage_type: {} for cage_type in cage_types}
     for cage in result.cages:
         label = cage.isomer or "plain"
-        isomers.setdefault(cage.cage_type, {})[label] = isomers.setdefault(cage.cage_type, {}).get(label, 0) + 1
-    labels = ordered_cage_isomer_labels(isomers, cage_types)
+        type_isomers = isomers.setdefault(cage.cage_type, {})
+        type_isomers[label] = type_isomers.get(label, 0) + 1
+
     rows: list[list[Any]] = []
-    for label in labels:
-        counts = [isomers.get(cage_type, {}).get(label, "-") for cage_type in cage_types]
-        numeric_total = sum(value for value in counts if isinstance(value, int))
-        rows.append([label, *counts, numeric_total])
-    total_counts = [sum(isomers.get(cage_type, {}).values()) for cage_type in cage_types]
-    rows.append(["total", *total_counts, sum(total_counts)])
-    return section_table("Cage Isomers", ["isomer", *[cage_display_label(cage_type) for cage_type in cage_types], "total"], rows)
-
-
-def ordered_cage_isomer_labels(isomers: dict[str, dict[str, int]], cage_types: list[str]) -> list[str]:
-    """Keep cage-isomer labels grouped by the canonical cage-type order."""
-    labels: list[str] = []
     for cage_type in cage_types:
-        for label in sorted(isomers.get(cage_type, {})):
-            if label not in labels:
-                labels.append(label)
-    return labels
+        cage_label = cage_display_label(cage_type)
+        type_isomers = isomers.get(cage_type, {})
+        rows.append([cage_label, sum(type_isomers.values())])
+        if len(type_isomers) <= 1:
+            continue
+        labels = sorted(type_isomers)
+        for index, label in enumerate(labels):
+            branch = TREE_LAST if index == len(labels) - 1 else TREE_MIDDLE
+            rows.append([f"{branch} {cage_label}_{label}", f"{branch} {type_isomers[label]}"])
+    if not rows:
+        rows.append(["total", 0])
+    return section_table("Cage Isomer", ["cage isomer", "count"], rows)
 
 
 def source_label(source: Path | None) -> str:
@@ -649,6 +723,7 @@ def summary_dashboard_table(data: pd.DataFrame, run_info: dict[str, Any], config
     ])
     return pd.DataFrame(rows)
 
+
 def frames_ok_count(data: pd.DataFrame) -> int:
     """Count successfully analyzed frames."""
     return int((data.get("status") == "ok").sum()) if "status" in data else len(data)
@@ -759,6 +834,7 @@ def format_summary_dashboard_sheet(worksheet) -> None:
             if row[1].value not in (None, ""):
                 row[1].font = Font(color="111827")
                 row[1].alignment = Alignment(horizontal="left", vertical="top", wrap_text=True)
+
 
 def format_table_sheet(worksheet) -> None:
     """Style plotting-friendly data sheets without changing their data shape."""
