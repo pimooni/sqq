@@ -13,16 +13,25 @@ from .occupancy import guest_composition_label, guest_lookup, guest_resname_orde
 
 
 RING_CENTER_NAMES = {4: "R4", 5: "R5", 6: "R6", 7: "R7"}
-CAGE_CENTER_NAMES = {"512": "G512", "51262": "G62", "51263": "G63", "51264": "G64"}
+CAGE_CENTER_NAMES = {"512": "G512", "51262": "G62", "51263": "G63", "51264": "G64", "51268": "G68", "435663": "G436"}
 SUPERSCRIPT_DIGITS = str.maketrans("0123456789-", "⁰¹²³⁴⁵⁶⁷⁸⁹⁻")
 
 
-def write_ring_gro_files(result: FrameResult, frame_dir: Path, write_empty: bool = False, layout: str = "grouped") -> None:
-    """Write free-ring GRO files after removing rings used by patches/cages."""
+def write_ring_gro_files(
+    result: FrameResult,
+    frame_dir: Path,
+    write_empty: bool = False,
+    layout: str = "grouped",
+    sizes: set[int] | None = None,
+) -> None:
+    """Write reported free-ring GRO files after topology-wide filtering."""
     water_lookup = water_by_oxygen(result.waters)
     used_ring_ids = {ring_id for patch in [*result.half_cages, *result.quasi_cages] for ring_id in patch.rings}
-    used_ring_ids.update(ring_id for cage in result.cages for ring_id in cage.rings)
+    filtering_cages = result.all_cages or result.cages
+    used_ring_ids.update(ring_id for cage in filtering_cages for ring_id in cage.rings)
     for size, rings in sorted(result.rings.items()):
+        if sizes is not None and size not in sizes:
+            continue
         rings = [ring for ring in rings if ring.object_id not in used_ring_ids]
         if not rings and not write_empty:
             continue

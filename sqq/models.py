@@ -131,9 +131,12 @@ class FrameResult:
     guests: list[Guest]
     graph: GraphResult
     rings: dict[int, list[Ring]]
+    ring_report_sizes: tuple[int, ...] = ()
     half_cages: list[CagePatch] = field(default_factory=list)
     quasi_cages: list[CagePatch] = field(default_factory=list)
     cages: list[Cage] = field(default_factory=list)
+    all_cages: list[Cage] = field(default_factory=list)
+    cage_report_types: tuple[str, ...] | None = None
     f3f4: F3F4Result | None = None
     ice_like_waters: tuple[int, ...] = ()
     ice_i_waters: tuple[int, ...] = ()

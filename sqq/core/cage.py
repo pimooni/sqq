@@ -12,13 +12,15 @@ from .geometry import unwrap_connected_nodes
 from .pbc import distance, minimum_image
 
 
-KNOWN_CAGE_TYPES = ["512", "51262", "51263", "51264"]
+KNOWN_CAGE_TYPES = ["512", "51262", "51263", "51264", "51268", "435663"]
 
 TARGET_FACE_COUNTS = {
     "512": {4: 0, 5: 12, 6: 0},
     "51262": {4: 0, 5: 12, 6: 2},
     "51263": {4: 0, 5: 12, 6: 3},
     "51264": {4: 0, 5: 12, 6: 4},
+    "51268": {4: 0, 5: 12, 6: 8},
+    "435663": {4: 3, 5: 6, 6: 3},
 }
 
 
@@ -28,10 +30,8 @@ def find_cages(
     patches: list[CagePatch],
     guests: list[Guest],
     enabled: bool = False,
-    target_types: list[str] | None = None,
     ring_sizes: list[int] | None = None,
-    output_other: bool = False,
-    other_max_faces: int = 20,
+    max_faces: int = 20,
     search_mode: str = "grow",
     seed_mode: str = "patch",
     max_states_per_seed: int = 20000,
@@ -41,15 +41,16 @@ def find_cages(
     occupancy_mode: str = "polyhedron",
     warnings: list[str] | None = None,
 ) -> list[Cage]:
-    """Find closed hydrate cages with target face counts."""
+    """Find every Euler-compatible closed cage in the configured face-size scope."""
     if not enabled:
         return []
 
-    allowed_sizes = set(ring_sizes or [5, 6])
-    unsupported_sizes = allowed_sizes - {4, 5, 6}
-    if unsupported_sizes:
-        raise ValueError(f"cage.ring_sizes supports only 4, 5, and 6; got {sorted(unsupported_sizes)}")
-    targets = build_cage_targets(target_types, allowed_sizes, output_other, other_max_faces)
+    # Seven-member rings can be searched and reported, but cage closure is
+    # intentionally limited to the established 4/5/6 face model.
+    allowed_sizes = set(ring_sizes or [5, 6]) & {4, 5, 6}
+    if not allowed_sizes:
+        return []
+    targets = build_cage_targets(allowed_sizes, max_faces)
     active_sizes = {size for counts in targets.values() for size, count in counts.items() if count > 0}
     all_rings = [ring for group in rings.values() for ring in group if ring.size in allowed_sizes and ring.size in active_sizes]
     ring_by_id = {ring.object_id: ring for ring in all_rings}
@@ -138,36 +139,14 @@ def find_cages(
 
 
 def build_cage_targets(
-    target_types: list[str] | None,
     allowed_sizes: set[int],
-    output_other: bool,
-    other_max_faces: int,
+    max_faces: int,
 ) -> dict[str, dict[int, int]]:
-    """Build target face-count maps for standard and optional other cages."""
+    """Build all Euler-compatible target compositions in the search scope."""
     targets: dict[str, dict[int, int]] = {}
-    requested = target_types or KNOWN_CAGE_TYPES
-    for raw_name in requested:
-        name = str(raw_name)
-        if name in TARGET_FACE_COUNTS:
-            counts = TARGET_FACE_COUNTS[name]
-            if face_counts_use_allowed_sizes(counts, allowed_sizes):
-                targets[name] = dict(counts)
-            continue
-        counts = parse_cage_face_label(name)
-        if counts and face_counts_use_allowed_sizes(counts, allowed_sizes):
-            targets[canonical_cage_face_label(counts)] = counts
-
-    if output_other:
-        for counts in generated_other_face_counts(allowed_sizes, max_faces=other_max_faces):
-            if any(counts_match(counts, existing) for existing in targets.values()):
-                continue
-            targets[canonical_cage_face_label(counts)] = counts
+    for counts in generated_other_face_counts(allowed_sizes, max_faces=max_faces):
+        targets[cage_type_for_counts(counts)] = counts
     return targets
-
-
-def face_counts_use_allowed_sizes(counts: dict[int, int], allowed_sizes: set[int]) -> bool:
-    """Reject target types that require ring sizes disabled for cage search."""
-    return all(size in allowed_sizes or count == 0 for size, count in counts.items())
 
 
 def generated_other_face_counts(allowed_sizes: set[int], max_faces: int) -> list[dict[int, int]]:
@@ -197,10 +176,12 @@ def generated_other_face_counts(allowed_sizes: set[int], max_faces: int) -> list
 
 
 def parse_cage_face_label(label: str) -> dict[int, int] | None:
-    """Parse numeric 1-10-2 or generic 4^1-5^10-6^2 labels."""
+    """Parse a named cage, numeric 1-10-2, or generic 4^1-5^10-6^2 label."""
     text = label.strip()
     if not text:
         return None
+    if text in TARGET_FACE_COUNTS:
+        return dict(TARGET_FACE_COUNTS[text])
     if text.count("-") == 2 and all(part.strip().isdigit() for part in text.split("-")):
         n4, n5, n6 = (int(part) for part in text.split("-"))
         return {4: n4, 5: n5, 6: n6}
@@ -216,6 +197,26 @@ def parse_cage_face_label(label: str) -> dict[int, int] | None:
             return None
         counts[int(size_text)] = int(count_text)
     return counts or None
+
+
+def cage_type_for_counts(counts: dict[int, int]) -> str:
+    """Use a compact named label when available, otherwise a generic label."""
+    for name in KNOWN_CAGE_TYPES:
+        if counts_match(counts, TARGET_FACE_COUNTS[name]):
+            return name
+    return canonical_cage_face_label(counts)
+
+
+def canonical_cage_type(label: str) -> str:
+    """Normalize one report label to the cage type emitted by the search."""
+    text = str(label).strip()
+    counts = parse_cage_face_label(text)
+    if counts is None:
+        raise ValueError(
+            f"Unsupported cage type '{label}'. Use a named type such as 51268 "
+            "or a face-count label such as 4^1-5^10-6^2."
+        )
+    return cage_type_for_counts(counts)
 
 
 def canonical_cage_face_label(counts: dict[int, int]) -> str:

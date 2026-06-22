@@ -20,24 +20,18 @@ MODE_PRESETS: dict[str, dict[str, Any]] = {
         "worker_fraction": 0.25,
         "bond_mode": "hbond",
         "ring_sizes": [4, 5, 6],
-        "cage_sizes": [4, 5, 6],
-        "output_other_cages": True,
     },
     "50": {
         "label": "standard",
         "worker_fraction": 0.50,
         "bond_mode": "auto",
         "ring_sizes": [5, 6],
-        "cage_sizes": [5, 6],
-        "output_other_cages": False,
     },
     "99": {
         "label": "performance",
         "worker_fraction": 0.90,
         "bond_mode": "oo",
         "ring_sizes": [5, 6],
-        "cage_sizes": [5, 6],
-        "output_other_cages": False,
     },
 }
 
@@ -76,6 +70,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     },
     "ring": {
         "sizes": [5, 6],
+        "report_sizes": "auto",
         "primitive": True,
         "chordless": True,
     },
@@ -92,10 +87,8 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "max_layer_candidates": 24,
     },
     "cage": {
-        "ring_sizes": [5, 6],
-        "target_types": ["512", "51262", "51263", "51264"],
-        "output_other": False,
-        "other_max_faces": 20,
+        "report_types": ["512", "51262", "51263", "51264"],
+        "max_faces": 20,
         "enabled": True,
         "search_mode": "grow",
         "seed_mode": "ring",
@@ -168,10 +161,9 @@ def apply_mode_preset(config: dict[str, Any], mode: Any) -> dict[str, Any]:
     config["mode"] = normalized
     config["graph"]["bond_mode"] = preset["bond_mode"]
     config["ring"]["sizes"] = list(preset["ring_sizes"])
+    config["ring"]["report_sizes"] = "auto"
     config["quasi_cage"]["base_sizes"] = "auto"
     config["quasi_cage"]["side_sizes"] = "auto"
-    config["cage"]["ring_sizes"] = list(preset["cage_sizes"])
-    config["cage"]["output_other"] = bool(preset["output_other_cages"])
     return config
 
 

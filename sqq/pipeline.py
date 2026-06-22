@@ -31,7 +31,7 @@ except ImportError:  # pragma: no cover - exercised in minimal source-tree runs.
 
 from .banner import SQQ_BANNER
 from .config import load_config, mode_label, mode_worker_fraction
-from .core.cage import find_cages
+from .core.cage import TARGET_FACE_COUNTS, canonical_cage_type, find_cages, parse_cage_face_label
 from .core.f3f4 import compute_f3f4
 from .core.graph import build_water_graph
 from .core.ice import classify_ice_waters
@@ -60,6 +60,12 @@ from .models import Cage, CagePatch, Frame, FrameResult
 
 
 PARALLEL_SUFFIXES = {".gro", ".xyz"}
+BOND_MODE_DISPLAY_NAMES = {
+    "auto": "auto",
+    "hbond": "hydrogen bond",
+    "oo": "O-O connectivity",
+    "pairs": "user-defined pairs",
+}
 
 
 def analyze(args: Namespace) -> None:
@@ -68,6 +74,7 @@ def analyze(args: Namespace) -> None:
     started_at = perf_counter()
     config = load_config(Path(args.config) if args.config else None, mode=getattr(args, "mode", None))
     apply_cli_overrides(config, args)
+    normalize_analysis_scopes(config)
 
     # Directory input follows a one-file-per-frame workflow.
     input_path = Path(args.input)
@@ -153,10 +160,12 @@ def build_run_info(
         "matched_files": len(paths),
         "elapsed_seconds": round(elapsed_seconds, 3),
         "graph_mode": config["graph"]["bond_mode"],
-        "ring_sizes": config["ring"]["sizes"],
+        "search_sizes": config["ring"]["sizes"],
+        "ring_report_sizes": config["ring"]["report_sizes"],
         "quasi_cage_base_sizes": config["quasi_cage"].get("base_sizes", "auto"),
         "quasi_cage_side_sizes": config["quasi_cage"].get("side_sizes", "auto"),
-        "cage_sizes": config["cage"].get("ring_sizes", [5, 6]),
+        "cage_report_types": config["cage"].get("report_types", []),
+        "max_cage_faces": config["cage"].get("max_faces", 20),
         "output_layout": config["output"].get("structure_layout", "grouped"),
         "workers": workers,
         "summary_xlsx": str((outdir / "summary.xlsx").resolve()),
@@ -193,13 +202,13 @@ def print_run_header(
     print_terminal_field("config", args.config or "<built-in defaults>")
     print_terminal_field("topology", topology or "<none>")
     print_terminal_field("mode", f"{config.get('mode', '50')} ({mode_label(config.get('mode', '50'))})")
-    print_terminal_field("graph_mode", config["graph"]["bond_mode"])
-    print_terminal_field("ring_sizes", config["ring"]["sizes"])
+    print_terminal_field("graph_mode", bond_mode_display_name(config["graph"]["bond_mode"]))
+    print_terminal_field("search_sizes", config["ring"]["sizes"])
+    print_terminal_field("ring_report_sizes", config["ring"]["report_sizes"])
     print_terminal_field("quasi_cage_sizes", f"{config['quasi_cage'].get('base_sizes', 'auto')} / {config['quasi_cage'].get('side_sizes', 'auto')}")
     print_terminal_field("quasi_max_layers", config["quasi_cage"].get("max_layers", ""))
-    print_terminal_field("cage_sizes", config["cage"].get("ring_sizes", [5, 6]))
-    print_terminal_field("cage_targets", dashboard_cage_targets(config))
-    print_terminal_field("other_cages", config["cage"].get("output_other", False))
+    print_terminal_field("cage_report_types", dashboard_cage_targets(config))
+    print_terminal_field("max_cage_faces", config["cage"].get("max_faces", 20))
     print_terminal_field("output_layout", config["output"].get("structure_layout", "grouped"))
     print_terminal_field("worker_policy", worker_policy_text(config))
     print_terminal_field("workers", workers)
@@ -213,6 +222,12 @@ PROGRESS_BAR_WIDTH = 25
 def print_terminal_field(label: str, value: Any) -> None:
     """Print one aligned terminal key-value row."""
     print(f"  {label:<{TERMINAL_LABEL_WIDTH}}: {safe_terminal_text(value)}")
+
+
+def bond_mode_display_name(value: Any) -> str:
+    """Return a readable terminal label without changing config identifiers."""
+    mode = str(value)
+    return BOND_MODE_DISPLAY_NAMES.get(mode, mode)
 
 
 def format_terminal_value(value: Any) -> str:
@@ -731,11 +746,7 @@ def write_frame_outputs(result: FrameResult, frame_dir: Path, config: dict[str, 
         write_frame_info(
             result,
             frame_dir,
-            ring_sizes=resolve_size_list(
-                config["ring"].get("sizes", []),
-                fallback=sorted(result.rings),
-                key="ring.sizes",
-            ),
+            ring_sizes=list(result.ring_report_sizes),
         )
     else:
         remove_optional_info_output(result, frame_dir)
@@ -751,7 +762,13 @@ def write_frame_outputs(result: FrameResult, frame_dir: Path, config: dict[str, 
     if config["output"]["write_gro"]:
         layout = str(config["output"].get("structure_layout", "grouped"))
         if config["output"].get("write_ring_gro", True):
-            write_ring_gro_files(result, frame_dir, write_empty=config["output"]["write_empty_files"], layout=layout)
+            write_ring_gro_files(
+                result,
+                frame_dir,
+                write_empty=config["output"]["write_empty_files"],
+                layout=layout,
+                sizes=set(result.ring_report_sizes),
+            )
         if config["output"].get("write_half_cage_gro", True):
             write_half_cage_gro_files(result, frame_dir, write_empty=config["output"]["write_empty_files"], layout=layout)
         if config["output"].get("write_quasi_cage_gro", True):
@@ -812,19 +829,16 @@ def can_parallelize_paths(paths: list[Path], topology: Path | None) -> bool:
 
 def apply_cli_overrides(config: dict[str, Any], args: Namespace) -> None:
     """Apply command-line options after YAML/default configuration."""
-    cage_size_overridden = False
     if args.pattern:
         config["input"]["pattern"] = args.pattern
     if args.recursive:
         config["input"]["recursive"] = True
-    if getattr(args, "sizes", None):
-        config["ring"]["sizes"] = args.sizes
-        config["quasi_cage"]["base_sizes"] = args.sizes
-        config["quasi_cage"]["side_sizes"] = args.sizes
-        config["cage"]["ring_sizes"] = args.sizes
-        cage_size_overridden = True
-    if getattr(args, "ring_sizes", None):
-        config["ring"]["sizes"] = args.ring_sizes
+    if getattr(args, "size", None):
+        config["ring"]["sizes"] = args.size
+        config["quasi_cage"]["base_sizes"] = args.size
+        config["quasi_cage"]["side_sizes"] = args.size
+    if getattr(args, "ring_size", None):
+        config["ring"]["report_sizes"] = args.ring_size
     if getattr(args, "quasi_sizes", None):
         config["quasi_cage"]["base_sizes"] = args.quasi_sizes
         config["quasi_cage"]["side_sizes"] = args.quasi_sizes
@@ -836,17 +850,12 @@ def apply_cli_overrides(config: dict[str, Any], args: Namespace) -> None:
         if args.quasi_max_layers < 1:
             raise ValueError("--quasi-max-layers must be at least 1.")
         config["quasi_cage"]["max_layers"] = args.quasi_max_layers
-    if getattr(args, "cage_sizes", None):
-        config["cage"]["ring_sizes"] = args.cage_sizes
-        cage_size_overridden = True
-    if cage_size_overridden and cage_sizes_need_other_outputs(config["cage"]["ring_sizes"]):
-        config["cage"]["output_other"] = True
-    if getattr(args, "other_cages", False):
-        config["cage"]["output_other"] = True
-    if getattr(args, "no_other_cages", False):
-        config["cage"]["output_other"] = False
-    if getattr(args, "other_max_faces", None) is not None:
-        config["cage"]["other_max_faces"] = args.other_max_faces
+    if getattr(args, "cage_size", None):
+        config["cage"]["report_types"] = args.cage_size
+    if getattr(args, "max_cage_faces", None) is not None:
+        if args.max_cage_faces < 1:
+            raise ValueError("--max-cage-faces must be at least 1.")
+        config["cage"]["max_faces"] = args.max_cage_faces
     bond_mode = getattr(args, "bond_mode", None)
     if args.pairs:
         if bond_mode not in (None, "pairs"):
@@ -881,13 +890,82 @@ def apply_cli_overrides(config: dict[str, Any], args: Namespace) -> None:
         config["output"]["write_xlsx_summary"] = False
 
 
-def cage_sizes_need_other_outputs(value: Any) -> bool:
-    """Enable generated cage targets when CLI cage sizes include 4-ring faces."""
-    try:
-        return 4 in resolve_size_list(value, fallback=[], key="cage.ring_sizes")
-    except ValueError:
-        return False
+def normalize_analysis_scopes(config: dict[str, Any]) -> None:
+    """Normalize search and report scopes before frames are analyzed."""
+    search_sizes = resolve_size_list(config["ring"].get("sizes", []), fallback=[], key="ring.sizes")
+    unsupported = set(search_sizes) - {4, 5, 6, 7}
+    if unsupported:
+        raise ValueError(f"ring.sizes / --size supports only 4, 5, 6, and 7; got {sorted(unsupported)}")
+    ring_report_sizes = resolve_size_list(
+        config["ring"].get("report_sizes", "auto"),
+        fallback=search_sizes,
+        key="ring.report_sizes",
+    )
+    if not set(ring_report_sizes) <= set(search_sizes):
+        raise ValueError("ring.report_sizes / --ring-size must be a subset of ring.sizes / --size.")
 
+    max_faces = int(config["cage"].get("max_faces", 20))
+    if max_faces < 1:
+        raise ValueError("cage.max_faces / --max-cage-faces must be at least 1.")
+    report_types = resolve_cage_report_types(
+        config["cage"].get("report_types", []),
+        search_sizes,
+        max_faces,
+    )
+    config["ring"]["sizes"] = search_sizes
+    config["ring"]["report_sizes"] = ring_report_sizes
+    config["cage"]["report_types"] = "all" if report_types is None else list(report_types)
+    config["cage"]["max_faces"] = max_faces
+
+
+def resolve_cage_report_types(
+    value: Any,
+    search_sizes: list[int],
+    max_faces: int,
+) -> tuple[str, ...] | None:
+    """Resolve exact report types; None means report every detected cage."""
+    if isinstance(value, str):
+        items = [item.strip() for item in value.split(",") if item.strip()]
+    else:
+        try:
+            items = [str(item).strip() for item in value if str(item).strip()]
+        except TypeError as exc:
+            raise ValueError("cage.report_types / --cage-size must be a comma-separated list or 'all'.") from exc
+    if not items:
+        raise ValueError("cage.report_types / --cage-size must contain at least one cage type.")
+    if any(item.lower() == "all" for item in items):
+        if len(items) != 1:
+            raise ValueError("Use 'all' alone in cage.report_types / --cage-size.")
+        return None
+
+    allowed_sizes = set(search_sizes) & {4, 5, 6}
+    resolved: list[str] = []
+    for item in items:
+        cage_type = canonical_cage_type(item)
+        counts = TARGET_FACE_COUNTS.get(cage_type) or parse_cage_face_label(cage_type)
+        if counts is None:
+            raise ValueError(f"Unable to resolve cage type: {item}")
+        required_sizes = {size for size, count in counts.items() if count > 0}
+        if not required_sizes <= allowed_sizes:
+            missing = sorted(required_sizes - allowed_sizes)
+            raise ValueError(
+                f"Cage type {item} requires ring size(s) {missing}, which are absent from --size."
+            )
+        if sum(counts.values()) > max_faces:
+            raise ValueError(
+                f"Cage type {item} has {sum(counts.values())} faces, above --max-cage-faces={max_faces}."
+            )
+        if cage_type not in resolved:
+            resolved.append(cage_type)
+    return tuple(resolved)
+
+
+def select_reported_cages(cages: list[Cage], report_types: tuple[str, ...] | None) -> list[Cage]:
+    """Filter detected cages for reports without changing topology filtering."""
+    if report_types is None:
+        return list(cages)
+    allowed = set(report_types)
+    return [cage for cage in cages if cage.cage_type in allowed]
 
 def analyze_frame(
     frame: Frame,
@@ -896,10 +974,17 @@ def analyze_frame(
 ) -> FrameResult:
     """Analyze one frame and return all topology objects for export."""
     report_stage(stage_callback, "resolving settings")
+    normalize_analysis_scopes(config)
     ring_sizes = resolve_size_list(config["ring"]["sizes"], fallback=[], key="ring.sizes")
+    ring_report_sizes = resolve_size_list(config["ring"].get("report_sizes", "auto"), fallback=ring_sizes, key="ring.report_sizes")
     quasi_base_sizes = resolve_size_list(config["quasi_cage"].get("base_sizes", "auto"), fallback=ring_sizes, key="quasi_cage.base_sizes")
     quasi_side_sizes = resolve_size_list(config["quasi_cage"].get("side_sizes", "auto"), fallback=ring_sizes, key="quasi_cage.side_sizes")
-    cage_ring_sizes = resolve_size_list(config["cage"].get("ring_sizes", [5, 6]), fallback=ring_sizes, key="cage.ring_sizes")
+    cage_ring_sizes = [size for size in ring_sizes if size in {4, 5, 6}]
+    cage_report_types = resolve_cage_report_types(
+        config["cage"].get("report_types", []),
+        ring_sizes,
+        int(config["cage"].get("max_faces", 20)),
+    )
     report_stage(stage_callback, "selecting molecules")
     waters = select_waters(
         frame.atoms,
@@ -912,7 +997,7 @@ def analyze_frame(
         resnames=set(config["guest"]["resnames"]),
         center_atoms=config["guest"].get("center_atoms", {}),
     )
-    # Ring, half-cage, quasi-cage, cage, F3/F4, and ice all consume the same water graph.
+    # All structure classifiers consume the same water graph.
     report_stage(stage_callback, "building water graph")
     graph = build_water_graph(
         frame.atoms,
@@ -948,18 +1033,16 @@ def analyze_frame(
     warnings = []
     cage_seed_patches = [*half_cages, *quasi_cages]
     report_stage(stage_callback, "searching cage")
-    cages = find_cages(
+    all_cages = find_cages(
         frame,
         rings,
         cage_seed_patches,
         guests,
         enabled=bool(config["cage"].get("enabled", False)),
-        target_types=list(config["cage"].get("target_types", [])),
         ring_sizes=cage_ring_sizes,
-        output_other=bool(config["cage"].get("output_other", False)),
-        other_max_faces=int(config["cage"].get("other_max_faces", 20)),
+        max_faces=int(config["cage"].get("max_faces", 20)),
         search_mode=str(config["cage"].get("search_mode", "grow")),
-        seed_mode=str(config["cage"].get("seed_mode", "patch")),
+        seed_mode=str(config["cage"].get("seed_mode", "ring")),
         max_states_per_seed=int(config["cage"].get("max_states_per_seed", 20000)),
         max_total_states=int(config["cage"].get("max_total_states", 5000000)),
         max_boundary_candidates=int(config["cage"].get("max_boundary_candidates", 8)),
@@ -967,9 +1050,10 @@ def analyze_frame(
         occupancy_mode=str(config["cage"].get("occupancy_mode", "polyhedron")),
         warnings=warnings,
     )
+    cages = select_reported_cages(all_cages, cage_report_types)
     report_stage(stage_callback, "filtering free patches")
-    quasi_cages = filter_free_patches(quasi_cages, cages)
-    half_cages = filter_free_patches(half_cages, cages, higher_priority_patches=quasi_cages)
+    quasi_cages = filter_free_patches(quasi_cages, all_cages)
+    half_cages = filter_free_patches(half_cages, all_cages, higher_priority_patches=quasi_cages)
     focus_resids = {int(item) for item in config["order"].get("focus_waters", [])}
     report_stage(stage_callback, "computing F3/F4")
     f3f4 = compute_f3f4(frame, waters, graph, focus_resids=focus_resids) if bool(config["order"].get("f3f4_enabled", True)) else None
@@ -990,9 +1074,12 @@ def analyze_frame(
         guests=guests,
         graph=graph,
         rings=rings,
+        ring_report_sizes=tuple(ring_report_sizes),
         half_cages=half_cages,
         quasi_cages=quasi_cages,
         cages=cages,
+        all_cages=all_cages,
+        cage_report_types=cage_report_types,
         f3f4=f3f4,
         ice_like_waters=ice_classes.ice_like,
         ice_i_waters=ice_classes.ice_i,

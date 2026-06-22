@@ -30,9 +30,9 @@ Examples:
   sqq analyze -i ./gro -m 00 -b hbond --workers 4 -o ./result_sqq
 
 Analysis modes:
-  -m 00  Rigorous: hbond, 4/5/6 rings and cages, other cages, 25% CPU workers
-  -m 50  Standard: auto graph, 5/6 rings and cages, standard cages, 50% CPU workers
-  -m 99  Performance: O-O graph, 5/6 rings and cages, standard cages, 90% CPU workers
+  -m 00  Rigorous: hbond, 4/5/6 search, 25% CPU workers
+  -m 50  Standard: auto graph, 5/6 search, 50% CPU workers
+  -m 99  Performance: O-O graph, 5/6 search, 90% CPU workers
 
 Modes do not change quasi_cage.max_layers; its default remains 1.
 -b/--bond-mode overrides the graph setting supplied by the selected mode.
@@ -81,25 +81,21 @@ def build_parser() -> argparse.ArgumentParser:
     )
     analyze_parser.add_argument(
         "-s",
-        "--sizes",
-        metavar="4,5,6",
-        help="Set ring, quasi_cage base/side, and cage ring sizes together; including 4 enables other cages unless --no-other-cages is used.",
+        "--size",
+        metavar="4,5,6,7",
+        help="Set the ring-face sizes searched by ring, quasi-cage, and cage detection.",
     )
-    analyze_parser.add_argument("--ring-sizes", metavar="4,5,6", help="Override ring.sizes.")
-    analyze_parser.add_argument("--quasi-sizes", metavar="4,5,6", help="Override quasi_cage base_sizes and side_sizes together.")
-    analyze_parser.add_argument("--quasi-base-sizes", metavar="4,5,6", help="Override quasi_cage.base_sizes.")
-    analyze_parser.add_argument("--quasi-side-sizes", metavar="4,5,6", help="Override quasi_cage.side_sizes.")
+    analyze_parser.add_argument("--ring-size", metavar="4,5,6,7", help="Report only these searched ring sizes; default follows --size.")
+    analyze_parser.add_argument("--quasi-sizes", metavar="4,5,6,7", help="Override quasi_cage base_sizes and side_sizes together.")
+    analyze_parser.add_argument("--quasi-base-sizes", metavar="4,5,6,7", help="Override quasi_cage.base_sizes.")
+    analyze_parser.add_argument("--quasi-side-sizes", metavar="4,5,6,7", help="Override quasi_cage.side_sizes.")
     analyze_parser.add_argument("--quasi-max-layers", metavar="N", type=int, help="Override quasi_cage.max_layers; default 1 reports L1 quasi_cage and standard half_cage only.")
     analyze_parser.add_argument(
-        "--cage-sizes",
-        dest="cage_sizes",
-        metavar="4,5,6",
-        help="Override cage.ring_sizes; including 4 enables other cages unless --no-other-cages is used.",
+        "--cage-size",
+        metavar="TYPE[,TYPE...]",
+        help="Report exact cage types, e.g. 512,51262,51268,435663, or all.",
     )
-    other_group = analyze_parser.add_mutually_exclusive_group()
-    other_group.add_argument("--other-cages", action="store_true", help="Enable generated unconventional 4/5/6 cage targets.")
-    other_group.add_argument("--no-other-cages", action="store_true", help="Disable generated unconventional cage targets.")
-    analyze_parser.add_argument("--other-max-faces", metavar="N", type=int, help="Maximum face count for generated unconventional cages.")
+    analyze_parser.add_argument("--max-cage-faces", metavar="N", type=int, help="Maximum face count searched for Euler-compatible cages; default 20.")
     analyze_parser.add_argument("--recursive", action="store_true", help="Read input directory recursively.")
     analyze_parser.add_argument("--pairs", metavar="PAIRS.txt", help="Pair file for bond_mode=pairs; each line contains two water ids.")
     analyze_parser.add_argument("--pair-id", metavar="KIND", choices=["resid", "oxygen_index", "atomid"], help="How ids in --pairs are interpreted.")

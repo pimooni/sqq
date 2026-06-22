@@ -2,6 +2,52 @@
 
 This file records versioned update notes. New releases should be appended above older entries.
 
+## Version 0.1.5
+
+### Main Changes
+
+1. Hydrogen-bond and connectivity coordination diagnostics
+   - Added per-frame degree distributions for water nodes: 0, 1, 2, 3, 4, and greater than 4.
+   - Added counts, fractions, mean coordination, degree <=2 fraction, four-coordinated fraction, and over-four fraction.
+   - The active `hbond`, `oo`, or `pairs` workbook tab now contains the same plotting-friendly diagnostics.
+   - Diagnostics read the existing graph only; they do not alter edges or any ring, patch, cage, F3/F4, or ice result.
+
+2. Type H named cages
+   - Added `51268` for `5^12 6^8` and `435663` for `4^3 5^6 6^3`.
+   - Added superscript report labels and distinct cage-center atom names for both Type H cages.
+
+3. Separate cage detection and reporting
+   - `-s` / `--size` now defines the ring-face sizes searched by ring, quasi-cage, and cage analysis.
+   - Cage search generates all trivalent Euler-compatible 4/5/6 face compositions up to `--max-cage-faces` (default 20).
+   - `--cage-size` filters exact reported cage types; `--cage-size all` reports every detected composition.
+   - All detected cages continue to control half-cage, quasi-cage, and free-ring ownership even when their type is not reported.
+
+4. Separate ring detection and reporting
+   - Added `--ring-size` and `ring.report_sizes` to filter ring tables and GRO files after detection.
+   - The report-size list must be a subset of the search sizes.
+
+5. CLI and configuration cleanup
+   - Renamed `--sizes` to `--size`.
+   - Replaced the old search-oriented `--ring-sizes` and `--cage-sizes` options with report-oriented `--ring-size` and `--cage-size`.
+   - Replaced `--other-cages`, `--no-other-cages`, and `--other-max-faces` with `--cage-size all` and `--max-cage-faces`.
+   - Replaced `cage.ring_sizes`, `cage.target_types`, `cage.output_other`, and `cage.other_max_faces` with `cage.report_types` and `cage.max_faces`.
+
+6. Package metadata and terminal labels
+   - Added `J. PANG` and `Q. SUN` as package authors and retained `pimooni@gmail.com` as contact email.
+   - Terminal graph modes now display readable names while CLI/config identifiers remain `auto`, `hbond`, `oo`, and `pairs`.
+   - Retained `-m` as the short form of `--mode`.
+   - Updated package version metadata from `0.1.4` to `0.1.5`.
+
+### Compatibility
+
+- Existing graph construction and topology acceptance criteria are unchanged.
+- Commands and YAML files using the removed plural/other-cage options must be updated to the new search/report options.
+- Cage-network or crystal-domain analysis is intentionally not included in this release.
+
+### Short Summary
+
+Version 0.1.5 adds diagnostic coordination distributions, named Type H cages, and explicit search/report scopes for rings and cages.
+
 ## Version 0.1.4
 
 ### Main Changes
@@ -23,7 +69,9 @@ This file records versioned update notes. New releases should be appended above 
 3. Clearer per-frame Markdown reports
    - Ring counts now show only configured sizes and use the final free-ring population; cage counts list one topology type per row.
    - Half-cage and quasi-cage labels omit internal prefixes and group isomers below composition totals.
-   - Cage occupancy now lists cage types by row and exact guest compositions by column.
+   - The Molecules table now reports both molecule and atom counts in source order.
+   - The active network section reports the selected connection type, connection count, and mean connections per water.
+   - Cage occupancy now lists cage types by row and exact guest compositions by column in source guest order.
    - Cage isomers now use nested readable labels instead of a wide type-by-isomer matrix.
    - Frame, molecule, active-connection, F3/F4, and ice information is separated into compact sections.
    - `summary.xlsx` remains unchanged with one input file per row in analysis sheets.

@@ -33,6 +33,22 @@ SUMMARY_COLUMNS = [
     "hbond_count",
     "oo_connection_count",
     "pair_connection_count",
+    "mean_coordination",
+    "coordination_0",
+    "coordination_1",
+    "coordination_2",
+    "coordination_3",
+    "coordination_4",
+    "coordination_gt4",
+    "coordination_0_fraction",
+    "coordination_1_fraction",
+    "coordination_2_fraction",
+    "coordination_3_fraction",
+    "coordination_4_fraction",
+    "coordination_gt4_fraction",
+    "degree_le2_fraction",
+    "degree4_fraction",
+    "over4_fraction",
     "ring4",
     "ring5",
     "ring6",
@@ -45,10 +61,13 @@ SUMMARY_COLUMNS = [
     "half_cage_breakdown",
     "quasi_cage_total",
     "quasi_cage_breakdown",
+    "cage_report_types",
     "cage_512",
     "cage_51262",
     "cage_51263",
     "cage_51264",
+    "cage_51268",
+    "cage_435663",
     "cage_total",
     "cage_empty",
     "cage_occupied",
@@ -99,7 +118,8 @@ def result_row(result: FrameResult) -> dict[str, Any]:
     empty = sum(1 for cage in result.cages if not cage.occupied)
     occupied = sum(1 for cage in result.cages if cage.occupied)
     used_ring_ids = {ring_id for patch in [*result.half_cages, *result.quasi_cages] for ring_id in patch.rings}
-    used_ring_ids.update(ring_id for cage in result.cages for ring_id in cage.rings)
+    filtering_cages = result.all_cages or result.cages
+    used_ring_ids.update(ring_id for cage in filtering_cages for ring_id in cage.rings)
     half_cage_counts = patch_counts(result.half_cages)
     quasi_cage_counts = patch_counts(result.quasi_cages)
 
@@ -133,10 +153,13 @@ def result_row(result: FrameResult) -> dict[str, Any]:
         "half_cage_breakdown": patch_breakdown(half_cage_counts),
         "quasi_cage_total": len(result.quasi_cages),
         "quasi_cage_breakdown": patch_breakdown(quasi_cage_counts),
+        "cage_report_types": "all" if result.cage_report_types is None else ";".join(result.cage_report_types),
         "cage_512": cage_counts.get("512", 0),
         "cage_51262": cage_counts.get("51262", 0),
         "cage_51263": cage_counts.get("51263", 0),
         "cage_51264": cage_counts.get("51264", 0),
+        "cage_51268": cage_counts.get("51268", 0),
+        "cage_435663": cage_counts.get("435663", 0),
         "cage_total": len(result.cages),
         "cage_empty": empty,
         "cage_occupied": occupied,
@@ -181,16 +204,34 @@ def result_row(result: FrameResult) -> dict[str, Any]:
 
 
 def graph_connection_counts(result: FrameResult) -> dict[str, Any]:
-    """Return explicit graph-connection count columns for summaries."""
+    """Return graph counts and a diagnostic-only coordination distribution."""
     mode = result.graph.mode
-    count = len(result.graph.edges)
-    return {
+    edge_count = len(result.graph.edges)
+    degrees = [len(result.graph.adjacency.get(water.oxygen, set())) for water in result.waters]
+    water_count = len(degrees)
+    bins = {degree: sum(value == degree for value in degrees) for degree in range(5)}
+    over_four = sum(value > 4 for value in degrees)
+
+    def fraction(count: int) -> float:
+        return 0.0 if water_count == 0 else count / water_count
+
+    values: dict[str, Any] = {
         "connection_mode": mode,
-        "connection_count": count,
-        "hbond_count": count if mode == "hbond" else None,
-        "oo_connection_count": count if mode == "oo" else None,
-        "pair_connection_count": count if mode == "pairs" else None,
+        "connection_count": edge_count,
+        "hbond_count": edge_count if mode == "hbond" else None,
+        "oo_connection_count": edge_count if mode == "oo" else None,
+        "pair_connection_count": edge_count if mode == "pairs" else None,
+        "mean_coordination": 0.0 if water_count == 0 else sum(degrees) / water_count,
+        "coordination_gt4": over_four,
+        "coordination_gt4_fraction": fraction(over_four),
+        "degree_le2_fraction": fraction(sum(bins[degree] for degree in range(3))),
+        "degree4_fraction": fraction(bins[4]),
+        "over4_fraction": fraction(over_four),
     }
+    for degree in range(5):
+        values[f"coordination_{degree}"] = bins[degree]
+        values[f"coordination_{degree}_fraction"] = fraction(bins[degree])
+    return values
 
 
 def patch_counts(patches) -> dict[str, int]:
@@ -219,7 +260,8 @@ def write_frame_info(result: FrameResult, frame_dir: Path, ring_sizes: list[int]
     row = result_row(result)
     cage_values = {cage.cage_type for cage in result.cages}
     cage_types = [cage_type for cage_type in ordered_cage_types(cage_values) if cage_type in cage_values]
-    enabled_ring_sizes = sorted(set(ring_sizes if ring_sizes is not None else result.rings))
+    default_ring_sizes = result.ring_report_sizes or tuple(result.rings)
+    enabled_ring_sizes = sorted(set(ring_sizes if ring_sizes is not None else default_ring_sizes))
     lines = [
         f"# SQQ Frame Report: {result.frame.name}",
         "",
@@ -320,21 +362,27 @@ def molecule_count_rows(result: FrameResult) -> list[list[Any]]:
 
 
 def connection_info_section(result: FrameResult, row: dict[str, Any]) -> list[str]:
-    """Render the active water-network connection mode without empty fields."""
+    """Render network coordination diagnostics without modifying graph edges."""
     mode = result.graph.mode
     title, count_label = {
-        "hbond": ("Hydrogen Bonds", "hydrogen bonds"),
-        "oo": ("O-O Connections", "O-O connections"),
-        "pairs": ("Pair Connections", "pair connections"),
-    }.get(mode, ("Connections", "connections"))
-    water_count = len(result.waters)
-    mean_degree = 0.0 if water_count == 0 else (2.0 * len(result.graph.edges)) / water_count
-    rows = [
-        ["water molecules", water_count],
-        [count_label, row["connection_count"]],
-        ["mean connections per water", mean_degree],
+        "hbond": ("Hydrogen-Bond Coordination", "hydrogen bonds"),
+        "oo": ("O-O Connectivity Coordination", "O-O connections"),
+        "pairs": ("Pair Connectivity Coordination", "user-defined pairs"),
+    }.get(mode, ("Network Coordination", "connections"))
+    rows: list[list[Any]] = [
+        ["water molecules", len(result.waters), ""],
+        [count_label, row["connection_count"], ""],
+        ["mean coordination", row["mean_coordination"], ""],
     ]
-    return section_table(title, ["item", "value"], rows)
+    for degree in range(5):
+        rows.append([
+            f"degree {degree}",
+            row[f"coordination_{degree}"],
+            row[f"coordination_{degree}_fraction"],
+        ])
+    rows.append(["degree >4", row["coordination_gt4"], row["coordination_gt4_fraction"]])
+    rows.append(["degree <=2", "", row["degree_le2_fraction"]])
+    return section_table(title, ["item", "count/value", "fraction"], rows)
 
 
 def atom_resname_counts(result: FrameResult) -> dict[str, int]:
@@ -409,6 +457,8 @@ def cage_display_label(cage_type: str) -> str:
         "51262": f"5{superscript_number(12)}6{superscript_number(2)}",
         "51263": f"5{superscript_number(12)}6{superscript_number(3)}",
         "51264": f"5{superscript_number(12)}6{superscript_number(4)}",
+        "51268": f"5{superscript_number(12)}6{superscript_number(8)}",
+        "435663": f"4{superscript_number(3)}5{superscript_number(6)}6{superscript_number(3)}",
     }
     if cage_type in known:
         return known[cage_type]
@@ -537,7 +587,10 @@ def write_membership(result: FrameResult, frame_dir: Path) -> None:
     """Write object-to-water membership for plotting and debugging."""
     rows: list[dict[str, Any]] = []
     water_resid_by_oxygen = {water.oxygen: water.resid for water in result.waters}
+    reported_ring_sizes = set(result.ring_report_sizes or tuple(result.rings))
     for size, rings in sorted(result.rings.items()):
+        if size not in reported_ring_sizes:
+            continue
         for ring in rings:
             rows.append(
                 {
@@ -603,7 +656,7 @@ def write_f3f4(result: FrameResult, frame_dir: Path) -> None:
 
 def cage_center_name(cage_type: str) -> str:
     """Return the short CNT atom name used for a cage center."""
-    return {"512": "G512", "51262": "G62", "51263": "G63", "51264": "G64"}.get(cage_type, "CAGE")[:5]
+    return {"512": "G512", "51262": "G62", "51263": "G63", "51264": "G64", "51268": "G68", "435663": "G436"}.get(cage_type, "CAGE")[:5]
 
 
 def write_vmd_script(result: FrameResult, frame_dir: Path) -> None:
@@ -647,7 +700,7 @@ def write_summary(
     if write_xlsx:
         with pd.ExcelWriter(outdir / "summary.xlsx", engine="openpyxl") as writer:
             summary_dashboard_table(data, run_info or {}, config).to_excel(writer, sheet_name="summary", index=False, header=False)
-            for sheet_name, table in summary_sheet_tables(data).items():
+            for sheet_name, table in summary_sheet_tables(data, config).items():
                 table.to_excel(writer, sheet_name=sheet_name, index=False)
             pd.DataFrame(flatten_config(config)).to_excel(writer, sheet_name="config", index=False)
             format_summary_workbook(writer.book)
@@ -695,12 +748,12 @@ def summary_dashboard_table(data: pd.DataFrame, run_info: dict[str, Any], config
         ["Topology", run_info.get("topology", "<none>")],
         ["Mode", run_info.get("mode", "")],
         ["Graph mode", first_data_value(data, "connection_mode", run_info.get("graph_mode", ""))],
-        ["Ring sizes", excel_scalar(config.get("ring", {}).get("sizes", ""))],
+        ["Search sizes", excel_scalar(config.get("ring", {}).get("sizes", ""))],
+        ["Ring report sizes", excel_scalar(configured_ring_report_sizes(config))],
         ["Quasi-cage sizes", f"{excel_scalar(config.get('quasi_cage', {}).get('base_sizes', 'auto'))} / {excel_scalar(config.get('quasi_cage', {}).get('side_sizes', 'auto'))}"],
         ["Quasi max layers", config.get("quasi_cage", {}).get("max_layers", "")],
-        ["Cage sizes", excel_scalar(config.get("cage", {}).get("ring_sizes", ""))],
-        ["Cage targets", dashboard_cage_targets(config)],
-        ["Other cages", config.get("cage", {}).get("output_other", False)],
+        ["Cage report types", dashboard_cage_targets(config)],
+        ["Maximum cage faces", config.get("cage", {}).get("max_faces", 20)],
         ["Output layout", run_info.get("output_layout", "")],
         ["Worker policy", run_info.get("worker_policy", "")],
         ["Workers", run_info.get("workers", "")],
@@ -711,7 +764,7 @@ def summary_dashboard_table(data: pd.DataFrame, run_info: dict[str, Any], config
         ["Guest molecules", sum_numeric_column(data, "n_guests")],
         ["Connections", sum_numeric_column(data, "connection_count")],
     ])
-    for size in config.get("ring", {}).get("sizes", [5, 6]):
+    for size in configured_ring_report_sizes(config):
         rows.append([f"Ring{size}", sum_numeric_column(data, f"ring{size}")])
     rows.extend([
         ["Half cage", sum_numeric_column(data, "half_cage_total")],
@@ -763,19 +816,27 @@ def molecule_totals(data: pd.DataFrame) -> dict[str, int]:
     return totals
 
 
+def configured_ring_report_sizes(config: dict[str, Any]) -> list[int]:
+    """Return normalized ring report sizes for dashboards and data sheets."""
+    search_sizes = config.get("ring", {}).get("sizes", [5, 6])
+    value = config.get("ring", {}).get("report_sizes", "auto")
+    if value in (None, "", "auto"):
+        value = search_sizes
+    if isinstance(value, str):
+        return sorted({int(item.strip()) for item in value.split(",") if item.strip()})
+    return sorted({int(item) for item in value})
+
+
 def dashboard_cage_targets(config: dict[str, Any]) -> str:
-    """Render configured cage targets with human-facing superscripts."""
-    cage_config = config.get("cage", {})
-    targets = cage_config.get("target_types", "")
+    """Render exact cage report types with human-facing superscripts."""
+    targets = config.get("cage", {}).get("report_types", [])
     if isinstance(targets, str):
+        if targets.strip().lower() == "all":
+            return "all detected cages"
         raw_targets = [item.strip() for item in targets.split(",") if item.strip()]
     else:
         raw_targets = [str(item) for item in targets or []]
-    labels = [cage_display_label(target) for target in raw_targets]
-    if cage_config.get("output_other", False):
-        labels.append(f"other 4/5/6 cages <= {cage_config.get('other_max_faces', 20)} faces")
-    return ", ".join(labels)
-
+    return ", ".join(cage_display_label(target) for target in raw_targets)
 
 def format_summary_workbook(workbook) -> None:
     """Apply readable formatting to the generated summary workbook."""
@@ -928,12 +989,16 @@ def summary_markdown_tables(data: pd.DataFrame) -> list[tuple[str, pd.DataFrame]
     return tables
 
 
-def summary_sheet_tables(data: pd.DataFrame) -> dict[str, pd.DataFrame]:
-    """Build extra XLSX sheets with plotting-friendly grouped data."""
+def summary_sheet_tables(data: pd.DataFrame, config: dict[str, Any]) -> dict[str, pd.DataFrame]:
+    """Build XLSX sheets using the configured report scopes."""
+    ring_sizes = configured_ring_report_sizes(config)
+    ring_columns = ["frame", "time_ps"]
+    for size in ring_sizes:
+        ring_columns.extend([f"ring{size}", f"free_ring{size}"])
     tables: dict[str, pd.DataFrame] = {
-        "frame": frame_summary_table(data),
+        "frame": frame_summary_table(data, ring_sizes),
         connection_sheet_name(data): connection_summary_table(data),
-        "ring": summary_simple_table(data, ["frame", "time_ps", "ring4", "ring5", "ring6", "ring7", "free_ring4", "free_ring5", "free_ring6", "free_ring7"]),
+        "ring": summary_simple_table(data, ring_columns),
         "half_cage": patch_summary_table(data, "half_cage"),
         "quasi_cage": patch_summary_table(data, "quasi_cage"),
         "cage": cage_summary_table(data),
@@ -945,8 +1010,8 @@ def summary_sheet_tables(data: pd.DataFrame) -> dict[str, pd.DataFrame]:
     return {name: table for name, table in tables.items() if not table.empty}
 
 
-def frame_summary_table(data: pd.DataFrame) -> pd.DataFrame:
-    """Build the main per-frame table with high-level analysis counts."""
+def frame_summary_table(data: pd.DataFrame, ring_sizes: list[int]) -> pd.DataFrame:
+    """Build the main per-frame table using the active report scopes."""
     columns = [
         "frame",
         "time_ps",
@@ -956,20 +1021,12 @@ def frame_summary_table(data: pd.DataFrame) -> pd.DataFrame:
         "n_atoms",
         "n_waters",
         "n_guests",
-        "ring4",
-        "ring5",
-        "ring6",
-        "ring7",
-        "free_ring4",
-        "free_ring5",
-        "free_ring6",
-        "free_ring7",
-        "half_cage_total",
-        "quasi_cage_total",
-        "cage_512",
-        "cage_51262",
-        "cage_51263",
-        "cage_51264",
+    ]
+    for size in ring_sizes:
+        columns.extend([f"ring{size}", f"free_ring{size}"])
+    columns.extend(["half_cage_total", "quasi_cage_total"])
+    columns.extend(f"cage_{cage_type}" for cage_type in summary_cage_types_from_data(data))
+    columns.extend([
         "cage_total",
         "cage_empty",
         "cage_occupied",
@@ -980,7 +1037,7 @@ def frame_summary_table(data: pd.DataFrame) -> pd.DataFrame:
         "ice_like_waters",
         "ice_i_waters",
         "interfacial_ice_waters",
-    ]
+    ])
     return summary_simple_table(data, columns)
 
 
@@ -998,8 +1055,29 @@ def connection_sheet_name(data: pd.DataFrame) -> str:
 
 
 def connection_summary_table(data: pd.DataFrame) -> pd.DataFrame:
-    """Build a per-frame graph-connection count table."""
-    columns = ["frame", "time_ps", "connection_mode", "connection_count"]
+    """Build a per-frame connection and coordination diagnostic table."""
+    columns = [
+        "frame",
+        "time_ps",
+        "connection_mode",
+        "connection_count",
+        "mean_coordination",
+        "coordination_0",
+        "coordination_1",
+        "coordination_2",
+        "coordination_3",
+        "coordination_4",
+        "coordination_gt4",
+        "coordination_0_fraction",
+        "coordination_1_fraction",
+        "coordination_2_fraction",
+        "coordination_3_fraction",
+        "coordination_4_fraction",
+        "coordination_gt4_fraction",
+        "degree_le2_fraction",
+        "degree4_fraction",
+        "over4_fraction",
+    ]
     modes = [str(value) for value in data.get("connection_mode", pd.Series(dtype=str)).dropna() if str(value)]
     mode = modes[0] if modes else ""
     mode_column = {
@@ -1007,8 +1085,8 @@ def connection_summary_table(data: pd.DataFrame) -> pd.DataFrame:
         "oo": "oo_connection_count",
         "pairs": "pair_connection_count",
     }.get(mode)
-    if mode_column and mode_column not in columns:
-        columns.append(mode_column)
+    if mode_column:
+        columns.insert(4, mode_column)
     return summary_simple_table(data, columns)
 
 
@@ -1053,20 +1131,31 @@ def patch_summary_table(data: pd.DataFrame, prefix: str) -> pd.DataFrame:
 
 
 def summary_cage_types_from_data(data: pd.DataFrame) -> list[str]:
-    """Collect cage base-count columns, keeping conventional hydrate cages first."""
-    types = set()
+    """Collect exact cage report types, including requested zero-count types."""
+    requested: set[str] = set()
+    report_all = False
+    for value in data.get("cage_report_types", pd.Series(dtype=str)).dropna():
+        marker = str(value).strip()
+        if not marker:
+            continue
+        if marker.lower() == "all":
+            report_all = True
+            continue
+        requested.update(item for item in marker.split(";") if item)
+    if requested and not report_all:
+        return [item for item in ordered_cage_types(requested) if item in requested]
+
+    detected: set[str] = set()
     for column in data.columns:
         if not column.startswith("cage_"):
             continue
         label = column.removeprefix("cage_")
-        if label in {"empty", "occupied", "total"}:
+        if label in {"empty", "occupied", "total", "report_types"} or "_" in label:
             continue
-        # Base cage count columns have no second underscore; occupancy, guest,
-        # and isomer columns are handled in their own summary sheets.
-        if "_" in label:
-            continue
-        types.add(label)
-    return ordered_cage_types(types)
+        values = pd.to_numeric(data[column], errors="coerce").fillna(0)
+        if bool((values > 0).any()):
+            detected.add(label)
+    return [item for item in ordered_cage_types(detected) if item in detected]
 
 
 def cage_summary_table(data: pd.DataFrame) -> pd.DataFrame:

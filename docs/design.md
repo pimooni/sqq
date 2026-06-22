@@ -8,6 +8,7 @@ SQQ means **Shell Quant Qualifier**. This document records the current implement
 input frames
   -> molecule selection
   -> water graph: hydrogen bond / O-O / user pair map
+  -> diagnostic coordination distribution
   -> primitive chordless rings
   -> half_cage and quasi_cage open patches
   -> closed cage search and guest occupancy
@@ -15,17 +16,17 @@ input frames
   -> per-frame outputs and summary.xlsx
 ```
 
-The shared water graph is used by ring, half_cage, quasi_cage, cage, F3/F4, and ice analysis. The graph node is the water oxygen. A graph edge is an O-H...O hydrogen bond in `hbond` mode, an O-O neighbor in `oo` mode, or a user-supplied pair in `pairs` mode.
+The shared water graph is used by ring, half_cage, quasi_cage, cage, F3/F4, and ice analysis. The graph node is the water oxygen. A graph edge is an O-H...O hydrogen bond in `hbond` mode, an O-O neighbor in `oo` mode, or a user-supplied pair in `pairs` mode. Coordination diagnostics read this graph without adding, removing, or capping edges.
 
 ## Analysis Modes and Workers
 
 Modes are discrete base presets, not a continuous 00-99 scale. The default mode is `50`.
 
-| Mode | Label | Graph | Ring sizes | Cage sizes | Other cages | Auto worker fraction |
-| --- | --- | --- | --- | --- | --- | --- |
-| `00` | rigorous | `hbond` | 4/5/6 | 4/5/6 | enabled | 25% |
-| `50` | standard | `auto` | 5/6 | 5/6 | disabled | 50% |
-| `99` | performance | `oo` | 5/6 | 5/6 | disabled | 90% |
+| Mode | Label | Graph | Search sizes | Auto worker fraction |
+| --- | --- | --- | --- | --- |
+| `00` | rigorous | `hbond` | 4/5/6 | 25% |
+| `50` | standard | `auto` | 5/6 | 50% |
+| `99` | performance | `oo` | 5/6 | 90% |
 
 Mode application order is:
 
@@ -33,7 +34,7 @@ Mode application order is:
 built-in defaults -> mode preset -> config.yaml -> explicit CLI options
 ```
 
-The mode preset controls graph mode, ring/cage size ranges, unconventional cage output, and the automatic worker fraction. It does not control `quasi_cage.max_layers` or output switches. L1 is therefore the default quasi-cage depth in every mode; L2/L3 require `--quasi-max-layers` or an explicit config value.
+The mode preset controls graph mode, the shared ring-face search sizes, and the automatic worker fraction. It does not control `quasi_cage.max_layers` or output switches. L1 is therefore the default quasi-cage depth in every mode; L2/L3 require `--quasi-max-layers` or an explicit config value.
 
 An explicit `-b` / `--bond-mode {auto,hbond,oo,pairs}` overrides the graph mode from both the preset and `config.yaml`. `--pairs PAIRS.txt` implies pairs mode unless `-b pairs` is already given; it cannot be combined with another explicit bond mode.
 
@@ -52,6 +53,12 @@ Parallel GRO/XYZ runs use a thread-safe progress aggregator. Every worker report
 - `sqq/io/summary.py`: per-frame info and global workbook tables.
 - `sqq/io/gro_writer.py`: grouped or flat GRO structure output.
 
+## Coordination Diagnostics
+
+The active graph is summarized by water-node degree. Per-frame outputs report degree 0, 1, 2, 3, 4, and greater than 4 as counts and fractions, together with mean coordination, the degree <=2 fraction, the four-coordinated fraction, and the over-four fraction.
+
+The section title follows the resolved graph mode: Hydrogen-Bond Coordination, O-O Connectivity Coordination, or Pair Connectivity Coordination. These values are diagnostic only. They do not modify graph construction, ring/cage detection, F3/F4, or ice classification.
+
 ## Ring Search
 
 Rings are searched on the already-built water graph. The algorithm does not use geometric distance at this stage; it follows graph adjacency. The implementation uses an iterative DFS instead of recursive DFS.
@@ -61,7 +68,8 @@ Current behavior:
 - supported ring sizes: 4, 5, 6, 7;
 - default ring sizes: 5, 6;
 - default ring filter: chordless primitive rings;
-- ring nodes are water oxygen indices.
+- ring nodes are water oxygen indices;
+- `ring.sizes` / `--size` controls detection, while `ring.report_sizes` / `--ring-size` filters ring tables and GRO files after detection.
 
 ## Half-Cage and Quasi-Cage Terms
 
@@ -138,44 +146,63 @@ cage.search_mode = grow
 cage.seed_mode = ring
 ```
 
-The code can also grow from `half_cage`/`quasi_cage` patch seeds with `cage.seed_mode = patch`, but ring seeds are the default because they are faster in the tested frames.
+The code can also grow from half-cage/quasi-cage patch seeds with `cage.seed_mode = patch`, but ring seeds remain the default.
 
-Target cages:
+### Search Scope and Report Scope
+
+`ring.sizes` / `--size` defines the shared face-size search universe. Ring and quasi-cage detection support 4/5/6/7. Cage detection intentionally uses only the 4/5/6 intersection of that universe.
+
+For cage search, SQQ generates every trivalent Euler-compatible face composition up to `cage.max_faces` / `--max-cage-faces`:
 
 ```text
-512   = 5^12
-51262 = 5^12 6^2
-51263 = 5^12 6^3
-51264 = 5^12 6^4
+2*n4 + n5 = 12
+n4 + n5 + n6 <= max_faces
 ```
 
-Default cage search uses 5- and 6-member faces. 4-member faces can be enabled with `cage.ring_sizes = [4, 5, 6]`. 7-member faces are intentionally not used for cage detection.
+All generated compositions are searched in one merged grow traversal. Named cage labels are retained when a composition matches:
 
-Grow logic:
+```text
+512    = 5^12
+51262  = 5^12 6^2
+51263  = 5^12 6^3
+51264  = 5^12 6^4
+51268  = 5^12 6^8       # Type H large cage
+435663 = 4^3 5^6 6^3    # Type H small cage
+```
+
+Other accepted compositions use generic labels such as `4^1-5^10-6^2`.
+
+Detection and reporting are separate:
+
+- `all_cages` contains every accepted closed cage in the search scope;
+- `cage.report_types` / `--cage-size` filters the user-facing cage counts, occupancy, GRO, info, and workbook tables;
+- `--cage-size all` reports every detected composition;
+- all detected cages, including unreported types, still remove consumed half-cages, quasi-cages, and free rings;
+- an explicitly requested cage type is rejected when it requires a face size absent from `--size` or exceeds `--max-cage-faces`.
+
+The default report set remains `512,51262,51263,51264`.
+
+### Grow Logic
 
 1. Build `edge_to_ring_ids` from all allowed cage rings.
 2. Start from a seed face set, usually one ring.
-3. Merge all requested target face-count limits into one grow pass. Standard `512`, `51262`, `51263`, and `51264` therefore share the same DFS branches instead of being searched separately.
+3. Merge all generated target face-count limits into one grow pass so compatible cage types reuse DFS branches.
 4. Count how many ring faces use each edge in the current patch.
-5. Edges used once are open boundary edges; edges used twice are closed; edges used more than twice are invalid.
-6. Choose the most constrained boundary edge, meaning the boundary edge with the fewest addable rings.
-7. For that edge, use `edge_to_ring_ids` to find rings sharing the boundary edge.
-8. Reject a candidate ring if:
-   - it is already in the patch;
-   - it would exceed the merged target face-count limit;
-   - it would make any edge used more than twice;
-   - it violates the single-ring seed rank pruning.
-9. Only when the most constrained edge still has more candidates than `cage.max_boundary_candidates`, sort candidates by ring-center distance to the current patch and keep the nearest candidates. Set this parameter to `0` to keep all topology-valid candidates.
-10. Continue DFS growth until the shell closes or the branch can no longer fit the merged target limits.
-11. When a shell closes, classify it by exact face counts and then validate the polyhedron.
+5. Treat edges used once as open boundaries, twice as closed, and more than twice as invalid.
+6. Choose the boundary edge with the fewest addable rings.
+7. Use `edge_to_ring_ids` to obtain only rings sharing that boundary edge.
+8. Reject a candidate if it is already present, exceeds every compatible target, overuses an edge, or violates seed-rank pruning.
+9. Calculate ring-center distance only when `cage.max_boundary_candidates` requires candidate truncation.
+10. Continue iterative DFS until the shell closes or no target composition remains feasible.
+11. Classify a closed shell by exact face counts, then apply full polyhedron validation.
 
-Single-ring seed rank pruning avoids rediscovering the same cage from every face: when the seed is one ring, later growth cannot add a ring whose stable id ranks before the seed ring.
+Single-ring seed-rank pruning avoids rediscovering the same cage from every face: later growth cannot add a ring whose stable id ranks before the seed ring.
 
 Acceptance criteria:
 
-- all edges are used exactly twice;
+- every edge is used exactly twice;
 - Euler characteristic satisfies `V - E + F = 2`;
-- face counts match the target cage type;
+- face counts match one generated target composition;
 - the same `(cage_type, water_set)` was not already accepted.
 
 ## Guest Occupancy
@@ -199,7 +226,7 @@ cage > quasi_cage > half_cage > ring
 
 Rules:
 
-- patches consumed by a cage are not written as free `half_cage` or `quasi_cage`;
+- patches consumed by any detected cage are not written as free `half_cage` or `quasi_cage`, even when that cage type is not reported;
 - a `half_cage` whose ring set is a true subset of a `quasi_cage` is consumed by that `quasi_cage`;
 - nested `half_cage` results are reduced to the larger `half_cage` patch;
 - free rings are rings not consumed by cage, quasi_cage, or half_cage outputs;
@@ -219,15 +246,15 @@ frame_name/
   ice/
 ```
 
-The global workbook is `summary.xlsx`. It contains run metadata, per-frame counts, graph statistics, ring/half_cage/quasi_cage/cage tables, occupancy tables, F3/F4, ice, and config sheets.
+The global workbook is `summary.xlsx`. It contains run metadata, per-frame counts, connection and coordination diagnostics, report-scoped ring/cage tables, half_cage/quasi_cage tables, occupancy tables, F3/F4, ice, and config sheets.
 
 Each per-frame `*_info.md` report is optimized for inspection rather than plotting:
 
-- the Ring table shows only configured ring sizes and reports final free-ring counts;
+- the Ring table shows only report-selected ring sizes and reports final free-ring counts;
 - Half Cage and Quasi Cage omit internal `hc_`/`qc_` prefixes, aggregate each composition on a parent row, and list exact isomers on synchronized child rows;
 - Cage and Cage Isomer use one topology type per row;
 - Cage Occupancy uses one cage type per row and dynamic exact guest-composition columns in source guest order;
-- Frame Information, Molecules, the active connection mode, F3/F4, and Ice are separated into compact sections.
+- Frame Information, Molecules, active connection coordination, F3/F4, and Ice are separated into compact sections.
 
 The global `summary.xlsx` workbook is intentionally unchanged: plotting-oriented analysis sheets retain one input file or trajectory frame per row.
 
@@ -235,6 +262,7 @@ The global `summary.xlsx` workbook is intentionally unchanged: plotting-oriented
 
 - Orthorhombic boxes are supported in the implemented PBC path.
 - Cage detection supports 4/5/6 faces only; 7-member rings remain available for ring and quasi_cage analysis.
+- Cage-network or crystal-domain classification is not implemented in this version.
 - L2/L3 quasi_cage growth is bounded for speed and is not an exhaustive enumeration of all possible outer-layer subsets.
 - Automatic workers parallelize independent GRO/XYZ files only; they do not parallelize topology search inside one frame.
 - CHILL-style ice classification is implemented, but separate atomistic Ih/Ic stacking assignment can be refined later.
