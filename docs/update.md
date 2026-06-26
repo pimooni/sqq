@@ -6,43 +6,6 @@ This file records versioned update notes. New releases should be appended above 
 
 ### Main Changes
 
-1. Q_l order parameters
-   - Added local Steinhardt/LAMMPS-style Q_l calculation for water oxygens.
-   - Default reported degree list is Q6 and Q12 through `order.q_degree: [6, 12]`.
-   - The same interface can report common LAMMPS degrees such as `4,6,8,10,12`.
-   - Added Q_l neighbor modes: `graph`, `cutoff`, `nearest`, and `lammps`.
-   - Added Q_l settings: `order.q_enabled`, `order.q_degree`, `order.q_neighbor_mode`, `order.q_cutoff_nm`, and `order.q_n_neighbor`.
-   - Added CLI overrides: `--no-q`, `-q` / `--q-degree`, `--q-neighbor-mode`, `--q-cutoff`, and `--q-n-neighbor`.
-
-2. Order-parameter output
-   - Renamed the workbook `f3f4` sheet to `order_parameter`.
-   - The sheet now reports `F3_mean`, `F3_count`, `F4_mean`, `F4_count`, and one mean/count pair for each requested Q_l degree.
-   - Per-frame Markdown reports now use an `Order Parameters` section for F3, F4, and Q_l.
-   - Added optional per-water `*_order_parameter.tsv` output through `--write-order-tsv` or `output.write_order_tsv`.
-
-3. Per-frame info report readability
-   - Merged the previous separate `Cage` and `Cage Isomer` Markdown sections into one `Cage` section.
-   - Cage rows now show the cage composition as the parent row and structural isomers as synchronized child rows.
-   - Added `Quasi Cage Isomer Description` and `Cage Isomer Description` sections to each per-frame `*_info.md` report.
-   - Each actually observed quasi-cage or cage isomer receives its own description row with the observed count.
-   - The global `summary.xlsx` remains plotting-oriented and keeps separate workbook sheets where useful.
-
-4. Documentation and tests
-   - Updated README and design documentation for Q_l definitions, neighbor modes, and output layout.
-   - Added Q_l reference tests for simple-cubic and tetrahedral bond-vector arrangements plus degree parsing.
-
-5. Package version
-   - Updated package metadata from `0.1.6` to `0.1.7`.
-
-### Compatibility
-
-- The old internal F3/F4 data model is retained for compatibility, but user-facing workbook output now uses `order_parameter`.
-- Existing optional `*_f3f4.tsv` output is replaced by `*_order_parameter.tsv` when order TSV output is enabled.
-- Q_l is a diagnostic order parameter and does not alter graph construction, ring/cage detection, ownership filtering, guest occupancy, F3/F4, or ice classification.
-- Per-frame `*_info.md` cage formatting changed for readability; `summary.xlsx` remains the stable plotting-oriented output.
-
-### Main Changes
-
 1. Cage report scope now follows `--size` by default
    - Changed the built-in `cage.report_types` value from a fixed cage list to `auto`.
    - With no explicit cage report filter, every detected cage composition allowed by `-s` / `--size` is included in counts, occupancy tables, GRO files, per-frame info, and `summary.xlsx`.
@@ -57,7 +20,33 @@ This file records versioned update notes. New releases should be appended above 
    - Removed obsolete concatenated cage-label examples from README and CLI help.
    - Added the complete `--cage-size` value domain and corrected option defaults, aliases, and size-scope descriptions.
 
-4. Package version
+4. Q_l order parameters
+   - Added local Steinhardt/LAMMPS-style Q_l calculation for water oxygens.
+   - Default reported degree list is Q6 and Q12 through `order.q_degree: [6, 12]`.
+   - The same interface can report common LAMMPS degrees such as `4,6,8,10,12`.
+   - Added Q_l neighbor modes: `graph`, `cutoff`, `nearest`, and `lammps`.
+   - Added Q_l settings: `order.q_enabled`, `order.q_degree`, `order.q_neighbor_mode`, `order.q_cutoff_nm`, and `order.q_n_neighbor`.
+   - Added CLI overrides: `--no-q`, `-q` / `--q-degree`, `--q-neighbor-mode`, `--q-cutoff`, and `--q-n-neighbor`.
+
+5. Order-parameter output
+   - Renamed the workbook `f3f4` sheet to `order_parameter`.
+   - The sheet now reports `F3_mean`, `F3_count`, `F4_mean`, `F4_count`, and one mean/count pair for each requested Q_l degree.
+   - Per-frame Markdown reports now use an `Order Parameters` section for F3, F4, and Q_l.
+   - Added optional per-water `*_order_parameter.tsv` output through `--write-order-tsv` or `output.write_order_tsv`.
+
+6. Per-frame info report readability
+   - Merged the previous separate `Cage` and `Cage Isomer` Markdown sections into one `Cage` section.
+   - Cage rows now show cage composition as the parent row and structural isomers as synchronized child rows.
+   - Added `Quasi Cage Isomer Description` and `Cage Isomer Description` sections to each per-frame `*_info.md` report.
+   - Each observed quasi-cage or cage isomer receives its own description row with the observed count.
+   - `Cage Occupancy` remains separate because it describes guest assignment rather than cage topology.
+   - The global `summary.xlsx` remains plotting-oriented and keeps separate workbook sheets where useful.
+
+7. Documentation and tests
+   - Updated README and design documentation for cage report scope, Q_l definitions, neighbor modes, and output layout.
+   - Added Q_l reference tests for simple-cubic and tetrahedral bond-vector arrangements plus degree parsing.
+
+8. Package version
    - Updated package metadata from `0.1.5` to `0.1.6`.
 
 ### Compatibility
@@ -65,6 +54,14 @@ This file records versioned update notes. New releases should be appended above 
 - Cage detection, closure validation, ownership filtering, and search limits are unchanged.
 - Use cage groups rather than implementation-specific concatenated labels in new commands and configuration files.
 - Runs that relied on the old implicit four-type cage filter should now specify `--cage-size I,II,I2II`.
+- The old internal F3/F4 data model is retained for compatibility, but user-facing workbook output now uses `order_parameter`.
+- Existing optional `*_f3f4.tsv` output is replaced by `*_order_parameter.tsv` when order TSV output is enabled.
+- Q_l is a diagnostic order parameter and does not alter graph construction, ring/cage detection, ownership filtering, guest occupancy, F3/F4, or ice classification.
+- Per-frame `*_info.md` cage formatting changed for readability; `summary.xlsx` remains the stable plotting-oriented output.
+
+### Short Summary
+
+Version 0.1.6 makes cage reporting follow the selected search scope, adds Q_l order parameters, and improves per-frame cage/isomer readability while keeping the scientific cage acceptance rules unchanged.
 
 ## Version 0.1.5
 
