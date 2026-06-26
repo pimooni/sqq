@@ -87,7 +87,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "max_layer_candidates": 24,
     },
     "cage": {
-        "report_types": ["512", "51262", "51263", "51264"],
+        "report_types": "auto",
         "max_faces": 20,
         "enabled": True,
         "search_mode": "grow",
@@ -100,6 +100,11 @@ DEFAULT_CONFIG: dict[str, Any] = {
     },
     "order": {
         "f3f4_enabled": True,
+        "q_enabled": True,
+        "q_degree": [6, 12],
+        "q_neighbor_mode": "graph",
+        "q_cutoff_nm": 0.35,
+        "q_n_neighbor": None,
         "focus_waters": [],
     },
     "ice": {
@@ -117,6 +122,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "write_cage_gro": True,
         "write_ice_gro": True,
         "write_tsv": False,
+        "write_order_tsv": False,
         "write_vmd": False,
         "write_xlsx_summary": True,
         "write_empty_files": False,

@@ -100,6 +100,8 @@ class WaterOrder:
     xyz: np.ndarray
     f3: float | None
     f4: float | None
+    q_values: dict[int, float | None] = field(default_factory=dict)
+    q_neighbors: int = 0
 
 
 @dataclass(frozen=True)
@@ -114,6 +116,14 @@ class F3F4Result:
     f4_focus_mean: float | None = None
     f3_focus_valid: int = 0
     f4_focus_valid: int = 0
+    q_degree: tuple[int, ...] = ()
+    q_means: dict[int, float | None] = field(default_factory=dict)
+    q_valid_counts: dict[int, int] = field(default_factory=dict)
+    q_focus_means: dict[int, float | None] = field(default_factory=dict)
+    q_focus_valid_counts: dict[int, int] = field(default_factory=dict)
+    q_neighbor_mode: str = ""
+    q_cutoff_nm: float | None = None
+    q_n_neighbor: int | None = None
 
 
 # FrameResult carries both raw selections and derived topology for exporters.

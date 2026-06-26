@@ -12,11 +12,11 @@ input frames
   -> primitive chordless rings
   -> half_cage and quasi_cage open patches
   -> closed cage search and guest occupancy
-  -> F3/F4 and ice metrics
+  -> F3/F4/Q_l order parameters and ice metrics
   -> per-frame outputs and summary.xlsx
 ```
 
-The shared water graph is used by ring, half_cage, quasi_cage, cage, F3/F4, and ice analysis. The graph node is the water oxygen. A graph edge is an O-H...O hydrogen bond in `hbond` mode, an O-O neighbor in `oo` mode, or a user-supplied pair in `pairs` mode. Coordination diagnostics read this graph without adding, removing, or capping edges.
+The shared water graph is used by ring, half_cage, quasi_cage, cage, F3/F4, default Q_l, and ice analysis. The graph node is the water oxygen. A graph edge is an O-H...O hydrogen bond in `hbond` mode, an O-O neighbor in `oo` mode, or a user-supplied pair in `pairs` mode. Coordination diagnostics read this graph without adding, removing, or capping edges.
 
 ## Analysis Modes and Workers
 
@@ -48,7 +48,7 @@ Parallel GRO/XYZ runs use a thread-safe progress aggregator. Every worker report
 - `sqq/core/ring.py`: non-recursive DFS ring search.
 - `sqq/core/quasi_cage.py`: layered `half_cage` and `quasi_cage` search.
 - `sqq/core/cage.py`: closed cage grow search, polyhedron validation, guest assignment.
-- `sqq/core/f3f4.py`: F3/F4 order metrics.
+- `sqq/core/f3f4.py`: F3/F4/Q_l order metrics.
 - `sqq/core/ice.py`: CHILL-style ice classification.
 - `sqq/io/summary.py`: per-frame info and global workbook tables.
 - `sqq/io/gro_writer.py`: grouped or flat GRO structure output.
@@ -57,7 +57,31 @@ Parallel GRO/XYZ runs use a thread-safe progress aggregator. Every worker report
 
 The active graph is summarized by water-node degree. Per-frame outputs report degree 0, 1, 2, 3, 4, and greater than 4 as counts and fractions, together with mean coordination, the degree <=2 fraction, the four-coordinated fraction, and the over-four fraction.
 
-The section title follows the resolved graph mode: Hydrogen-Bond Coordination, O-O Connectivity Coordination, or Pair Connectivity Coordination. These values are diagnostic only. They do not modify graph construction, ring/cage detection, F3/F4, or ice classification.
+The section title follows the resolved graph mode: Hydrogen-Bond Coordination, O-O Connectivity Coordination, or Pair Connectivity Coordination. These values are diagnostic only. They do not modify graph construction, ring/cage detection, F3/F4, Q_l, or ice classification.
+
+## Order Parameters
+
+F3 and F4 follow the project reference implementation and use the active water graph as the neighbor map.
+
+Q_l is the local Steinhardt/LAMMPS-style bond-orientational order parameter:
+
+```text
+Ybar_lm(i) = (1 / Nb(i)) * sum_j Y_lm(theta_ij, phi_ij)
+Q_l(i)     = sqrt(4*pi / (2*l + 1) * sum_m |Ybar_lm(i)|^2)
+```
+
+The implementation is independent Python code and does not copy LAMMPS source. It uses unweighted oxygen-neighbor bond vectors and the same rotationally invariant normalization as LAMMPS `compute orientorder/atom`. The default reported degree list is `order.q_degree: [6, 12]`. The same interface can report the common LAMMPS degree list `[4, 6, 8, 10, 12]`.
+
+Neighbor modes:
+
+- `graph` (default): use the active SQQ water graph. In `hbond` mode this gives hydrogen-bond neighbors; in `oo` mode it gives O-O neighbors; in `pairs` mode it follows the user pair map.
+- `cutoff`: use all water oxygens within `order.q_cutoff_nm`.
+- `nearest`: use the nearest `order.q_n_neighbor` water oxygens within `order.q_cutoff_nm`.
+- `lammps`: LAMMPS-compatible cutoff plus fixed-neighbor behavior; if `order.q_n_neighbor` is null, it defaults to `12`.
+
+When a fixed neighbor count is active and fewer than that number of neighbors are found inside the cutoff, every requested Q_l value is set to `0.0`, matching LAMMPS behavior. Without a fixed neighbor count, waters with no Q_l neighbors are omitted from the Q_l mean and count.
+
+Q_l is a continuous structural descriptor, not a standalone ice-count classifier. The value is sensitive to the neighbor definition, so SQQ records the active Q_l degree list and neighbor settings in `run_config.yaml`, the terminal header, and `summary.xlsx`.
 
 ## Ring Search
 
@@ -159,15 +183,15 @@ For cage search, SQQ generates every trivalent Euler-compatible face composition
 n4 + n5 + n6 <= max_faces
 ```
 
-All generated compositions are searched in one merged grow traversal. Named cage labels are retained when a composition matches:
+All generated compositions are searched in one merged grow traversal. Reports and documentation use scientific face-count notation:
 
 ```text
-512    = 5^12
-51262  = 5^12 6^2
-51263  = 5^12 6^3
-51264  = 5^12 6^4
-51268  = 5^12 6^8       # Type H large cage
-435663 = 4^3 5^6 6^3    # Type H small cage
+5¹²
+5¹²6²
+5¹²6³
+5¹²6⁴
+5¹²6⁸       # Type H large cage
+4³5⁶6³      # Type H small cage
 ```
 
 Other accepted compositions use generic labels such as `4^1-5^10-6^2`.
@@ -175,12 +199,25 @@ Other accepted compositions use generic labels such as `4^1-5^10-6^2`.
 Detection and reporting are separate:
 
 - `all_cages` contains every accepted closed cage in the search scope;
+- `cage.report_types: auto` reports every detected cage allowed by `ring.sizes` / `--size`;
 - `cage.report_types` / `--cage-size` filters the user-facing cage counts, occupancy, GRO, info, and workbook tables;
+- cage report groups expand to exact compositions and duplicate types are removed:
+
+```text
+I     -> 5¹², 5¹²6²
+II    -> 5¹², 5¹²6⁴
+H     -> 5¹², 5¹²6⁸, 4³5⁶6³
+HS-I  -> 5¹², 5¹²6², 5¹²6³
+TS-I  -> 5¹², 5¹²6², 5¹²6³
+I2II  -> 5¹²6³
+```
+
+- `--cage-size` accepts `auto`, `all`, `I`, `II`, `H`, `HS-I`, `TS-I`, and `I2II`; group names may be comma-separated;
 - `--cage-size all` reports every detected composition;
 - all detected cages, including unreported types, still remove consumed half-cages, quasi-cages, and free rings;
-- an explicitly requested cage type is rejected when it requires a face size absent from `--size` or exceeds `--max-cage-faces`.
+- an explicitly requested cage group is rejected when one of its compositions requires a face size absent from `--size` or exceeds `--max-cage-faces`.
 
-The default report set remains `512,51262,51263,51264`.
+The default report scope is `auto`. Therefore, `-s 4,5,6` searches and reports every accepted cage composed of 4-, 5-, and 6-membered faces unless `--cage-size` explicitly narrows the report. For example, `-s 4,5,6 --cage-size I,II` keeps 4/5/6 ring and quasi-cage reporting while cage output is restricted to 5¹², 5¹²6², and 5¹²6⁴.
 
 ### Grow Logic
 
@@ -239,6 +276,7 @@ Per-frame output folders use the default grouped structure:
 ```text
 frame_name/
   frame_name_info.md
+  frame_name_order_parameter.tsv  # only when enabled
   ring/
   half_cage/<type>/
   quasi_cage/<type>/
@@ -246,17 +284,19 @@ frame_name/
   ice/
 ```
 
-The global workbook is `summary.xlsx`. It contains run metadata, per-frame counts, connection and coordination diagnostics, report-scoped ring/cage tables, half_cage/quasi_cage tables, occupancy tables, F3/F4, ice, and config sheets.
+The global workbook is `summary.xlsx`. It contains run metadata, per-frame counts, connection and coordination diagnostics, report-scoped ring/cage tables, half_cage/quasi_cage tables, occupancy tables, order parameters, ice, and config sheets.
 
 Each per-frame `*_info.md` report is optimized for inspection rather than plotting:
 
 - the Ring table shows only report-selected ring sizes and reports final free-ring counts;
 - Half Cage and Quasi Cage omit internal `hc_`/`qc_` prefixes, aggregate each composition on a parent row, and list exact isomers on synchronized child rows;
-- Cage and Cage Isomer use one topology type per row;
-- Cage Occupancy uses one cage type per row and dynamic exact guest-composition columns in source guest order;
-- Frame Information, Molecules, active connection coordination, F3/F4, and Ice are separated into compact sections.
+- Cage combines composition totals and structural isomers in one vertical table: each cage composition is a parent row, and observed isomers are synchronized child rows below it;
+- Quasi Cage Isomer Description gives one explanation row for each observed quasi-cage isomer, including the base ring and L1/L2/L3 ring sequence;
+- Cage Isomer Description gives one explanation row for each observed cage isomer, including face composition and the 6-ring face adjacency pattern;
+- Cage Occupancy remains separate because it describes guest assignment, not topology; it uses one cage type per row and dynamic exact guest-composition columns in source guest order;
+- Frame Information, Molecules, active connection coordination, Order Parameters, and Ice are separated into compact sections.
 
-The global `summary.xlsx` workbook is intentionally unchanged: plotting-oriented analysis sheets retain one input file or trajectory frame per row.
+The global `summary.xlsx` workbook keeps plotting-oriented analysis sheets with one input file or trajectory frame per row. The `order_parameter` sheet reports `F3_mean`, `F3_count`, `F4_mean`, `F4_count`, and one mean/count pair for each requested Q_l degree, plus focus-water columns when configured. Optional per-water output is written as `*_order_parameter.tsv`.
 
 ## Current Limits
 

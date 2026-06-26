@@ -2,7 +2,7 @@
 
 **SQQ: Python Joint Toolkit for Water-Shell Topology Analysis.**
 
-SQQ builds a water network, reports coordination diagnostics, and finds rings, standard half-cages, quasi-cages, closed cages, cage guest occupancy, F3/F4 metrics, and ice-like waters. Detailed algorithms are documented in `docs/design.md`; version notes are documented in `docs/update.md`.
+SQQ builds a water network, reports coordination diagnostics, and finds rings, standard half-cages, quasi-cages, closed cages, cage guest occupancy, F3/F4/Q_l order parameters, and ice-like waters. Detailed algorithms are documented in `docs/design.md`; version notes are documented in `docs/update.md`.
 
 ## Install
 
@@ -93,10 +93,10 @@ sqq init -o config.yaml
 Search 4/5/6 ring faces and report Type H cages:
 
 ```bash
-sqq analyze -i md.gro -s 4,5,6 --cage-size 512,51268,435663 -o ./result_sqq_456
+sqq analyze -i md.gro -s 4,5,6 --cage-size H -o ./result_sqq_456
 ```
 
-Report every detected cage composition in the selected search scope:
+Explicitly report every detected cage composition in the selected search scope:
 
 ```bash
 sqq analyze -i md.gro -s 4,5,6 --cage-size all -o ./result_sqq_all_cages
@@ -106,6 +106,12 @@ Enable outer quasi-cage layers:
 
 ```bash
 sqq analyze -i md.gro --quasi-max-layers 3 -o ./result_sqq_l3
+```
+
+Use LAMMPS-style Q_l degree list and neighbors:
+
+```bash
+sqq analyze -i md.gro -q 4,6,8,10,12 --q-neighbor-mode lammps --q-cutoff 0.35 --q-n-neighbor 12
 ```
 
 Disable per-frame info or structure GRO output:
@@ -145,15 +151,24 @@ quasi_cage:
 
 cage:
   enabled: true
-  report_types: [512, 51262, 51263, 51264]
+  report_types: auto
   max_faces: 20
   search_mode: grow
   seed_mode: ring
   occupancy_mode: polyhedron
 
+order:
+  f3f4_enabled: true
+  q_enabled: true
+  q_degree: [6, 12]
+  q_neighbor_mode: graph
+  q_cutoff_nm: 0.35
+  q_n_neighbor: null
+
 output:
   write_info: true
   write_gro: true
+  write_order_tsv: false
   write_xlsx_summary: true
   structure_layout: grouped
 
@@ -169,48 +184,68 @@ built-in defaults < mode preset < config.yaml < explicit command-line options
 
 ## Search and Report Scope
 
-`-s` / `--size` defines the ring-face sizes used during detection. Ring and cage reporting are filtered afterward:
+`-s` / `--size` defines the ring-face sizes used during detection and, by default, reporting. With no dedicated report filter, SQQ reports all rings, quasi-cages, and cages found in that search scope. `--ring-size` and `--cage-size` can narrow the user-facing output afterward:
 
 ```bash
-# Search 4/5/6, report only ring 5/6 and the two Type H cages
-sqq analyze -i md.gro -s 4,5,6 --ring-size 5,6 --cage-size 51268,435663
+# Search 4/5/6, report only ring 5/6 and the Type H cage group
+sqq analyze -i md.gro -s 4,5,6 --ring-size 5,6 --cage-size H
 ```
 
-All detected cages still participate in half-cage, quasi-cage, and free-ring filtering. `--cage-size` changes user-facing counts and files, not topology ownership. Cage detection supports 4/5/6 faces; ring and quasi-cage detection also support size 7.
+For example:
 
-Named cage types are:
+```bash
+# Report every detected 4/5/6 ring, quasi-cage, and cage composition
+sqq analyze -i md.gro -s 4,5,6
+
+# Keep 4/5/6 rings and quasi-cages, but report only structure-I and structure-II cages
+sqq analyze -i md.gro -s 4,5,6 --cage-size I,II
+```
+
+Cage report groups expand to scientific cage compositions:
 
 ```text
-512, 51262, 51263, 51264, 51268, 435663
+I     -> 5¹², 5¹²6²
+II    -> 5¹², 5¹²6⁴
+H     -> 5¹², 5¹²6⁸, 4³5⁶6³
+HS-I  -> 5¹², 5¹²6², 5¹²6³
+TS-I  -> 5¹², 5¹²6², 5¹²6³
+I2II  -> 5¹²6³
 ```
 
-`51268` and `435663` are the two named Type H cages. Use `--cage-size all` to report every detected Euler-compatible cage composition up to `--max-cage-faces`.
+Repeated cage types contributed by multiple groups are reported once. All detected cages still participate in half-cage, quasi-cage, and free-ring filtering. An explicit `--cage-size` changes user-facing counts and files, not topology ownership. Cage detection supports 4/5/6 faces; ring and quasi-cage detection also support size 7.
+
+`--cage-size` accepts the comma-separated groups `I`, `II`, `H`, `HS-I`, `TS-I`, and `I2II`. The default `auto` scope follows `--size`; `all` explicitly requests the same all-detected behavior. Use `auto` or `all` alone rather than combining either keyword with a group.
 
 ## Useful Options
 
 | Option | Possible values | Meaning |
 | --- | --- | --- |
-| `-i, --input INPUT` | GRO/XYZ/XTC/TRR file, directory, or glob | Input coordinate file or trajectory source |
+| `-i, --input INPUT` | `.gro`, `.xyz`, `.xtc`, or `.trr` file; directory; or glob | Input coordinate file or trajectory source |
 | `-c, --config FILE` | YAML or JSON file | User configuration file |
-| `-o, --output DIR` | Directory path | Output directory |
-| `-m, --mode MODE` | `00`, `50`, `99` | Select rigorous, standard, or performance preset |
+| `-o, --output DIR` | Directory path; default `result_sqq` | Output directory |
+| `-m, --mode MODE` | `00`, `50`, `99`; default `50` | Select rigorous, standard, or performance preset |
 | `-b, --bond-mode MODE` | `auto`, `hbond`, `oo`, `pairs` | Override the water-graph connection mode |
-| `-s, --size SIZES` | Comma-separated subset of `4,5,6,7` | Define the ring-face sizes searched |
-| `--ring-size SIZES` | Subset of searched sizes | Report only these ring sizes |
-| `--cage-size TYPES` | Named/generic types or `all` | Report exact cage types after detection |
+| `-s, --size SIZES` | Comma-separated subset of `4,5,6,7` | Set ring and quasi-cage search sizes; cage search uses the selected `4,5,6` sizes |
+| `--ring-size SIZES` | `auto` or a comma-separated subset of `--size` | Report only these searched ring sizes |
+| `--cage-size GROUPS` | `auto`, `all`, `I`, `II`, `H`, `HS-I`, `TS-I`, `I2II`; groups may be comma-separated | Restrict cage reporting; default `auto` follows `--size` |
 | `--max-cage-faces N` | Positive integer; default `20` | Limit generated cage search compositions |
-| `--pattern PATTERN` | Glob such as `*.gro` | File pattern for directory input |
-| `--top FILE.gro` | GRO topology file | Topology/structure file for XTC/TRR input |
-| `--recursive` | Flag | Search input directories recursively |
-| `--quasi-sizes SIZES` | Comma-separated subset of `4,5,6,7` | Override quasi-cage base and side sizes together |
-| `--quasi-base-sizes SIZES` | Comma-separated subset of `4,5,6,7` | Override quasi-cage base-ring sizes |
-| `--quasi-side-sizes SIZES` | Comma-separated subset of `4,5,6,7` | Override quasi-cage side-ring sizes |
-| `--quasi-max-layers N` | Positive integer | Report quasi-cage layers up to N; default is 1 |
+| `--pattern PATTERN` | Glob; default `*.gro` | Select files when `--input` is a directory |
+| `--top, --topology FILE.gro` | GRO topology file | Supply topology/structure data for XTC/TRR input |
+| `--recursive` | Flag; default off | Search input directories recursively |
+| `--quasi-sizes SIZES` | `auto` or a comma-separated subset of searched `4,5,6,7` | Override quasi-cage base and side sizes together |
+| `--quasi-base-sizes SIZES` | `auto` or a comma-separated subset of searched `4,5,6,7` | Override quasi-cage base-ring sizes |
+| `--quasi-side-sizes SIZES` | `auto` or a comma-separated subset of searched `4,5,6,7` | Override quasi-cage side-ring sizes |
+| `--quasi-max-layers N` | Positive integer; default `1` | Report quasi-cage layers up to N |
+| `--no-q` | Flag; default off | Disable Steinhardt Q_l order-parameter calculation |
+| `-q, --q-degree L1,L2` | Comma-separated non-negative integers; default `6,12` | Select Q_l degree list to report, e.g. `4,6,8,10,12` |
+| `--q-neighbor-mode MODE` | `graph`, `cutoff`, `nearest`, `lammps`; default `graph` | Select the neighbor source used by Q_l |
+| `--q-cutoff NM` | Positive float in nm; default `0.35` | Q_l neighbor cutoff for cutoff/nearest/lammps modes |
+| `--q-n-neighbor N` | Positive integer or `NULL`; default `NULL`, or `12` in lammps mode | Fixed Q_l neighbor count |
 | `--pairs FILE` | Text pair-map file | Supply explicit water-network edges and enable pairs mode |
-| `--pair-id KIND` | `resid`, `atomid`, `oxygen_index` | Select the identifier type used in the pair file |
-| `--workers N` | `auto` or positive integer | Override the mode-based automatic worker count |
-| `--strict` | Flag | Stop on the first failed frame |
-| `--output-layout LAYOUT` | `grouped`, `flat` | Select the per-frame structure-file layout |
+| `--pair-id KIND` | `resid`, `oxygen_index`, `atomid`; default `resid` | Select the identifier type used in the pair file |
+| `--workers N` | `auto` or a positive integer | Override the mode-based automatic worker count |
+| `--strict` | Flag; default off | Stop on the first failed frame |
+| `--output-layout LAYOUT` | `grouped`, `flat`; default `grouped` | Select the per-frame structure-file layout |
 | `--no-info` | Flag | Disable per-frame `*_info.md` files |
 | `--no-gro` | Flag | Disable all structure GRO files |
 | `--no-ring-gro` | Flag | Disable ring GRO files |
@@ -219,6 +254,7 @@ Named cage types are:
 | `--no-cage-gro` | Flag | Disable cage GRO files |
 | `--no-ice-gro` | Flag | Disable ice GRO files |
 | `--no-xlsx` | Flag | Disable `summary.xlsx` |
+| `--write-order-tsv` | Flag; default off | Write per-water `*_order_parameter.tsv` files |
 
 ### Bond Mode
 
@@ -259,11 +295,19 @@ result_sqq/
         test1_cage_5^12_occupied.gro
     ice/
       test1_ice.gro
+    test1_order_parameter.tsv   # only with --write-order-tsv
 ```
 
-Each per-frame `*_info.md` report is arranged for inspection: it shows only reported ring sizes, reports final free-ring counts, includes the active network degree distribution, groups half-cage and quasi-cage isomers below composition totals, lists reported cage types vertically, and expands exact guest compositions across the cage-occupancy table. Internal `hc_` and `qc_` prefixes are omitted from report labels.
+Each per-frame `*_info.md` report is arranged for inspection: it shows only reported ring sizes, reports final free-ring counts, includes the active network degree distribution, groups half-cage and quasi-cage isomers below composition totals, and keeps cage composition totals plus cage isomers in one vertical `Cage` table. Internal `hc_` and `qc_` prefixes are omitted from report labels.
 
-`summary.xlsx` remains plotting-oriented. Each analysis sheet keeps one input file or trajectory frame per row.
+When quasi-cage or cage isomers are present, the same report adds description tables:
+
+- `Quasi Cage Isomer Description` explains each observed layered quasi-cage isomer by base ring and L1/L2/L3 ring sequence.
+- `Cage Isomer Description` explains each observed closed-cage isomer by face composition and 6-ring face adjacency pattern.
+
+`Cage Occupancy` remains a separate table because it describes guest assignment rather than cage topology. It expands exact guest compositions across dynamic columns in source guest order.
+
+`summary.xlsx` remains plotting-oriented. Each analysis sheet keeps one input file or trajectory frame per row. The `order_parameter` sheet contains `F3_mean`, `F3_count`, `F4_mean`, `F4_count`, and one mean/count pair for each requested Q_l degree. By default this gives `q6_mean`, `q6_count`, `q12_mean`, and `q12_count`.
 
 Output ownership is:
 

@@ -31,8 +31,14 @@ except ImportError:  # pragma: no cover - exercised in minimal source-tree runs.
 
 from .banner import SQQ_BANNER
 from .config import load_config, mode_label, mode_worker_fraction
-from .core.cage import TARGET_FACE_COUNTS, canonical_cage_type, find_cages, parse_cage_face_label
-from .core.f3f4 import compute_f3f4
+from .core.cage import (
+    CAGE_REPORT_GROUPS,
+    TARGET_FACE_COUNTS,
+    canonical_cage_type,
+    find_cages,
+    parse_cage_face_label,
+)
+from .core.f3f4 import compute_order_parameters, normalize_q_degree
 from .core.graph import build_water_graph
 from .core.ice import classify_ice_waters
 from .core.quasi_cage import find_cage_patches
@@ -49,7 +55,7 @@ from .io.summary import (
     dashboard_cage_targets,
     failed_row,
     result_row,
-    write_f3f4,
+    write_order_parameter,
     write_frame_info,
     write_membership,
     write_summary,
@@ -166,6 +172,11 @@ def build_run_info(
         "quasi_cage_side_sizes": config["quasi_cage"].get("side_sizes", "auto"),
         "cage_report_types": config["cage"].get("report_types", []),
         "max_cage_faces": config["cage"].get("max_faces", 20),
+        "q_enabled": config["order"].get("q_enabled", True),
+        "q_degree": config["order"].get("q_degree", [6, 12]),
+        "q_neighbor_mode": config["order"].get("q_neighbor_mode", "graph"),
+        "q_cutoff_nm": config["order"].get("q_cutoff_nm", 0.35),
+        "q_n_neighbor": config["order"].get("q_n_neighbor", None),
         "output_layout": config["output"].get("structure_layout", "grouped"),
         "workers": workers,
         "summary_xlsx": str((outdir / "summary.xlsx").resolve()),
@@ -209,6 +220,7 @@ def print_run_header(
     print_terminal_field("quasi_max_layers", config["quasi_cage"].get("max_layers", ""))
     print_terminal_field("cage_report_types", dashboard_cage_targets(config))
     print_terminal_field("max_cage_faces", config["cage"].get("max_faces", 20))
+    print_terminal_field("Q_l", q_config_text(config))
     print_terminal_field("output_layout", config["output"].get("structure_layout", "grouped"))
     print_terminal_field("worker_policy", worker_policy_text(config))
     print_terminal_field("workers", workers)
@@ -228,6 +240,17 @@ def bond_mode_display_name(value: Any) -> str:
     """Return a readable terminal label without changing config identifiers."""
     mode = str(value)
     return BOND_MODE_DISPLAY_NAMES.get(mode, mode)
+
+
+def q_config_text(config: dict[str, Any]) -> str:
+    """Render Steinhardt Q_l settings for the run header."""
+    order = config.get("order", {})
+    if not bool(order.get("q_enabled", True)):
+        return "disabled"
+    n_neighbors = order.get("q_n_neighbor", None)
+    n_text = "NULL" if n_neighbors in (None, "", "null", "NULL") else str(n_neighbors)
+    degree = ",".join(str(item) for item in normalize_q_degree(order.get("q_degree", [6, 12])))
+    return f"degree={degree}; mode={order.get('q_neighbor_mode', 'graph')}; cutoff={order.get('q_cutoff_nm', 0.35)} nm; n={n_text}"
 
 
 def format_terminal_value(value: Any) -> str:
@@ -446,7 +469,7 @@ PARALLEL_STAGE_GROUPS = (
     ),
     (
         ("filtering free patches", "filtering"),
-        ("computing F3/F4", "F3/F4"),
+        ("computing order parameters", "order"),
         ("classifying ice", "ice"),
         ("writing outputs", "output"),
     ),
@@ -752,9 +775,11 @@ def write_frame_outputs(result: FrameResult, frame_dir: Path, config: dict[str, 
         remove_optional_info_output(result, frame_dir)
     if config["output"]["write_tsv"]:
         write_membership(result, frame_dir)
-        write_f3f4(result, frame_dir)
+        write_order_parameter(result, frame_dir)
     else:
-        remove_optional_tsv_outputs(result, frame_dir)
+        remove_optional_tsv_outputs(result, frame_dir, remove_membership=True, remove_order=not config["output"].get("write_order_tsv", False))
+    if config["output"].get("write_order_tsv", False) and not config["output"].get("write_tsv", False):
+        write_order_parameter(result, frame_dir)
     if config["output"]["write_vmd"]:
         write_vmd_script(result, frame_dir)
     else:
@@ -784,9 +809,14 @@ def remove_optional_info_output(result: FrameResult, frame_dir: Path) -> None:
     (frame_dir / f"{result.frame.name}_info.md").unlink(missing_ok=True)
 
 
-def remove_optional_tsv_outputs(result: FrameResult, frame_dir: Path) -> None:
+def remove_optional_tsv_outputs(result: FrameResult, frame_dir: Path, *, remove_membership: bool = True, remove_order: bool = True) -> None:
     """Remove stale optional TSV files when TSV output is disabled."""
-    for suffix in ("membership", "f3f4"):
+    suffixes = []
+    if remove_membership:
+        suffixes.append("membership")
+    if remove_order:
+        suffixes.extend(["f3f4", "order_parameter"])
+    for suffix in suffixes:
         path = frame_dir / f"{result.frame.name}_{suffix}.tsv"
         path.unlink(missing_ok=True)
 
@@ -850,6 +880,25 @@ def apply_cli_overrides(config: dict[str, Any], args: Namespace) -> None:
         if args.quasi_max_layers < 1:
             raise ValueError("--quasi-max-layers must be at least 1.")
         config["quasi_cage"]["max_layers"] = args.quasi_max_layers
+    if getattr(args, "no_q", False):
+        config["order"]["q_enabled"] = False
+    if getattr(args, "q_degree", None):
+        config["order"]["q_degree"] = args.q_degree
+    if getattr(args, "q_neighbor_mode", None):
+        config["order"]["q_neighbor_mode"] = args.q_neighbor_mode
+    if getattr(args, "q_cutoff", None) is not None:
+        if args.q_cutoff <= 0:
+            raise ValueError("--q-cutoff must be positive.")
+        config["order"]["q_cutoff_nm"] = args.q_cutoff
+    if getattr(args, "q_n_neighbor", None) is not None:
+        value = str(args.q_n_neighbor).strip()
+        if value.lower() in {"null", "none", "auto"}:
+            config["order"]["q_n_neighbor"] = None
+        else:
+            count = int(value)
+            if count < 1:
+                raise ValueError("--q-n-neighbor must be at least 1 or NULL.")
+            config["order"]["q_n_neighbor"] = count
     if getattr(args, "cage_size", None):
         config["cage"]["report_types"] = args.cage_size
     if getattr(args, "max_cage_faces", None) is not None:
@@ -888,6 +937,8 @@ def apply_cli_overrides(config: dict[str, Any], args: Namespace) -> None:
         config["output"]["write_ice_gro"] = False
     if args.no_xlsx:
         config["output"]["write_xlsx_summary"] = False
+    if getattr(args, "write_order_tsv", False):
+        config["output"]["write_order_tsv"] = True
 
 
 def normalize_analysis_scopes(config: dict[str, Any]) -> None:
@@ -916,6 +967,7 @@ def normalize_analysis_scopes(config: dict[str, Any]) -> None:
     config["ring"]["report_sizes"] = ring_report_sizes
     config["cage"]["report_types"] = "all" if report_types is None else list(report_types)
     config["cage"]["max_faces"] = max_faces
+    config["order"]["q_degree"] = list(normalize_q_degree(config.get("order", {}).get("q_degree", [6, 12])))
 
 
 def resolve_cage_report_types(
@@ -923,7 +975,7 @@ def resolve_cage_report_types(
     search_sizes: list[int],
     max_faces: int,
 ) -> tuple[str, ...] | None:
-    """Resolve exact report types; None means report every detected cage."""
+    """Resolve report groups/types; auto/all return every cage in the search scope."""
     if isinstance(value, str):
         items = [item.strip() for item in value.split(",") if item.strip()]
     else:
@@ -933,14 +985,19 @@ def resolve_cage_report_types(
             raise ValueError("cage.report_types / --cage-size must be a comma-separated list or 'all'.") from exc
     if not items:
         raise ValueError("cage.report_types / --cage-size must contain at least one cage type.")
-    if any(item.lower() == "all" for item in items):
+    scope_keywords = {item.lower() for item in items} & {"auto", "all"}
+    if scope_keywords:
         if len(items) != 1:
-            raise ValueError("Use 'all' alone in cage.report_types / --cage-size.")
+            raise ValueError("Use 'auto' or 'all' alone in cage.report_types / --cage-size.")
         return None
+
+    expanded_items: list[str] = []
+    for item in items:
+        expanded_items.extend(CAGE_REPORT_GROUPS.get(item.upper(), (item,)))
 
     allowed_sizes = set(search_sizes) & {4, 5, 6}
     resolved: list[str] = []
-    for item in items:
+    for item in expanded_items:
         cage_type = canonical_cage_type(item)
         counts = TARGET_FACE_COUNTS.get(cage_type) or parse_cage_face_label(cage_type)
         if counts is None:
@@ -1055,8 +1112,19 @@ def analyze_frame(
     quasi_cages = filter_free_patches(quasi_cages, all_cages)
     half_cages = filter_free_patches(half_cages, all_cages, higher_priority_patches=quasi_cages)
     focus_resids = {int(item) for item in config["order"].get("focus_waters", [])}
-    report_stage(stage_callback, "computing F3/F4")
-    f3f4 = compute_f3f4(frame, waters, graph, focus_resids=focus_resids) if bool(config["order"].get("f3f4_enabled", True)) else None
+    report_stage(stage_callback, "computing order parameters")
+    f3f4 = compute_order_parameters(
+        frame,
+        waters,
+        graph,
+        f3f4_enabled=bool(config["order"].get("f3f4_enabled", True)),
+        q_enabled=bool(config["order"].get("q_enabled", True)),
+        q_neighbor_mode=str(config["order"].get("q_neighbor_mode", "graph")),
+        q_cutoff_nm=float(config["order"].get("q_cutoff_nm", 0.35)),
+        q_n_neighbor=config["order"].get("q_n_neighbor", None),
+        q_degree=config["order"].get("q_degree", [6, 12]),
+        focus_resids=focus_resids,
+    )
     report_stage(stage_callback, "classifying ice")
     ice_classes = classify_ice_waters(
         graph,

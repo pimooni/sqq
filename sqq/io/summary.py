@@ -3,6 +3,7 @@ from __future__ import annotations
 """Markdown, TSV, VMD, and XLSX summary writers."""
 
 from pathlib import Path
+import re
 from typing import Any
 
 import pandas as pd
@@ -73,12 +74,28 @@ SUMMARY_COLUMNS = [
     "cage_occupied",
     "F3_mean",
     "F4_mean",
+    "q6_mean",
+    "q12_mean",
+    "F3_count",
+    "F4_count",
+    "q6_count",
+    "q12_count",
     "F3_valid_waters",
     "F4_valid_waters",
+    "q6_valid_waters",
+    "q12_valid_waters",
     "F3_focus_mean",
     "F4_focus_mean",
+    "q6_focus_mean",
+    "q12_focus_mean",
+    "F3_focus_count",
+    "F4_focus_count",
+    "q6_focus_count",
+    "q12_focus_count",
     "F3_focus_valid_waters",
     "F4_focus_valid_waters",
+    "q6_focus_valid_waters",
+    "q12_focus_valid_waters",
     "ice_like_waters",
     "ice_i_waters",
     "interfacial_ice_waters",
@@ -165,16 +182,38 @@ def result_row(result: FrameResult) -> dict[str, Any]:
         "cage_occupied": occupied,
         "F3_mean": None if f3f4 is None else f3f4.f3_mean,
         "F4_mean": None if f3f4 is None else f3f4.f4_mean,
+        "F3_count": None if f3f4 is None else f3f4.f3_valid,
+        "F4_count": None if f3f4 is None else f3f4.f4_valid,
         "F3_valid_waters": None if f3f4 is None else f3f4.f3_valid,
         "F4_valid_waters": None if f3f4 is None else f3f4.f4_valid,
         "F3_focus_mean": None if f3f4 is None else f3f4.f3_focus_mean,
         "F4_focus_mean": None if f3f4 is None else f3f4.f4_focus_mean,
+        "F3_focus_count": None if f3f4 is None else f3f4.f3_focus_valid,
+        "F4_focus_count": None if f3f4 is None else f3f4.f4_focus_valid,
         "F3_focus_valid_waters": None if f3f4 is None else f3f4.f3_focus_valid,
         "F4_focus_valid_waters": None if f3f4 is None else f3f4.f4_focus_valid,
         "ice_like_waters": len(result.ice_like_waters),
         "ice_i_waters": len(result.ice_i_waters),
         "interfacial_ice_waters": len(result.interfacial_ice_waters),
     }
+    if f3f4 is not None:
+        for degree in f3f4.q_degree:
+            prefix = f"q{degree}"
+            row[f"{prefix}_mean"] = f3f4.q_means.get(degree)
+            row[f"{prefix}_count"] = f3f4.q_valid_counts.get(degree, 0)
+            row[f"{prefix}_valid_waters"] = f3f4.q_valid_counts.get(degree, 0)
+            row[f"{prefix}_focus_mean"] = f3f4.q_focus_means.get(degree)
+            row[f"{prefix}_focus_count"] = f3f4.q_focus_valid_counts.get(degree, 0)
+            row[f"{prefix}_focus_valid_waters"] = f3f4.q_focus_valid_counts.get(degree, 0)
+    else:
+        for degree in (6, 12):
+            prefix = f"q{degree}"
+            row[f"{prefix}_mean"] = None
+            row[f"{prefix}_count"] = None
+            row[f"{prefix}_valid_waters"] = None
+            row[f"{prefix}_focus_mean"] = None
+            row[f"{prefix}_focus_count"] = None
+            row[f"{prefix}_focus_valid_waters"] = None
     for resname, count in molecule_counts.items():
         row[f"mol_{resname}"] = count
     row["mol_TOTAL"] = len(result.frame.atoms)
@@ -292,23 +331,29 @@ def write_frame_info(result: FrameResult, frame_dir: Path, ring_sizes: list[int]
     lines.extend(section_table("Ring", ["ring type", "count"], ring_rows))
     lines.extend(patch_info_section("Half Cage", result.half_cages))
     lines.extend(patch_info_section("Quasi Cage", result.quasi_cages))
+    lines.extend(patch_isomer_description_section("Quasi Cage Isomer Description", result.quasi_cages))
 
-    cage_rows = [[cage_display_label(cage_type), row.get(f"cage_{cage_type}", 0)] for cage_type in cage_types]
-    cage_rows.append(["total", len(result.cages)])
-    lines.extend(section_table("Cage", ["cage type", "count"], cage_rows))
+    lines.extend(cage_info_section(result, cage_types))
+    lines.extend(cage_isomer_description_section(result, cage_types))
     lines.extend(cage_occupancy_section(result, cage_types))
-    lines.extend(cage_isomer_section(result, cage_types))
 
-    f3f4_headers = ["metric", "valid_waters", "mean"]
-    f3f4_rows = [
-        ["F3", row["F3_valid_waters"], row["F3_mean"]],
-        ["F4", row["F4_valid_waters"], row["F4_mean"]],
+    order_headers = ["metric", "count", "mean"]
+    order_rows = [
+        ["F3", row["F3_count"], row["F3_mean"]],
+        ["F4", row["F4_count"], row["F4_mean"]],
     ]
+    q_degree = result.f3f4.q_degree if result.f3f4 is not None else ()
+    for degree in q_degree:
+        prefix = f"q{degree}"
+        order_rows.append([f"Q{degree}", row.get(f"{prefix}_count"), row.get(f"{prefix}_mean")])
     if result.f3f4 is not None and result.f3f4.focus_resids:
-        f3f4_headers.extend(["focus_valid_waters", "focus_mean"])
-        f3f4_rows[0].extend([row["F3_focus_valid_waters"], row["F3_focus_mean"]])
-        f3f4_rows[1].extend([row["F4_focus_valid_waters"], row["F4_focus_mean"]])
-    lines.extend(section_table("F3/F4", f3f4_headers, f3f4_rows))
+        order_headers.extend(["focus_count", "focus_mean"])
+        order_rows[0].extend([row["F3_focus_count"], row["F3_focus_mean"]])
+        order_rows[1].extend([row["F4_focus_count"], row["F4_focus_mean"]])
+        for index, degree in enumerate(q_degree, start=2):
+            prefix = f"q{degree}"
+            order_rows[index].extend([row.get(f"{prefix}_focus_count"), row.get(f"{prefix}_focus_mean")])
+    lines.extend(section_table("Order Parameters", order_headers, order_rows))
 
     ice_rows = [
         ["ice_like_waters", row["ice_like_waters"]],
@@ -418,6 +463,46 @@ def patch_info_section(title: str, patches: list[CagePatch]) -> list[str]:
                 rows.append([f"{branch} {label}", f"{branch} {children[label]}"])
     rows.append(["total", sum(counts.values())])
     return section_table(title, [type_header, "count"], rows)
+
+
+def patch_isomer_description_section(title: str, patches: list[CagePatch]) -> list[str]:
+    """Explain each reported patch isomer as a layered ring sequence."""
+    if not patches:
+        return []
+    counts: dict[str, int] = {}
+    descriptions: dict[str, str] = {}
+    for patch in patches:
+        label = patch_display_label(patch.patch_type)
+        counts[label] = counts.get(label, 0) + 1
+        descriptions[label] = describe_patch_isomer(patch)
+    rows = [[label, counts[label], descriptions[label]] for label in sorted(counts)]
+    return section_table(title, ["isomer", "count", "description"], rows)
+
+
+def describe_patch_isomer(patch: CagePatch) -> str:
+    """Describe base/L1/L2/L3 ring layers for one quasi-cage label."""
+    if not patch.layers:
+        return "Layer information is not available."
+    parts = [f"base ring: {patch.layers[0].removesuffix('r')}"]
+    for index, layer in enumerate(patch.layers[1:], start=1):
+        sequence = subscript_digit_text(layer)
+        composition = layer.translate(SUBSCRIPT_DIGIT_DELETE)
+        if sequence:
+            layer_name = "closed side-ring sequence" if index == 1 else "outer-layer ring sequence"
+            parts.append(f"L{index}: {layer_name} {sequence} ({composition})")
+        else:
+            parts.append(f"L{index}: composition {composition}")
+    return "; ".join(parts) + "."
+
+
+def subscript_digit_text(text: str) -> str:
+    """Return normal digits from Unicode subscript digits in a label."""
+    digits: list[str] = []
+    for char in text:
+        code = ord(char)
+        if 0x2080 <= code <= 0x2089:
+            digits.append(str(code - 0x2080))
+    return "".join(digits)
 
 
 def patch_display_label(patch_type: str) -> str:
@@ -552,8 +637,8 @@ def guest_resname_order(result: FrameResult) -> list[str]:
     return guest_resname_order_from_guests(result.guests)
 
 
-def cage_isomer_section(result: FrameResult, cage_types: list[str]) -> list[str]:
-    """Show cage composition totals with nested structural isomers."""
+def cage_info_section(result: FrameResult, cage_types: list[str]) -> list[str]:
+    """Show cage totals with nested structural isomers in one section."""
     isomers: dict[str, dict[str, int]] = {cage_type: {} for cage_type in cage_types}
     for cage in result.cages:
         label = cage.isomer or "plain"
@@ -571,9 +656,81 @@ def cage_isomer_section(result: FrameResult, cage_types: list[str]) -> list[str]
         for index, label in enumerate(labels):
             branch = TREE_LAST if index == len(labels) - 1 else TREE_MIDDLE
             rows.append([f"{branch} {cage_label}_{label}", f"{branch} {type_isomers[label]}"])
-    if not rows:
-        rows.append(["total", 0])
-    return section_table("Cage Isomer", ["cage isomer", "count"], rows)
+    rows.append(["total", len(result.cages)])
+    return section_table("Cage", ["cage type", "count"], rows)
+
+
+def cage_isomer_description_section(result: FrameResult, cage_types: list[str]) -> list[str]:
+    """Explain each reported cage isomer as a 6-face adjacency pattern."""
+    if not result.cages:
+        return []
+    counts: dict[tuple[str, str], int] = {}
+    for cage in result.cages:
+        label = cage.isomer or "plain"
+        key = (cage.cage_type, label)
+        counts[key] = counts.get(key, 0) + 1
+
+    rows: list[list[Any]] = []
+    for cage_type in cage_types:
+        cage_label = cage_display_label(cage_type)
+        labels = sorted(label for type_name, label in counts if type_name == cage_type)
+        for label in labels:
+            display = cage_label if label == "plain" else f"{cage_label}_{label}"
+            rows.append([display, counts[(cage_type, label)], describe_cage_isomer(cage_type, label)])
+    return section_table("Cage Isomer Description", ["isomer", "count", "description"], rows)
+
+
+def describe_cage_isomer(cage_type: str, label: str) -> str:
+    """Describe a cage isomer label in human-facing terms."""
+    composition = describe_cage_face_composition(cage_type)
+    arrangement = describe_hex_adjacency_label(label)
+    return f"{composition}; {arrangement}"
+
+
+def describe_cage_face_composition(cage_type: str) -> str:
+    """Return a compact text description of cage face counts."""
+    counts = parse_cage_face_label(cage_type)
+    if not counts:
+        return f"face composition: {cage_display_label(cage_type)}"
+    parts = [
+        f"{count} {size}-ring face{'s' if count != 1 else ''}"
+        for size, count in sorted(counts.items())
+        if count > 0
+    ]
+    return "face composition: " + ", ".join(parts)
+
+
+def describe_hex_adjacency_label(label: str) -> str:
+    """Return a readable explanation of the 6-ring face adjacency label."""
+    if label == "plain":
+        return "no 6-ring face arrangement isomer is reported"
+    descriptions = {
+        "6single": "one 6-ring face; no 6-6 shared edge is possible",
+        "6adj": "two 6-ring faces share one edge",
+        "6pair+single": "three 6-ring faces contain one adjacent pair and one separated single face",
+        "6chain3": "three 6-ring faces form a chain with two 6-6 shared edges",
+        "6tri3": "three 6-ring faces are mutually adjacent",
+        "6pair+2single": "four 6-ring faces contain one adjacent pair and two separated single faces",
+        "2x6pair": "four 6-ring faces form two separated adjacent pairs",
+        "6chain3+single": "four 6-ring faces contain one three-face chain and one separated single face",
+        "6star3": "four 6-ring faces form a star: one face touches three others",
+        "6chain4": "four 6-ring faces form a four-face chain",
+        "6tri3+single": "four 6-ring faces contain one mutually adjacent triple and one separated single face",
+        "6cycle4": "four 6-ring faces form a four-face cycle",
+        "6tri3+tail": "four 6-ring faces contain one mutually adjacent triple with one attached tail face",
+        "6K4-e": "four 6-ring faces are almost fully connected, with one 6-6 adjacency missing",
+        "6K4": "four 6-ring faces are all mutually adjacent",
+    }
+    if label in descriptions:
+        return descriptions[label]
+    separated = re.fullmatch(r"(\d+)x6sep", label)
+    if separated:
+        return f"{separated.group(1)} 6-ring faces are all separated from each other"
+    generic = re.fullmatch(r"6n(\d+)e(\d+)d(\d+)", label)
+    if generic:
+        n_hex, edge_count, degree_text = generic.groups()
+        return f"{n_hex} 6-ring faces with {edge_count} shared 6-6 edges; degree sequence {degree_text}"
+    return f"6-ring face arrangement label: {label}"
 
 
 def source_label(source: Path | None) -> str:
@@ -634,12 +791,13 @@ def write_membership(result: FrameResult, frame_dir: Path) -> None:
     data.to_csv(frame_dir / f"{result.frame.name}_membership.tsv", sep="\t", index=False)
 
 
-def write_f3f4(result: FrameResult, frame_dir: Path) -> None:
-    """Write per-water F3/F4 values for custom plotting or focus-water checks."""
+def write_order_parameter(result: FrameResult, frame_dir: Path) -> None:
+    """Write per-water F3/F4/Q_l values for custom plotting or focus-water checks."""
     if result.f3f4 is None:
         return
-    rows = [
-        {
+    rows = []
+    for item in result.f3f4.per_water:
+        row = {
             "resid": item.resid,
             "atomid": item.atomid,
             "oxygen_index": item.oxygen,
@@ -649,9 +807,11 @@ def write_f3f4(result: FrameResult, frame_dir: Path) -> None:
             "F3": item.f3,
             "F4": item.f4,
         }
-        for item in result.f3f4.per_water
-    ]
-    pd.DataFrame(rows).to_csv(frame_dir / f"{result.frame.name}_f3f4.tsv", sep="\t", index=False)
+        for degree in result.f3f4.q_degree:
+            row[f"q{degree}"] = item.q_values.get(degree)
+        row["q_neighbors"] = item.q_neighbors
+        rows.append(row)
+    pd.DataFrame(rows).to_csv(frame_dir / f"{result.frame.name}_order_parameter.tsv", sep="\t", index=False)
 
 
 def cage_center_name(cage_type: str) -> str:
@@ -754,6 +914,10 @@ def summary_dashboard_table(data: pd.DataFrame, run_info: dict[str, Any], config
         ["Quasi max layers", config.get("quasi_cage", {}).get("max_layers", "")],
         ["Cage report types", dashboard_cage_targets(config)],
         ["Maximum cage faces", config.get("cage", {}).get("max_faces", 20)],
+        ["Q_l degree", excel_scalar(config.get("order", {}).get("q_degree", [6, 12]))],
+        ["Q_l neighbor mode", config.get("order", {}).get("q_neighbor_mode", "graph")],
+        ["Q_l cutoff (nm)", config.get("order", {}).get("q_cutoff_nm", 0.35)],
+        ["Q_l n neighbor", config.get("order", {}).get("q_n_neighbor", "NULL")],
         ["Output layout", run_info.get("output_layout", "")],
         ["Worker policy", run_info.get("worker_policy", "")],
         ["Workers", run_info.get("workers", "")],
@@ -831,8 +995,8 @@ def dashboard_cage_targets(config: dict[str, Any]) -> str:
     """Render exact cage report types with human-facing superscripts."""
     targets = config.get("cage", {}).get("report_types", [])
     if isinstance(targets, str):
-        if targets.strip().lower() == "all":
-            return "all detected cages"
+        if targets.strip().lower() in {"auto", "all"}:
+            return "all detected cages (follows --size)"
         raw_targets = [item.strip() for item in targets.split(",") if item.strip()]
     else:
         raw_targets = [str(item) for item in targets or []]
@@ -982,7 +1146,7 @@ def summary_markdown_tables(data: pd.DataFrame) -> list[tuple[str, pd.DataFrame]
             ("Cages", cage_summary_table(data)),
             ("Cage Occupancy", cage_occupancy_summary_table(data, markdown_style=True)),
             ("Cage Isomers", cage_isomer_summary_table(data, include_zero_rows=False)),
-            ("F3/F4", summary_simple_table(data, ["frame", "time_ps", "F3_mean", "F4_mean", "F3_valid_waters", "F4_valid_waters", "F3_focus_mean", "F4_focus_mean", "F3_focus_valid_waters", "F4_focus_valid_waters"])),
+            ("Order Parameters", order_parameter_summary_table(data)),
             ("Ice", summary_simple_table(data, ["frame", "time_ps", "ice_like_waters", "ice_i_waters", "interfacial_ice_waters"])),
         ]
     )
@@ -1004,7 +1168,7 @@ def summary_sheet_tables(data: pd.DataFrame, config: dict[str, Any]) -> dict[str
         "cage": cage_summary_table(data),
         "cage_occupancy": cage_occupancy_summary_table(data, markdown_style=False),
         "cage_isomer": cage_isomer_summary_table(data, include_zero_rows=True),
-        "f3f4": summary_simple_table(data, ["frame", "time_ps", "F3_mean", "F4_mean", "F3_valid_waters", "F4_valid_waters", "F3_focus_mean", "F4_focus_mean", "F3_focus_valid_waters", "F4_focus_valid_waters"]),
+        "order_parameter": order_parameter_summary_table(data),
         "ice": summary_simple_table(data, ["frame", "time_ps", "ice_like_waters", "ice_i_waters", "interfacial_ice_waters"]),
     }
     return {name: table for name, table in tables.items() if not table.empty}
@@ -1031,9 +1195,13 @@ def frame_summary_table(data: pd.DataFrame, ring_sizes: list[int]) -> pd.DataFra
         "cage_empty",
         "cage_occupied",
         "F3_mean",
+        "F3_count",
         "F4_mean",
-        "F3_valid_waters",
-        "F4_valid_waters",
+        "F4_count",
+    ])
+    for degree in q_degree_from_data(data):
+        columns.extend([f"q{degree}_mean", f"q{degree}_count"])
+    columns.extend([
         "ice_like_waters",
         "ice_i_waters",
         "interfacial_ice_waters",
@@ -1094,6 +1262,39 @@ def summary_simple_table(data: pd.DataFrame, columns: list[str]) -> pd.DataFrame
     """Return a table with only columns present in the run data."""
     existing = [column for column in columns if column in data.columns]
     return data.loc[:, existing].copy() if existing else pd.DataFrame()
+
+
+def order_parameter_summary_table(data: pd.DataFrame) -> pd.DataFrame:
+    """Build the per-frame F3/F4/Q_l order-parameter table."""
+    columns = [
+        "frame",
+        "time_ps",
+        "F3_mean",
+        "F3_count",
+        "F4_mean",
+        "F4_count",
+    ]
+    for degree in q_degree_from_data(data):
+        columns.extend([f"q{degree}_mean", f"q{degree}_count"])
+    columns.extend([
+        "F3_focus_mean",
+        "F3_focus_count",
+        "F4_focus_mean",
+        "F4_focus_count",
+    ])
+    for degree in q_degree_from_data(data):
+        columns.extend([f"q{degree}_focus_mean", f"q{degree}_focus_count"])
+    return summary_simple_table(data, columns)
+
+
+def q_degree_from_data(data: pd.DataFrame) -> list[int]:
+    """Infer reported Q_l degree values from summary columns."""
+    degree_values: set[int] = set()
+    for column in data.columns:
+        match = re.fullmatch(r"q(\d+)_(?:mean|count)", str(column))
+        if match and not data[column].replace("", pd.NA).isna().all():
+            degree_values.add(int(match.group(1)))
+    return sorted(degree_values)
 
 
 def molecule_summary_table(data: pd.DataFrame) -> pd.DataFrame:

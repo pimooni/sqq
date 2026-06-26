@@ -11,5 +11,6 @@ result_sqq*/
 **/result_sqq*/
 config.yaml
 .env
+# Local Word design exports, including docs/SQQ_design_CN.docx and docs/SQQ_design_EN.docx.
 *.docx
 sqq/example/
