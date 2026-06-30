@@ -2,13 +2,13 @@
 
 This file records versioned update notes. New releases should be appended above older entries.
 
-## Version 0.2.1
+## Version 0.2.2
 
 ### Short Summary
 
-Version 0.2.1 adds optional reported-cage hydrate clusters, geometry-resolved shared-face connectivity, strict local sI/sII/sH phase seeds, per-frame phase-domain expansion and boundary classification, cluster/domain workbook output, and singular CLI option names.
+Version 0.2.2 adds optional reported-cage hydrate clusters, geometry-resolved shared-face connectivity, strict local sI/sII/sH phase seeds, per-frame phase-domain expansion and boundary classification, cluster/domain workbook output, and singular CLI option names.
 
-Comparison baseline: GitHub `pimooni/sqq` tag `v0.1.6` (commit `97996b2`) -> local `0.2.1`.
+Comparison baseline: GitHub `pimooni/sqq` tag `v0.1.6` (commit `97996b2`) -> local `0.2.2`.
 
 ### Main Changes
 
@@ -36,13 +36,13 @@ Comparison baseline: GitHub `pimooni/sqq` tag `v0.1.6` (commit `97996b2`) -> loc
    - The hierarchy table reports cluster, domain, and boundary cage quantities by cage composition; seed counts remain in domain detail rather than a dedicated hierarchy column.
    - Adds `hydrate_cluster` and `hydrate_domain` workbook sheets whenever hydrate analysis is enabled.
    - Adds `--cluster-detail on/off` and `hydrate_cluster.detail`; when enabled, `hydrate_cluster_detail` adds one row per cluster.
-   - Public motif output is not generated in 0.2.1. The compatibility return slot and model remain internal/empty, and no `hydrate_motif` sheet or Markdown section is written.
+   - Public motif output is not generated in 0.2.2. The compatibility return slot and model remain internal/empty, and no `hydrate_motif` sheet or Markdown section is written.
    - Hydrate clusters do not produce additional GRO structure files.
 
 5. CLI and package metadata
    - Renamed `--quasi-sizes`, `--quasi-base-sizes`, `--quasi-side-sizes`, `--quasi-max-layers`, and `--max-cage-faces` to `--quasi-size`, `--quasi-base-size`, `--quasi-side-size`, `--quasi-max-layer`, and `--max-cage-face`.
    - Existing YAML keys, including `quasi_cage.max_layers` and `cage.max_faces`, remain unchanged.
-   - Updated package metadata from `0.1.6` to `0.2.1`.
+   - Updated package metadata from `0.1.6` to `0.2.2`.
    - Added hydrate-cluster unit tests covering physical shared-face resolution, ideal phase seeds, incomplete or incorrect fingerprints, expansion, mixed boundaries, separated same-phase domains, output sheets, hierarchy rendering, and CLI settings.
 
 ### Compatibility

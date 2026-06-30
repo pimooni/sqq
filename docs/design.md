@@ -40,7 +40,7 @@ The mode preset controls graph mode, the shared ring-face search sizes, and the 
 An explicit `-b` / `--bond-mode {auto,hbond,oo,pairs}` overrides the graph mode from both the preset and `config.yaml`. `--pairs PAIRS.txt` implies pairs mode unless `-b pairs` is already given; it cannot be combined with another explicit bond mode.
 
 `parallel.workers: auto` calculates `floor(logical_cpu_count * mode_fraction)`, with a minimum of one and a maximum equal to the number of independent input files. `--workers N` overrides that calculation. Parallel execution is file-level and currently uses `ThreadPoolExecutor` for standalone GRO/XYZ files. A single file and XTC/TRR input run with one worker.
-Parallel GRO/XYZ runs use a thread-safe progress aggregator. Every worker reports its active file and current pipeline stage. The interactive panel shows completed/failed/active/queued counts, a fixed 11-stage summary in three logical rows, total elapsed time, and up to six active-file rows with stage/file timings. Additional active files are summarized so high-worker modes do not fill the terminal. The serial progress panel remains unchanged.
+Parallel GRO/XYZ runs use a thread-safe progress aggregator. Every worker reports its active file and current pipeline stage. The interactive panel shows completed/failed/active/queued counts, a fixed 12-stage summary in three logical rows, total elapsed time, and up to six active-file rows with stage/file timings. Additional active files are summarized so high-worker modes do not fill the terminal. The serial progress panel remains unchanged.
 
 ## Modules
 
@@ -310,7 +310,7 @@ Cages claimed by more than one phase are excluded from exclusive domains. After 
 
 No cage is forced into a transition role from composition alone. Every non-domain cage belongs to the cluster boundary exactly once. A cluster is `sI`, `sII`, or `sH` when its domains contain one unique phase, `mixed` when multiple domain types occur, and `unclassified` when no domain exists.
 
-Public motif output is not generated in 0.2.1. The compatibility motif return slot remains empty, and neither a `Hydrate Motif` Markdown section nor a `hydrate_motif` workbook sheet is written.
+Public motif output is not generated in 0.2.2. The compatibility motif return slot remains empty, and neither a `Hydrate Motif` Markdown section nor a `hydrate_motif` workbook sheet is written.
 
 ## Guest Occupancy
 
