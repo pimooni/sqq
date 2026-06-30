@@ -6,7 +6,7 @@ This file records versioned update notes. New releases should be appended above 
 
 ### Short Summary
 
-Version 0.2.2 adds optional reported-cage hydrate clusters, geometry-resolved shared-face connectivity, strict local sI/sII/sH phase seeds, per-frame phase-domain expansion and boundary classification, cluster/domain workbook output, and singular CLI option names.
+Version 0.2.2 adds optional reported-cage hydrate clusters, geometry-resolved shared-face connectivity, strict local sI/sII/sH phase seeds, per-frame phase-domain expansion and boundary classification, cluster/domain workbook output, compact cluster-aware terminal stage displays, expanded per-frame report metadata, and singular CLI option names.
 
 Comparison baseline: GitHub `pimooni/sqq` tag `v0.1.6` (commit `97996b2`) -> local `0.2.2`.
 
@@ -39,7 +39,17 @@ Comparison baseline: GitHub `pimooni/sqq` tag `v0.1.6` (commit `97996b2`) -> loc
    - Public motif output is not generated in 0.2.2. The compatibility return slot and model remain internal/empty, and no `hydrate_motif` sheet or Markdown section is written.
    - Hydrate clusters do not produce additional GRO structure files.
 
-5. CLI and package metadata
+5. Terminal progress display
+   - Serial progress now shows the full three-row workflow instead of a single long current-stage phrase: file preparation (`reading`, `settings`, `selecting`), core search (`graph`, `ring`, `half/quasi`, `cage`, optional `cluster`), and post-processing/output (`filtering`, `order`, `ice`, `output`).
+   - Interactive serial terminals bold the active stage while keeping `stage / frame / total` timings unchanged; non-interactive postfix output uses the same short stage labels without ANSI styling.
+   - Parallel `stage_summary` now uses compact `stage:count` cells instead of wide `|`-separated columns. Each column width is recalculated from the longest current `stage:count` cell in that column, then followed by two spaces.
+   - The `cluster` stage is shown only when hydrate cluster analysis is enabled, and it remains at the end of the core-search row. With `--hydrate-cluster off`, the summary omits `cluster` entirely instead of showing `cluster:0`.
+
+6. Frame metadata
+   - Per-frame `info.md` Frame Information now starts with `sqq version`, `date & time`, `source`, `frame`, and `time_ps`, followed by bond mode, ring sizes, status, and molecule counts.
+   - `date & time` is generated at report-writing time using the local timezone label, and `source` is written as an absolute path without Markdown code quotes.
+
+7. CLI and package metadata
    - Renamed `--quasi-sizes`, `--quasi-base-sizes`, `--quasi-side-sizes`, `--quasi-max-layers`, and `--max-cage-faces` to `--quasi-size`, `--quasi-base-size`, `--quasi-side-size`, `--quasi-max-layer`, and `--max-cage-face`.
    - Existing YAML keys, including `quasi_cage.max_layers` and `cage.max_faces`, remain unchanged.
    - Updated package metadata from `0.1.6` to `0.2.2`.
@@ -51,6 +61,7 @@ Comparison baseline: GitHub `pimooni/sqq` tag `v0.1.6` (commit `97996b2`) -> loc
 - Hydrate classification depends on the final cage report scope; excluding a required cage type can prevent the corresponding phase seed or domain from being recognized.
 - Phase and boundary assignments are per-frame topological classifications, not temporal grain tracking or crystallographic orientation matching.
 - New commands should use the singular long option names. Historical notes retain the option spelling used by the corresponding release.
+- Terminal progress text layout changed; analysis results and output file schemas are unaffected by the stage-display update.
 
 ## Version 0.1.6
 

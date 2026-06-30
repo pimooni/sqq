@@ -40,7 +40,56 @@ The mode preset controls graph mode, the shared ring-face search sizes, and the 
 An explicit `-b` / `--bond-mode {auto,hbond,oo,pairs}` overrides the graph mode from both the preset and `config.yaml`. `--pairs PAIRS.txt` implies pairs mode unless `-b pairs` is already given; it cannot be combined with another explicit bond mode.
 
 `parallel.workers: auto` calculates `floor(logical_cpu_count * mode_fraction)`, with a minimum of one and a maximum equal to the number of independent input files. `--workers N` overrides that calculation. Parallel execution is file-level and currently uses `ThreadPoolExecutor` for standalone GRO/XYZ files. A single file and XTC/TRR input run with one worker.
-Parallel GRO/XYZ runs use a thread-safe progress aggregator. Every worker reports its active file and current pipeline stage. The interactive panel shows completed/failed/active/queued counts, a fixed 12-stage summary in three logical rows, total elapsed time, and up to six active-file rows with stage/file timings. Additional active files are summarized so high-worker modes do not fill the terminal. The serial progress panel remains unchanged.
+
+### Terminal Progress Display
+
+Serial and parallel runs share the same three-row stage model:
+
+```text
+file preparation       reading -> settings -> selecting
+core topology search   graph -> ring -> half/quasi -> cage -> cluster
+post-processing        filtering -> order -> ice -> output
+```
+
+`cluster` is included only when `hydrate_cluster.enabled` is true, for example through `--hydrate-cluster on`. When hydrate cluster analysis is disabled, the stage is omitted rather than shown as `cluster:0`.
+
+The serial interactive panel renders the complete workflow and bolds the active stage. Stage columns are sized by the longest stage name in that column, so the display stays compact while `reading`, `graph`, and `filtering` remain aligned. The continuation marker `>` for a new row is placed before the aligned stage column. The timing row remains `stage / frame / total`.
+
+```text
+stage               : reading   > settings > selecting
+                    > graph     > ring     > half/quasi > cage
+                    > filtering > order    > ice        > output
+stage / frame / total: 3.2 s / 18.7 s / 18.7 s
+```
+
+With hydrate cluster enabled, the second row ends with `cluster`:
+
+```text
+stage               : reading   > settings > selecting
+                    > graph     > ring     > half/quasi > cage   > cluster
+                    > filtering > order    > ice        > output
+stage / frame / total: 3.2 s / 18.7 s / 18.7 s
+```
+
+Non-interactive serial output, such as redirected logs or a `tqdm` postfix, reports the short current stage label rather than ANSI bold text.
+
+Parallel GRO/XYZ runs use a thread-safe progress aggregator. Every worker reports its active file and current pipeline stage. The interactive parallel panel shows completed/failed/active/queued counts, a compact `stage:count` summary, total elapsed time, and up to six active-file rows with stage/file timings. Additional active files are summarized so high-worker modes do not fill the terminal.
+
+For `stage_summary`, each column width is recalculated from the longest current `stage:count` cell in that column. Cells are left-aligned, and each column is followed by two spaces. This keeps the summary aligned without the wide `|`-separated cells used earlier.
+
+```text
+stage_summary       : reading:0    settings:0  selecting:0
+                      graph:1      ring:2      half/quasi:0  cage:1
+                      filtering:0  order:0     ice:0         output:0
+```
+
+With hydrate cluster enabled, `cluster` appears at the end of the core-search row and participates in the column-width calculation:
+
+```text
+stage_summary       : reading:0    settings:0  selecting:0
+                      graph:1      ring:2      half/quasi:0  cage:1   cluster:2
+                      filtering:0  order:0     ice:0         output:0
+```
 
 ## Modules
 
@@ -370,7 +419,7 @@ Each per-frame `*_info.md` report is optimized for inspection rather than plotti
 - boundary output separates single-phase, interphase, ambiguous, and unclassified cages without assigning phase from cage composition alone;
 - per-frame info reports omit long cage-id and shared-face-id expansions; exact ids remain available in the optional workbook detail sheets;
 - all hierarchy labels use the same short `├`, `└`, and `│` symbols, and Markdown source tables are padded using Unicode display width so their pipe columns align;
-- Frame Information, Molecules, active connection coordination, Order Parameters, and Ice are separated into compact sections.
+- Frame Information starts with `sqq version`, `date & time`, `source`, `frame`, and `time_ps`, then reports bond mode, ring sizes, status, and molecule counts; Molecules, active connection coordination, Order Parameters, and Ice are separated into compact sections.
 
 The global `summary.xlsx` workbook keeps plotting-oriented analysis sheets with one input file or trajectory frame per row. When hydrate_cluster is enabled, `hydrate_cluster` keeps one row per frame and `hydrate_domain` keeps one row per domain. With `hydrate_cluster.detail = true` or `--cluster-detail on`, `hydrate_cluster_detail` adds one row per cluster. Public motif output is not written. The `order_parameter` sheet reports `F3_mean`, `F3_count`, `F4_mean`, `F4_count`, and one mean/count pair for each requested Q_l degree, plus focus-water columns when configured. Optional per-water output is written as `*_order_parameter.tsv`.
 

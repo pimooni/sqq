@@ -339,12 +339,69 @@ def format_seconds(seconds: float) -> str:
     return f"{max(seconds, 0.0):.1f} s"
 
 
+STAGE_GROUPS = (
+    (
+        ("reading frame", "reading"),
+        ("resolving settings", "settings"),
+        ("selecting molecules", "selecting"),
+    ),
+    (
+        ("building water graph", "graph"),
+        ("searching rings", "ring"),
+        ("searching half/quasi cage", "half/quasi"),
+        ("searching cage", "cage"),
+        ("classifying hydrate cluster", "cluster"),
+    ),
+    (
+        ("filtering free patches", "filtering"),
+        ("computing order parameters", "order"),
+        ("classifying ice", "ice"),
+        ("writing outputs", "output"),
+    ),
+)
+STAGE_LABEL_BY_NAME = {
+    stage: label
+    for group in STAGE_GROUPS
+    for stage, label in group
+}
+
+
+def configured_stage_groups(include_cluster_stage: bool) -> list[list[tuple[str, str]]]:
+    """Return progress stages, hiding hydrate cluster when it is not enabled."""
+    return [
+        [
+            (stage, label)
+            for stage, label in group
+            if include_cluster_stage or label != "cluster"
+        ]
+        for group in STAGE_GROUPS
+    ]
+
+
+def stage_column_widths(rows: list[list[str]]) -> list[int]:
+    """Measure the widest visible cell for each progress-display column."""
+    column_count = max((len(row) for row in rows), default=0)
+    return [
+        max((len(row[index]) for row in rows if index < len(row)), default=0)
+        for index in range(column_count)
+    ]
+
+
+def format_stage_label(label: str, width: int, *, active: bool, bold: bool) -> str:
+    """Format one stage cell, keeping ANSI bold from affecting visible width."""
+    padding = " " * max(width - len(label), 0)
+    if active and bold:
+        return f"{chr(27)}[1m{label}{chr(27)}[0m{padding}"
+    return label + padding
+
+
 class RunProgressDisplay:
     """Render per-run progress with current stage, frame, and total timings."""
 
-    def __init__(self, total: int, total_started_at: float) -> None:
+    def __init__(self, total: int, total_started_at: float, include_cluster_stage: bool) -> None:
         self.total = total
         self.total_started_at = total_started_at
+        self.stage_groups = configured_stage_groups(include_cluster_stage)
         self.completed = 0
         self.failed = 0
         self.current_index: int | None = None
@@ -415,9 +472,9 @@ class RunProgressDisplay:
         if self._interactive:
             lines = self._panel_lines()
             if self._rendered_lines:
-                sys.stdout.write(f"\033[{self._rendered_lines}F")
+                sys.stdout.write(f"{chr(27)}[{self._rendered_lines}F")
             for line in lines:
-                sys.stdout.write("\r\033[K" + line + "\n")
+                sys.stdout.write(chr(13) + f"{chr(27)}[K" + line + chr(10))
             sys.stdout.flush()
             self._rendered_lines = len(lines)
             return
@@ -425,11 +482,15 @@ class RunProgressDisplay:
             self._progress.set_postfix_str(self._postfix_text(), refresh=True)
 
     def _panel_lines(self) -> list[str]:
+        stage_lines = self._stage_lines()
+        connector_indent = " " * (TERMINAL_LABEL_WIDTH + 2)
         return [
             "Analysis Progress",
             f"  {'completed_files':<{TERMINAL_LABEL_WIDTH}}: {self.completed} / {self.total}  [ {self.failed} failed ]",
             f"  {'current_file':<{TERMINAL_LABEL_WIDTH}}: {self._current_file_text()}",
-            f"  {'stage':<{TERMINAL_LABEL_WIDTH}}: {self.stage}",
+            f"  {'stage':<{TERMINAL_LABEL_WIDTH}}: {stage_lines[0]}",
+            connector_indent + stage_lines[1],
+            connector_indent + stage_lines[2],
             f"  {'stage / frame / total':<{TERMINAL_LABEL_WIDTH}}: {self._time_text()}",
             "",
             self._files_bar(),
@@ -439,7 +500,7 @@ class RunProgressDisplay:
         return (
             f"completed_files: {self.completed} / {self.total} [ {self.failed} failed ]; "
             f"current_file: {self._current_file_text()}; "
-            f"stage: {self.stage}; "
+            f"stage: {STAGE_LABEL_BY_NAME.get(self.stage, self.stage)}; "
             f"stage / frame / total: {self._time_text()}"
         )
 
@@ -457,38 +518,41 @@ class RunProgressDisplay:
         total_elapsed = now - self.total_started_at
         return f"{format_seconds(stage_elapsed)} / {format_seconds(frame_elapsed)} / {format_seconds(total_elapsed)}"
 
+    def _stage_lines(self) -> list[str]:
+        labels_by_row = [[label for _, label in group] for group in self.stage_groups]
+        widths = stage_column_widths(labels_by_row)
+        return [
+            self._stage_flow_line(group, widths, row_index)
+            for row_index, group in enumerate(self.stage_groups)
+        ]
+
+    def _stage_flow_line(self, group: list[tuple[str, str]], widths: list[int], row_index: int) -> str:
+        cells = []
+        for index, (stage, label) in enumerate(group):
+            cells.append(
+                format_stage_label(
+                    label,
+                    widths[index],
+                    active=stage == self.stage,
+                    bold=self._interactive,
+                )
+            )
+        line = " > ".join(cells).rstrip()
+        if row_index > 0:
+            return "> " + line
+        return line
+
     def _files_bar(self) -> str:
         if self.total <= 0:
             fraction = 1.0
         else:
             fraction = min(max(self.completed / self.total, 0.0), 1.0)
         filled = int(round(PROGRESS_BAR_WIDTH * fraction))
-        bar = "█" * filled + " " * (PROGRESS_BAR_WIDTH - filled)
+        bar = chr(9608) * filled + " " * (PROGRESS_BAR_WIDTH - filled)
         return f"Files: {fraction * 100:3.0f}%|{bar}| {self.completed}/{self.total} completed"
 
 
-PARALLEL_STAGE_GROUPS = (
-    (
-        ("reading frame", "reading"),
-        ("resolving settings", "settings"),
-        ("selecting molecules", "selecting"),
-    ),
-    (
-        ("building water graph", "graph"),
-        ("searching rings", "ring"),
-        ("searching half/quasi cage", "half/quasi"),
-        ("searching cage", "cage"),
-        ("classifying hydrate cluster", "cluster"),
-    ),
-    (
-        ("filtering free patches", "filtering"),
-        ("computing order parameters", "order"),
-        ("classifying ice", "ice"),
-        ("writing outputs", "output"),
-    ),
-)
 PARALLEL_FILE_PREVIEW_LIMIT = 6
-PARALLEL_STAGE_COLUMN_WIDTH = 18
 PARALLEL_FILE_COLUMN_WIDTH = 25
 PARALLEL_ACTIVE_STAGE_WIDTH = 30
 
@@ -496,10 +560,11 @@ PARALLEL_ACTIVE_STAGE_WIDTH = 30
 class ParallelRunProgressDisplay:
     """Render aggregate and per-file progress for concurrent frame analysis."""
 
-    def __init__(self, total: int, workers: int, total_started_at: float) -> None:
+    def __init__(self, total: int, workers: int, total_started_at: float, include_cluster_stage: bool) -> None:
         self.total = total
         self.workers = workers
         self.total_started_at = total_started_at
+        self.stage_groups = configured_stage_groups(include_cluster_stage)
         self.completed = 0
         self.failed = 0
         self._active: dict[int, dict[str, Any]] = {}
@@ -573,9 +638,9 @@ class ParallelRunProgressDisplay:
         if self._interactive:
             lines = self._panel_lines()
             if self._rendered_lines:
-                sys.stdout.write(f"\033[{self._rendered_lines}F")
+                sys.stdout.write(f"{chr(27)}[{self._rendered_lines}F")
             for line in lines:
-                sys.stdout.write("\r\033[K" + line + "\n")
+                sys.stdout.write(chr(13) + f"{chr(27)}[K" + line + chr(10))
             sys.stdout.flush()
             self._rendered_lines = len(lines)
             return
@@ -613,11 +678,7 @@ class ParallelRunProgressDisplay:
         return lines
 
     def _postfix_text(self) -> str:
-        stage_text = " | ".join(
-            f"{label} {count}"
-            for line in self._stage_summary_values()
-            for label, count in line
-        )
+        stage_text = " / ".join("  ".join(row) for row in self._stage_summary_cell_rows())
         return (
             f"completed_files: {self.completed} / {self.total} [ {self.failed} failed ]; "
             f"active_workers: {len(self._active)} / {self.workers}; "
@@ -630,14 +691,21 @@ class ParallelRunProgressDisplay:
 
     def _stage_summary_values(self) -> list[list[tuple[str, int]]]:
         counts = self._stage_counts()
-        return [[(label, counts.get(stage, 0)) for stage, label in group] for group in PARALLEL_STAGE_GROUPS]
+        return [[(label, counts.get(stage, 0)) for stage, label in group] for group in self.stage_groups]
+
+    def _stage_summary_cell_rows(self) -> list[list[str]]:
+        return [
+            [f"{label}:{count}" for label, count in values]
+            for values in self._stage_summary_values()
+        ]
 
     def _stage_summary_lines(self) -> list[str]:
-        rows = []
-        for values in self._stage_summary_values():
-            cells = [f"{label} {count}" for label, count in values]
-            rows.append(" | ".join(f"{cell:<{PARALLEL_STAGE_COLUMN_WIDTH}}" for cell in cells).rstrip())
-        return rows
+        cell_rows = self._stage_summary_cell_rows()
+        widths = stage_column_widths(cell_rows)
+        return [
+            "  ".join(f"{cell:<{widths[index]}}" for index, cell in enumerate(row)).rstrip()
+            for row in cell_rows
+        ]
 
     def _active_file_line(self, item: tuple[int, dict[str, Any]], now: float) -> str:
         frame_index, state = item
@@ -657,7 +725,7 @@ class ParallelRunProgressDisplay:
     def _files_bar(self) -> str:
         fraction = 1.0 if self.total <= 0 else min(max(self.completed / self.total, 0.0), 1.0)
         filled = int(round(PROGRESS_BAR_WIDTH * fraction))
-        bar = "█" * filled + " " * (PROGRESS_BAR_WIDTH - filled)
+        bar = chr(9608) * filled + " " * (PROGRESS_BAR_WIDTH - filled)
         return f"Files: {fraction * 100:3.0f}%|{bar}| {self.completed}/{self.total} completed"
 
 
@@ -681,7 +749,11 @@ def analyze_paths_serial(
     """Analyze frames in input order."""
     rows: list[dict[str, Any]] = []
     frames = read_frames(paths, topology=topology, xtc_stride=int(config["input"].get("xtc_stride", 1)))
-    progress = RunProgressDisplay(total=len(paths), total_started_at=total_started_at)
+    progress = RunProgressDisplay(
+        total=len(paths),
+        total_started_at=total_started_at,
+        include_cluster_stage=bool(config.get("hydrate_cluster", {}).get("enabled", False)),
+    )
     try:
         for frame_index, frame in enumerate(frames):
             callback = progress.start_frame(frame_index, frame.name)
@@ -703,7 +775,12 @@ def analyze_paths_parallel(
 ) -> list[dict[str, Any]]:
     """Analyze independent coordinate files with live per-worker stages."""
     rows_by_index: dict[int, dict[str, Any]] = {}
-    progress = ParallelRunProgressDisplay(total=len(paths), workers=workers, total_started_at=total_started_at)
+    progress = ParallelRunProgressDisplay(
+        total=len(paths),
+        workers=workers,
+        total_started_at=total_started_at,
+        include_cluster_stage=bool(config.get("hydrate_cluster", {}).get("enabled", False)),
+    )
     try:
         with ThreadPoolExecutor(max_workers=workers) as executor:
             futures = {

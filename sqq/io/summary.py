@@ -3,6 +3,7 @@ from __future__ import annotations
 """Markdown, TSV, VMD, and XLSX summary writers."""
 
 from collections import Counter, defaultdict
+from datetime import datetime
 from pathlib import Path
 import re
 from typing import Any
@@ -12,6 +13,7 @@ import pandas as pd
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 
+from .. import __version__
 from ..banner import SQQ_BANNER
 from ..config import dump_config
 from ..core.cage import KNOWN_CAGE_TYPES, parse_cage_face_label
@@ -864,9 +866,11 @@ def write_frame_info(result: FrameResult, frame_dir: Path, ring_sizes: list[int]
             "Frame Information",
             ["item", "value"],
             [
+                ["sqq version", __version__],
+                ["date & time", report_datetime_label()],
+                ["source", source_label(result.frame.source)],
                 ["frame", result.frame.name],
                 ["time_ps", result.frame.time_ps],
-                ["source", source_label(result.frame.source)],
                 ["bond_mode", row["connection_mode"]],
                 ["ring_sizes", ", ".join(str(size) for size in enabled_ring_sizes)],
                 ["status", "ok"],
@@ -1317,6 +1321,28 @@ def source_label(source: Path | None) -> str:
     if source is None:
         return ""
     return str(Path(source).resolve())
+
+
+def report_datetime_label(value: datetime | None = None) -> str:
+    """Return local report-generation time for per-frame Markdown output."""
+    moment = value or datetime.now().astimezone()
+    zone = report_timezone_label(moment)
+    return f"{moment:%Y-%m-%d %H:%M:%S} {zone}"
+
+
+def report_timezone_label(value: datetime) -> str:
+    """Return a compact human-facing timezone label."""
+    name = value.tzname() or "UTC"
+    offset = value.utcoffset()
+    total_minutes = int(offset.total_seconds() / 60) if offset is not None else 0
+    if total_minutes == 480 and name in {"CST", "China Standard Time", "\u4e2d\u56fd\u6807\u51c6\u65f6\u95f4"}:
+        return "Asia/Shanghai"
+    if offset is None:
+        return name
+    sign = "+" if total_minutes >= 0 else "-"
+    hours, minutes = divmod(abs(total_minutes), 60)
+    offset_text = f"UTC{sign}{hours:02d}:{minutes:02d}"
+    return name if name and name != "UTC" else offset_text
 
 
 def write_membership(result: FrameResult, frame_dir: Path) -> None:
