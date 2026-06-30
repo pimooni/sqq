@@ -93,6 +93,114 @@ class Cage:
 
 
 @dataclass(frozen=True)
+class HydrateMotif:
+    object_id: str
+    hydrate_type: str
+    anchor_cage_ids: tuple[str, ...]
+    cage_ids: tuple[str, ...]
+    shared_face_ids: tuple[str, ...] = ()
+    cluster_id: str = ""
+    domain_id: str = ""
+    status: str = "partial"
+    completeness: float = 0.0
+    consistency: float = 0.0
+    confidence: float = 0.0
+    classification_method: str = "SQQ local face topology"
+
+    @property
+    def cage_count(self) -> int:
+        """Number of cages in this overlapping local topology motif."""
+        return len(self.cage_ids)
+
+
+@dataclass(frozen=True)
+class HydrateDomain:
+    object_id: str
+    cluster_id: str
+    hydrate_type: str
+    cage_ids: tuple[str, ...]
+    motif_ids: tuple[str, ...]
+    waters: tuple[int, ...]
+    guest_ids: tuple[str, ...]
+    boundary_cage_ids: tuple[str, ...] = ()
+    confidence: float = 0.0
+    status: str = "growth"
+    seed_count: int = 0
+    seed_cage_ids: tuple[str, ...] = ()
+    classified_fraction: float = 0.0
+
+    @property
+    def cage_count(self) -> int:
+        """Number of uniquely phase-classified cages in this domain."""
+        return len(self.cage_ids)
+
+    @property
+    def motif_count(self) -> int:
+        """Number of phase-core motifs assigned to this domain."""
+        return len(self.motif_ids)
+
+    @property
+    def water_count(self) -> int:
+        """Number of unique water oxygens used by the domain cages."""
+        return len(self.waters)
+
+    @property
+    def guest_count(self) -> int:
+        """Number of unique guest molecules assigned to the domain cages."""
+        return len(self.guest_ids)
+
+
+@dataclass(frozen=True)
+class HydrateCluster:
+    object_id: str
+    cage_ids: tuple[str, ...]
+    cage_types: tuple[str, ...]
+    waters: tuple[int, ...]
+    guest_ids: tuple[str, ...]
+    shared_faces: tuple[tuple[str, str, str], ...] = ()
+    hydrate_type: str = "unclassified"
+    motif_ids: tuple[str, ...] = ()
+    domain_ids: tuple[str, ...] = ()
+    classified_cage_ids: tuple[str, ...] = ()
+    unclassified_cage_ids: tuple[str, ...] = ()
+    ambiguous_cage_ids: tuple[str, ...] = ()
+    transition_cage_ids: tuple[str, ...] = ()
+    boundary_cage_ids: tuple[str, ...] = ()
+    hydrate_type_counts: tuple[tuple[str, int], ...] = ()
+    phase_boundary_labels: tuple[tuple[str, str], ...] = ()
+
+    @property
+    def cage_count(self) -> int:
+        """Number of cages in this connected cage cluster."""
+        return len(self.cage_ids)
+
+    @property
+    def water_count(self) -> int:
+        """Number of unique water oxygens used by the cluster cages."""
+        return len(self.waters)
+
+    @property
+    def guest_count(self) -> int:
+        """Number of unique guest molecules assigned to the cluster cages."""
+        return len(self.guest_ids)
+
+    @property
+    def motif_count(self) -> int:
+        """Number of phase-core motifs in this cluster."""
+        return len(self.motif_ids)
+
+    @property
+    def domain_count(self) -> int:
+        """Number of phase domains in this cluster."""
+        return len(self.domain_ids)
+
+    @property
+    def boundary_cage_count(self) -> int:
+        """Number of transition, unclassified, or ambiguous cages."""
+        return len(self.boundary_cage_ids)
+
+
+@dataclass(frozen=True)
 class WaterOrder:
     oxygen: int
     resid: int
@@ -147,11 +255,14 @@ class FrameResult:
     cages: list[Cage] = field(default_factory=list)
     all_cages: list[Cage] = field(default_factory=list)
     cage_report_types: tuple[str, ...] | None = None
+    hydrate_cluster_enabled: bool = False
+    hydrate_cluster_detail: bool = False
+    hydrate_clusters: list[HydrateCluster] = field(default_factory=list)
+    hydrate_motifs: list[HydrateMotif] = field(default_factory=list)
+    hydrate_domains: list[HydrateDomain] = field(default_factory=list)
+    isolated_cage_ids: tuple[str, ...] = ()
     f3f4: F3F4Result | None = None
     ice_like_waters: tuple[int, ...] = ()
     ice_i_waters: tuple[int, ...] = ()
     interfacial_ice_waters: tuple[int, ...] = ()
     warnings: list[str] = field(default_factory=list)
-
-
-

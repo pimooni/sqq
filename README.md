@@ -2,7 +2,7 @@
 
 **SQQ: Python Joint Toolkit for Water-Shell Topology Analysis.**
 
-SQQ builds a water network, reports coordination diagnostics, and finds rings, standard half-cages, quasi-cages, closed cages, cage guest occupancy, F3/F4/Q_l order parameters, and ice-like waters. Detailed algorithms are documented in `docs/design.md`; version notes are documented in `docs/update.md`.
+SQQ builds a water network, reports coordination diagnostics, and finds rings, standard half-cages, quasi-cages, closed cages, reported-cage hydrate clusters, per-frame phase domains and boundaries, cage guest occupancy, F3/F4/Q_l order parameters, and ice-like waters. Detailed algorithms are documented in `docs/design.md`; version notes are documented in `docs/update.md`.
 
 ## Install
 
@@ -80,7 +80,7 @@ sqq analyze -i ./gro -m 50 -o ./result_standard
 sqq analyze -i ./gro -m 99 -o ./result_performance
 ```
 
-Modes do not change `quasi_cage.max_layers`; L1 remains the default in every mode. Use `--quasi-max-layers` explicitly for L2/L3. Automatic workers are capped by the number of independent GRO/XYZ files. A single coordinate file or XTC/TRR trajectory still runs with one worker. `--workers N` overrides the mode percentage. Parallel runs display live aggregate stages and up to six active files with per-stage and per-file timings.
+Modes do not change `quasi_cage.max_layers`; L1 remains the default in every mode. Use `--quasi-max-layer` explicitly for L2/L3. Automatic workers are capped by the number of independent GRO/XYZ files. A single coordinate file or XTC/TRR trajectory still runs with one worker. `--workers N` overrides the mode percentage. Parallel runs display live aggregate stages and up to six active files with per-stage and per-file timings.
 
 ## Common Commands
 
@@ -102,10 +102,16 @@ Explicitly report every detected cage composition in the selected search scope:
 sqq analyze -i md.gro -s 4,5,6 --cage-size all -o ./result_sqq_all_cages
 ```
 
+Analyze connected reported-cage hydrate clusters:
+
+```bash
+sqq analyze -i md.gro -s 4,5,6 --hydrate-cluster on -o ./result_sqq_cluster
+```
+
 Enable outer quasi-cage layers:
 
 ```bash
-sqq analyze -i md.gro --quasi-max-layers 3 -o ./result_sqq_l3
+sqq analyze -i md.gro --quasi-max-layer 3 -o ./result_sqq_l3
 ```
 
 Use LAMMPS-style Q_l degree list and neighbors:
@@ -156,6 +162,10 @@ cage:
   search_mode: grow
   seed_mode: ring
   occupancy_mode: polyhedron
+
+hydrate_cluster:
+  enabled: false
+  min_cage: 2
 
 order:
   f3f4_enabled: true
@@ -216,6 +226,18 @@ Repeated cage types contributed by multiple groups are reported once. All detect
 
 `--cage-size` accepts the comma-separated groups `I`, `II`, `H`, `HS-I`, `TS-I`, and `I2II`. The default `auto` scope follows `--size`; `all` explicitly requests the same all-detected behavior. Use `auto` or `all` alone rather than combining either keyword with a group.
 
+## Hydrate Cluster
+
+`--hydrate-cluster on` analyzes the final reported cage set after `--cage-size` filtering. Cages become graph nodes and are connected through complete shared ring faces. When several detected cages reference the same face, ring-plane geometry keeps at most one cage on each physical side.
+
+`--cluster-min-cage N` sets the minimum connected-component size; the default is `2`. Smaller components are counted as isolated cages.
+
+Within each reported cluster, SQQ builds labelled first-shell fingerprints from neighboring cage types and shared-face sizes. Strict local sI/sII/sH seeds initialize phase evidence. sI and sII then expand through compatible face-labelled edges when a candidate has at least two accepted phase contacts; sH remains conservative and expands only through overlapping strict sH seeds. Cages claimed exclusively by one phase form deterministic per-frame domains. Remaining cages are reported as single-phase boundaries, interphase boundaries, ambiguous, or unclassified.
+
+The analysis is off by default and does not alter ring, patch, cage, occupancy, order-parameter, or ice results. Classification follows the final `--cage-size` scope and is per-frame; temporal grain tracking and crystallographic orientation matching are not implemented.
+
+`--cluster-detail on` adds the optional one-row-per-cluster `hydrate_cluster_detail` workbook sheet. The default workbook output includes `hydrate_cluster` and `hydrate_domain`; public motif output is not generated. Hydrate clusters do not produce separate GRO files.
+
 ## Useful Options
 
 | Option | Possible values | Meaning |
@@ -228,14 +250,17 @@ Repeated cage types contributed by multiple groups are reported once. All detect
 | `-s, --size SIZES` | Comma-separated subset of `4,5,6,7` | Set ring and quasi-cage search sizes; cage search uses the selected `4,5,6` sizes |
 | `--ring-size SIZES` | `auto` or a comma-separated subset of `--size` | Report only these searched ring sizes |
 | `--cage-size GROUPS` | `auto`, `all`, `I`, `II`, `H`, `HS-I`, `TS-I`, `I2II`; groups may be comma-separated | Restrict cage reporting; default `auto` follows `--size` |
-| `--max-cage-faces N` | Positive integer; default `20` | Limit generated cage search compositions |
+| `--max-cage-face N` | Positive integer; default `20` | Limit generated cage search compositions |
+| `--hydrate-cluster VALUE` | `on`, `off`; default `off` | Enable reported-cage hydrate_cluster analysis |
+| `--cluster-min-cage N` | Positive integer; default `2` | Minimum connected cage count required for one hydrate_cluster |
+| `--cluster-detail VALUE` | `on`, `off`; default `off` | Add the one-row-per-cluster `hydrate_cluster_detail` workbook sheet |
 | `--pattern PATTERN` | Glob; default `*.gro` | Select files when `--input` is a directory |
 | `--top, --topology FILE.gro` | GRO topology file | Supply topology/structure data for XTC/TRR input |
 | `--recursive` | Flag; default off | Search input directories recursively |
-| `--quasi-sizes SIZES` | `auto` or a comma-separated subset of searched `4,5,6,7` | Override quasi-cage base and side sizes together |
-| `--quasi-base-sizes SIZES` | `auto` or a comma-separated subset of searched `4,5,6,7` | Override quasi-cage base-ring sizes |
-| `--quasi-side-sizes SIZES` | `auto` or a comma-separated subset of searched `4,5,6,7` | Override quasi-cage side-ring sizes |
-| `--quasi-max-layers N` | Positive integer; default `1` | Report quasi-cage layers up to N |
+| `--quasi-size SIZES` | `auto` or a comma-separated subset of searched `4,5,6,7` | Override quasi-cage base and side size lists together |
+| `--quasi-base-size SIZES` | `auto` or a comma-separated subset of searched `4,5,6,7` | Override quasi-cage base-ring size list |
+| `--quasi-side-size SIZES` | `auto` or a comma-separated subset of searched `4,5,6,7` | Override quasi-cage side-ring size list |
+| `--quasi-max-layer N` | Positive integer; default `1` | Report quasi-cage layers up to N |
 | `--no-q` | Flag; default off | Disable Steinhardt Q_l order-parameter calculation |
 | `-q, --q-degree L1,L2` | Comma-separated non-negative integers; default `6,12` | Select Q_l degree list to report, e.g. `4,6,8,10,12` |
 | `--q-neighbor-mode MODE` | `graph`, `cutoff`, `nearest`, `lammps`; default `graph` | Select the neighbor source used by Q_l |
@@ -298,7 +323,7 @@ result_sqq/
     test1_order_parameter.tsv   # only with --write-order-tsv
 ```
 
-Each per-frame `*_info.md` report is arranged for inspection: it shows only reported ring sizes, reports final free-ring counts, includes the active network degree distribution, groups half-cage and quasi-cage isomers below composition totals, and keeps cage composition totals plus cage isomers in one vertical `Cage` table. Internal `hc_` and `qc_` prefixes are omitted from report labels.
+Each per-frame `*_info.md` report is arranged for inspection: it shows only reported ring sizes, reports final free-ring counts, includes the active network degree distribution, groups half-cage and quasi-cage isomers below composition totals, and keeps cage composition totals plus cage isomers in one vertical `Cage` table. When enabled, the same report adds `Hydrate Cluster`, hierarchy, detail, domain, and boundary sections. Internal `hc_` and `qc_` prefixes are omitted from report labels.
 
 When quasi-cage or cage isomers are present, the same report adds description tables:
 
@@ -307,7 +332,7 @@ When quasi-cage or cage isomers are present, the same report adds description ta
 
 `Cage Occupancy` remains a separate table because it describes guest assignment rather than cage topology. It expands exact guest compositions across dynamic columns in source guest order.
 
-`summary.xlsx` remains plotting-oriented. Each analysis sheet keeps one input file or trajectory frame per row. The `order_parameter` sheet contains `F3_mean`, `F3_count`, `F4_mean`, `F4_count`, and one mean/count pair for each requested Q_l degree. By default this gives `q6_mean`, `q6_count`, `q12_mean`, and `q12_count`.
+`summary.xlsx` remains plotting-oriented. Each analysis sheet keeps one input file or trajectory frame per row. When hydrate_cluster is enabled, the workbook adds `hydrate_cluster` for per-frame totals and `hydrate_domain` for one row per domain; `--cluster-detail on` additionally writes `hydrate_cluster_detail` with one row per cluster. The `order_parameter` sheet contains `F3_mean`, `F3_count`, `F4_mean`, `F4_count`, and one mean/count pair for each requested Q_l degree. By default this gives `q6_mean`, `q6_count`, `q12_mean`, and `q12_count`.
 
 Output ownership is:
 

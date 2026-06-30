@@ -98,6 +98,11 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "occupancy_mode": "polyhedron",
         "occupancy_radius_nm": 0.5,
     },
+    "hydrate_cluster": {
+        "enabled": False,
+        "min_cage": 2,
+        "detail": False,
+    },
     "order": {
         "f3f4_enabled": True,
         "q_enabled": True,
@@ -221,7 +226,6 @@ def dump_config(config: dict[str, Any], handle) -> None:
     else:
         json.dump(config, handle, ensure_ascii=False, indent=2)
         handle.write("\n")
-
 
 
 

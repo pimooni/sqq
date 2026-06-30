@@ -2,7 +2,61 @@
 
 This file records versioned update notes. New releases should be appended above older entries.
 
+## Version 0.2.1
+
+### Short Summary
+
+Version 0.2.1 adds optional reported-cage hydrate clusters, geometry-resolved shared-face connectivity, strict local sI/sII/sH phase seeds, per-frame phase-domain expansion and boundary classification, cluster/domain workbook output, and singular CLI option names.
+
+Comparison baseline: GitHub `pimooni/sqq` tag `v0.1.6` (commit `97996b2`) -> local `0.2.1`.
+
+### Main Changes
+
+1. Hydrate cluster graph
+   - Added optional hydrate cluster analysis controlled by `--hydrate-cluster on/off` or `hydrate_cluster.enabled`; it remains off by default.
+   - Builds the graph from the final reported cage set, so `--cage-size` controls which cages can enter cluster and phase classification.
+   - Connects cages through a complete shared ring face. When more than two detected cages reference one face, ring-plane geometry selects at most one cage on each physical side; without geometry, only an unambiguous two-cage face is accepted.
+   - Reports connected components with at least `--cluster-min-cage` cages and counts smaller components as isolated cages.
+
+2. Phase seeds, expansion, and domains
+   - Added labelled first-shell fingerprints keyed by neighboring cage type and shared-face size.
+   - Added strict sI and sII seed templates for `5^12`, `5^12 6^2`, and `5^12 6^4` environments with a count tolerance of one and no unexpected fingerprint labels.
+   - Added conservative composite sH seeds made from two separated `5^12 6^8` anchors, six common `5^12` cages, six `4^3 5^6 6^3` cages, and an adjacent medium-cage bridge between the anchors.
+   - Expands sI and sII from strict seed members through compatible labelled edges. A candidate must have a partial compatible fingerprint and at least two accepted phase contacts. sH currently grows only by the union of overlapping strict sH seeds.
+   - Collects phase claims independently, then forms deterministic per-frame domains only from cages claimed exclusively by one phase and connected through compatible phase edges. Every domain must contain at least one strict seed anchor.
+
+3. Boundaries and cluster labels
+   - Keeps cages with competing phase claims out of exclusive domains and labels supported single-phase or multi-phase boundary cages after domains are formed.
+   - Separates multi-phase/interphase boundaries, single-phase boundaries, ambiguous cages, and unclassified cages without forcing a label from cage composition alone.
+   - Labels a cluster `sI`, `sII`, or `sH` when all of its domains have one phase, `mixed` when multiple domain types occur, and `unclassified` when no phase domain is found.
+   - Domain and cluster identifiers are deterministic within a frame; temporal domain tracking is not implemented.
+
+4. Hydrate cluster output
+   - Adds per-frame `Hydrate Cluster`, `Hydrate Cluster Hierarchy`, `Hydrate Cluster Detail`, `Hydrate Domain`, and `Hydrate Boundary` sections when analysis is enabled.
+   - The hierarchy table reports cluster, domain, and boundary cage quantities by cage composition; seed counts remain in domain detail rather than a dedicated hierarchy column.
+   - Adds `hydrate_cluster` and `hydrate_domain` workbook sheets whenever hydrate analysis is enabled.
+   - Adds `--cluster-detail on/off` and `hydrate_cluster.detail`; when enabled, `hydrate_cluster_detail` adds one row per cluster.
+   - Public motif output is not generated in 0.2.1. The compatibility return slot and model remain internal/empty, and no `hydrate_motif` sheet or Markdown section is written.
+   - Hydrate clusters do not produce additional GRO structure files.
+
+5. CLI and package metadata
+   - Renamed `--quasi-sizes`, `--quasi-base-sizes`, `--quasi-side-sizes`, `--quasi-max-layers`, and `--max-cage-faces` to `--quasi-size`, `--quasi-base-size`, `--quasi-side-size`, `--quasi-max-layer`, and `--max-cage-face`.
+   - Existing YAML keys, including `quasi_cage.max_layers` and `cage.max_faces`, remain unchanged.
+   - Updated package metadata from `0.1.6` to `0.2.1`.
+   - Added hydrate-cluster unit tests covering physical shared-face resolution, ideal phase seeds, incomplete or incorrect fingerprints, expansion, mixed boundaries, separated same-phase domains, output sheets, hierarchy rendering, and CLI settings.
+
+### Compatibility
+
+- With hydrate cluster analysis disabled, the 0.1.6 graph, ring, patch, cage, occupancy, order-parameter, and ice workflow is unchanged.
+- Hydrate classification depends on the final cage report scope; excluding a required cage type can prevent the corresponding phase seed or domain from being recognized.
+- Phase and boundary assignments are per-frame topological classifications, not temporal grain tracking or crystallographic orientation matching.
+- New commands should use the singular long option names. Historical notes retain the option spelling used by the corresponding release.
+
 ## Version 0.1.6
+
+### Short Summary
+
+Version 0.1.6 makes cage reporting follow the selected search scope, adds Q_l order parameters, and improves per-frame cage/isomer readability while keeping the scientific cage acceptance rules unchanged.
 
 ### Main Changes
 
@@ -59,11 +113,11 @@ This file records versioned update notes. New releases should be appended above 
 - Q_l is a diagnostic order parameter and does not alter graph construction, ring/cage detection, ownership filtering, guest occupancy, F3/F4, or ice classification.
 - Per-frame `*_info.md` cage formatting changed for readability; `summary.xlsx` remains the stable plotting-oriented output.
 
+## Version 0.1.5
+
 ### Short Summary
 
-Version 0.1.6 makes cage reporting follow the selected search scope, adds Q_l order parameters, and improves per-frame cage/isomer readability while keeping the scientific cage acceptance rules unchanged.
-
-## Version 0.1.5
+Version 0.1.5 adds diagnostic coordination distributions, named Type H cages, and explicit search/report scopes for rings and cages.
 
 ### Main Changes
 
@@ -105,11 +159,11 @@ Version 0.1.6 makes cage reporting follow the selected search scope, adds Q_l or
 - Commands and YAML files using the removed plural/other-cage options must be updated to the new search/report options.
 - Cage-network or crystal-domain analysis is intentionally not included in this release.
 
+## Version 0.1.4
+
 ### Short Summary
 
-Version 0.1.5 adds diagnostic coordination distributions, named Type H cages, and explicit search/report scopes for rings and cages.
-
-## Version 0.1.4
+Version 0.1.4 improves CLI help, live per-worker progress, and per-frame Markdown readability. It also broadens the local DOCX ignore rule without changing topology-analysis results or workbook schemas.
 
 ### Main Changes
 
@@ -154,11 +208,11 @@ Version 0.1.5 adds diagnostic coordination distributions, named Type H cages, an
 - Analysis algorithms, scientific defaults, `summary.xlsx` schemas, mode presets, worker allocation, and bond-mode behavior are unchanged from `0.1.3`. The per-frame Markdown layout and parallel progress reporting changed.
 - Existing `sqq analyze` commands and configuration files remain compatible.
 
+## Version 0.1.3
+
 ### Short Summary
 
-Version 0.1.4 improves CLI help, live per-worker progress, and per-frame Markdown readability. It also broadens the local DOCX ignore rule without changing topology-analysis results or workbook schemas.
-
-## Version 0.1.3
+Version 0.1.3 adds reproducible analysis presets and mode-based file-level worker allocation while keeping quasi-cage layer depth and output selection under explicit user control.
 
 ### Main Changes
 
@@ -182,11 +236,11 @@ Version 0.1.4 improves CLI help, live per-worker progress, and per-frame Markdow
 4. Project description
    - Standardized the README description as `SQQ: Python Joint Toolkit for Water-Shell Topology Analysis.`
 
+## Version 0.1.2
+
 ### Short Summary
 
-Version 0.1.3 adds reproducible analysis presets and mode-based file-level worker allocation while keeping quasi-cage layer depth and output selection under explicit user control.
-
-## Version 0.1.2
+Version 0.1.2 is mainly a speed and usability update. The closed-cage rules are unchanged: accepted cages still require every edge to be used exactly twice, `V - E + F = 2`, and target face-count matching.
 
 ### Main Changes
 
@@ -216,11 +270,11 @@ Version 0.1.3 adds reproducible analysis presets and mode-based file-level worke
    - Default quasi-cage output now remains strict L1 when `quasi_cage.max_layers = 1`.
    - The special L2 `6^1` check is restricted to the standard `hc_6r_5^6_6^1` half-cage and is no longer reported as a quasi-cage.
 
+## Version 0.1.1
+
 ### Short Summary
 
-Version 0.1.2 is mainly a speed and usability update. The closed-cage rules are unchanged: accepted cages still require every edge to be used exactly twice, `V - E + F = 2`, and target face-count matching.
-
-## Version 0.1.1
+The core 0.1.1 change is replacing the old `cup` workflow with `half_cage` and `quasi_cage`, while unifying ring, open-patch, and closed-cage search around shared-edge topology lookups.
 
 Comparison baseline: GitHub `pimooni/sqq` 0.1.0 -> local 0.1.1.
 
@@ -307,7 +361,3 @@ CH4+CO2
 9. Documentation updates
    - README now describes the 0.1.1 workflow.
    - Developer design notes are available at `docs/design.md`.
-
-### Short Summary
-
-The core 0.1.1 change is replacing the old `cup` workflow with `half_cage` and `quasi_cage`, while unifying ring, open-patch, and closed-cage search around shared-edge topology lookups.

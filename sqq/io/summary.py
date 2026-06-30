@@ -2,9 +2,11 @@ from __future__ import annotations
 
 """Markdown, TSV, VMD, and XLSX summary writers."""
 
+from collections import Counter, defaultdict
 from pathlib import Path
 import re
 from typing import Any
+import unicodedata
 
 import pandas as pd
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
@@ -72,6 +74,31 @@ SUMMARY_COLUMNS = [
     "cage_total",
     "cage_empty",
     "cage_occupied",
+    "hydrate_cluster_enabled",
+    "hydrate_cluster_detail_enabled",
+    "hydrate_cluster_count",
+    "sI_cluster_count",
+    "sII_cluster_count",
+    "sH_cluster_count",
+    "mixed_cluster_count",
+    "unclassified_cluster_count",
+    "hydrate_domain_count",
+    "sI_domain_count",
+    "sII_domain_count",
+    "sH_domain_count",
+    "boundary_cage_count",
+    "transition_cage_count",
+    "sI_boundary_cage_count",
+    "sII_boundary_cage_count",
+    "sH_boundary_cage_count",
+    "sI_sII_boundary_cage_count",
+    "sI_sH_boundary_cage_count",
+    "sII_sH_boundary_cage_count",
+    "sI_sII_sH_boundary_cage_count",
+    "isolated_cage_count",
+    "largest_cluster_cage_count",
+    "largest_cluster_water_count",
+    "cluster_size_distribution",
     "F3_mean",
     "F4_mean",
     "q6_mean",
@@ -103,7 +130,7 @@ SUMMARY_COLUMNS = [
 
 TREE_MIDDLE = "\u251c"
 TREE_LAST = "\u2514"
-COLUMN_CHILD = "\u21b3"
+TREE_PIPE = "\u2502"
 SUBSCRIPT_DIGIT_DELETE = dict.fromkeys(range(0x2080, 0x208A))
 
 
@@ -139,6 +166,18 @@ def result_row(result: FrameResult) -> dict[str, Any]:
     used_ring_ids.update(ring_id for cage in filtering_cages for ring_id in cage.rings)
     half_cage_counts = patch_counts(result.half_cages)
     quasi_cage_counts = patch_counts(result.quasi_cages)
+    cluster_details = hydrate_cluster_detail_records(result, guests_by_id, guest_order)
+    domain_details = hydrate_domain_records(result, guests_by_id, guest_order)
+    largest_cluster = max(result.hydrate_clusters, key=lambda cluster: cluster.cage_count, default=None)
+    cluster_type_counts = Counter(cluster.hydrate_type for cluster in result.hydrate_clusters)
+    domain_type_counts = Counter(domain.hydrate_type for domain in result.hydrate_domains)
+    boundary_cage_count = sum(cluster.boundary_cage_count for cluster in result.hydrate_clusters)
+    transition_cage_count = sum(len(cluster.transition_cage_ids) for cluster in result.hydrate_clusters)
+    phase_boundary_counts = Counter(
+        label
+        for cluster in result.hydrate_clusters
+        for _, label in cluster.phase_boundary_labels
+    )
 
     def free_count(size: int) -> int:
         # Free rings are rings not consumed by open patches or cages.
@@ -180,6 +219,33 @@ def result_row(result: FrameResult) -> dict[str, Any]:
         "cage_total": len(result.cages),
         "cage_empty": empty,
         "cage_occupied": occupied,
+        "hydrate_cluster_enabled": "on" if result.hydrate_cluster_enabled else "off",
+        "hydrate_cluster_detail_enabled": "on" if result.hydrate_cluster_detail else "off",
+        "hydrate_cluster_count": len(result.hydrate_clusters) if result.hydrate_cluster_enabled else 0,
+        "sI_cluster_count": cluster_type_counts.get("sI", 0),
+        "sII_cluster_count": cluster_type_counts.get("sII", 0),
+        "sH_cluster_count": cluster_type_counts.get("sH", 0),
+        "mixed_cluster_count": cluster_type_counts.get("mixed", 0),
+        "unclassified_cluster_count": cluster_type_counts.get("unclassified", 0),
+        "hydrate_domain_count": len(result.hydrate_domains),
+        "sI_domain_count": domain_type_counts.get("sI", 0),
+        "sII_domain_count": domain_type_counts.get("sII", 0),
+        "sH_domain_count": domain_type_counts.get("sH", 0),
+        "boundary_cage_count": boundary_cage_count,
+        "transition_cage_count": transition_cage_count,
+        "sI_boundary_cage_count": phase_boundary_counts.get("sI", 0),
+        "sII_boundary_cage_count": phase_boundary_counts.get("sII", 0),
+        "sH_boundary_cage_count": phase_boundary_counts.get("sH", 0),
+        "sI_sII_boundary_cage_count": phase_boundary_counts.get("sI+sII", 0),
+        "sI_sH_boundary_cage_count": phase_boundary_counts.get("sI+sH", 0),
+        "sII_sH_boundary_cage_count": phase_boundary_counts.get("sII+sH", 0),
+        "sI_sII_sH_boundary_cage_count": phase_boundary_counts.get("sI+sII+sH", 0),
+        "isolated_cage_count": len(result.isolated_cage_ids) if result.hydrate_cluster_enabled else 0,
+        "largest_cluster_cage_count": 0 if largest_cluster is None else largest_cluster.cage_count,
+        "largest_cluster_water_count": 0 if largest_cluster is None else largest_cluster.water_count,
+        "cluster_size_distribution": cluster_size_distribution(result.hydrate_clusters),
+        "hydrate_cluster_detail": cluster_details,
+        "hydrate_domain_detail": domain_details,
         "F3_mean": None if f3f4 is None else f3f4.f3_mean,
         "F4_mean": None if f3f4 is None else f3f4.f4_mean,
         "F3_count": None if f3f4 is None else f3f4.f3_valid,
@@ -273,6 +339,493 @@ def graph_connection_counts(result: FrameResult) -> dict[str, Any]:
     return values
 
 
+def hydrate_cluster_info_section(result: FrameResult, row: dict[str, Any]) -> list[str]:
+    """Render vertical cluster, hierarchy, domain, and boundary details."""
+    if not result.hydrate_cluster_enabled:
+        return []
+    summary_rows = [
+        ["hydrate_cluster", "on"],
+        ["cluster_count", row.get("hydrate_cluster_count", 0)],
+        ["domain_count", row.get("hydrate_domain_count", 0)],
+        ["boundary_cage_count", row.get("boundary_cage_count", 0)],
+        ["interphase_boundary_cage_count", row.get("transition_cage_count", 0)],
+        ["isolated_cage_count", row.get("isolated_cage_count", 0)],
+        ["sI_cluster_count", row.get("sI_cluster_count", 0)],
+        ["sII_cluster_count", row.get("sII_cluster_count", 0)],
+        ["sH_cluster_count", row.get("sH_cluster_count", 0)],
+        ["mixed_cluster_count", row.get("mixed_cluster_count", 0)],
+        ["unclassified_cluster_count", row.get("unclassified_cluster_count", 0)],
+        ["largest_cluster_cage_count", row.get("largest_cluster_cage_count", 0)],
+        ["largest_cluster_water_count", row.get("largest_cluster_water_count", 0)],
+        ["cluster_size_distribution", row.get("cluster_size_distribution", "")],
+    ]
+    lines = section_table("Hydrate Cluster", ["item", "value"], summary_rows)
+    lines.extend(hydrate_cluster_hierarchy_section(result))
+    detail_records = hydrate_cluster_detail_records(result, build_guest_lookup(result.guests), guest_resname_order(result))
+    lines.extend(hydrate_cluster_detail_section(detail_records))
+    lines.extend(hydrate_domain_info_section(result, build_guest_lookup(result.guests), guest_resname_order(result)))
+    lines.extend(hydrate_boundary_info_section(result))
+    return lines
+
+
+def hydrate_cluster_detail_section(records: list[dict[str, Any]]) -> list[str]:
+    """Render one vertical table per cluster, including cage composition."""
+    if not records:
+        return section_table("Hydrate Cluster Detail", ["item", "value"], [["cluster_count", 0]])
+    lines = ["", "## Hydrate Cluster Detail", ""]
+    metric_keys = (
+        "hydrate_type",
+        "cage_count",
+        "classified_cage_count",
+        "interphase_boundary_cage_count",
+        "unclassified_cage_count",
+        "ambiguous_cage_count",
+        "boundary_cage_count",
+        "classified_cage_fraction",
+        "domain_count",
+        "water_count",
+        "guest_count",
+        "empty_cage_count",
+        "occupied_cage_count",
+        "guest_composition",
+    )
+    for record in records:
+        cluster_id = str(record["cluster_id"])
+        rows = [[key, record.get(key, "")] for key in metric_keys]
+        type_counts = record.get("cage_type_counts", {})
+        if type_counts:
+            rows.append(["cage composition", ""])
+            ordered_types = present_cage_types(type_counts)
+            for index, cage_type in enumerate(ordered_types):
+                branch = TREE_LAST if index == len(ordered_types) - 1 else TREE_MIDDLE
+                rows.append([f"{branch} {cage_display_label(cage_type)}", type_counts[cage_type]])
+        lines.extend(object_vertical_table(cluster_id, rows))
+    return lines
+
+
+def hydrate_cluster_hierarchy_section(result: FrameResult) -> list[str]:
+    """Render cluster hierarchy as one aligned table per cluster."""
+    cage_by_id = {cage.object_id: cage for cage in result.cages}
+    domains_by_cluster: dict[str, list[Any]] = defaultdict(list)
+    for domain in result.hydrate_domains:
+        domains_by_cluster[domain.cluster_id].append(domain)
+    if not result.hydrate_clusters:
+        return ["", "## Hydrate Cluster Hierarchy", "", "no hydrate cluster"]
+
+    lines = ["", "## Hydrate Cluster Hierarchy", ""]
+    child_indent = "\u00a0\u00a0\u00a0"
+    for cluster_index, cluster in enumerate(result.hydrate_clusters):
+        if cluster_index:
+            lines.append("")
+        cluster_counts = Counter(
+            cage_by_id[cage_id].cage_type
+            for cage_id in cluster.cage_ids
+            if cage_id in cage_by_id
+        )
+        cage_types = present_cage_types(cluster_counts)
+        headers = [
+            "item",
+            "type",
+            "cage_qty",
+            *(cage_display_label(cage_type) for cage_type in cage_types),
+        ]
+        rows: list[list[Any]] = [
+            hierarchy_table_row(
+                cluster.object_id,
+                cluster.hydrate_type,
+                cluster.cage_ids,
+                cage_types,
+                cage_by_id,
+            )
+        ]
+        domains = domains_by_cluster.get(cluster.object_id, [])
+        has_boundary = bool(cluster.boundary_cage_ids)
+        for domain_index, domain in enumerate(domains):
+            is_last = domain_index == len(domains) - 1 and not has_boundary
+            branch = TREE_LAST if is_last else TREE_MIDDLE
+            rows.append(
+                hierarchy_table_row(
+                    f"{branch} {domain.object_id}",
+                    domain.hydrate_type,
+                    domain.cage_ids,
+                    cage_types,
+                    cage_by_id,
+                )
+            )
+        if has_boundary:
+            rows.append(
+                hierarchy_table_row(
+                    f"{TREE_LAST} boundary",
+                    "-",
+                    cluster.boundary_cage_ids,
+                    cage_types,
+                    cage_by_id,
+                )
+            )
+            labelled: dict[str, list[str]] = defaultdict(list)
+            for cage_id, label in cluster.phase_boundary_labels:
+                labelled[label].append(cage_id)
+            boundary_groups = [
+                *((f"{label} boundary", tuple(cage_ids), label) for label, cage_ids in sorted(labelled.items())),
+                ("unclassified", cluster.unclassified_cage_ids, "-"),
+                ("ambiguous", cluster.ambiguous_cage_ids, "-"),
+            ]
+            boundary_groups = [item for item in boundary_groups if item[1]]
+            for group_index, (name, cage_ids, hydrate_type) in enumerate(boundary_groups):
+                branch = TREE_LAST if group_index == len(boundary_groups) - 1 else TREE_MIDDLE
+                rows.append(
+                    hierarchy_table_row(
+                        f"{child_indent}{branch} {name}",
+                        hydrate_type,
+                        cage_ids,
+                        cage_types,
+                        cage_by_id,
+                    )
+                )
+        lines.append(markdown_rows(headers, rows).rstrip())
+    return lines
+
+
+def hierarchy_table_row(
+    item: str,
+    hydrate_type: str,
+    cage_ids: tuple[str, ...],
+    cage_types: list[str],
+    cage_by_id: dict[str, Any],
+) -> list[Any]:
+    """Return one hierarchy row; absent cage types are rendered as dashes."""
+    counts = Counter(
+        cage_by_id[cage_id].cage_type
+        for cage_id in cage_ids
+        if cage_id in cage_by_id
+    )
+    return [
+        item,
+        hydrate_type,
+        len(cage_ids),
+        *(counts[cage_type] if counts[cage_type] else "-" for cage_type in cage_types),
+    ]
+
+
+def hierarchy_label(
+    object_id: str,
+    hydrate_type: str,
+    cage_ids: tuple[str, ...],
+    cage_by_id: dict[str, Any],
+) -> str:
+    """Return one readable tree label with nonzero cage-type counts."""
+    counts = Counter(cage_by_id[cage_id].cage_type for cage_id in cage_ids if cage_id in cage_by_id)
+    parts = [hydrate_type] if hydrate_type else []
+    parts.append(f"cages={len(cage_ids)}")
+    parts.extend(f"{cage_display_label(cage_type)}={counts[cage_type]}" for cage_type in present_cage_types(counts))
+    return f"{object_id} [{', '.join(parts)}]"
+
+
+def domain_hierarchy_label(domain: Any, cage_by_id: dict[str, Any]) -> str:
+    """Return a domain label with internal seed and expansion counts."""
+    seed_ids = set(domain.seed_cage_ids)
+    counts = Counter(cage_by_id[cage_id].cage_type for cage_id in domain.cage_ids if cage_id in cage_by_id)
+    parts = [
+        domain.hydrate_type,
+        domain.status,
+        f"cages={domain.cage_count}",
+        f"seeds={domain.seed_count}",
+        f"seed_cages={len(seed_ids)}",
+        f"expanded={domain.cage_count - len(seed_ids)}",
+    ]
+    parts.extend(f"{cage_display_label(cage_type)}={counts[cage_type]}" for cage_type in present_cage_types(counts))
+    return f"{domain.object_id} [{', '.join(parts)}]"
+
+
+def motif_hierarchy_label(motif: Any, cage_by_id: dict[str, Any]) -> str:
+    """Return a compact label for one overlapping local topology motif."""
+    counts = Counter(cage_by_id[cage_id].cage_type for cage_id in motif.cage_ids if cage_id in cage_by_id)
+    core_count = len(motif.anchor_cage_ids)
+    parts = [
+        motif.hydrate_type,
+        motif.status,
+        f"cages={motif.cage_count}",
+        f"completeness={motif.completeness:.2f}",
+        f"core={core_count}",
+        f"support={motif.cage_count - core_count}",
+    ]
+    parts.extend(f"{cage_display_label(cage_type)}={counts[cage_type]}" for cage_type in present_cage_types(counts))
+    return f"{motif.object_id} [{', '.join(parts)}]"
+
+
+def object_vertical_table(object_id: str, rows: list[list[Any]]) -> list[str]:
+    """Render one level-three object heading followed by a narrow table."""
+    return [f"### {object_id}", "", markdown_rows(["item", object_id], rows).rstrip(), ""]
+
+
+def hydrate_domain_info_section(
+    result: FrameResult,
+    guests_by_id: dict[str, Any],
+    guest_order: list[str],
+) -> list[str]:
+    """Render one vertical detail table per hydrate domain."""
+    records = hydrate_domain_records(result, guests_by_id, guest_order)
+    if not records:
+        return section_table("Hydrate Domain", ["item", "value"], [["domain_count", 0]])
+    lines = ["", "## Hydrate Domain", ""]
+    keys = (
+        "cluster_id",
+        "hydrate_type",
+        "status",
+        "cage_count",
+        "seed_count",
+        "seed_cage_count",
+        "expanded_cage_count",
+        "classified_fraction",
+        "water_count",
+        "guest_count",
+        "boundary_contact_count",
+        "cage_composition",
+        "guest_composition",
+    )
+    for record in records:
+        rows = [[key, record.get(key, "")] for key in keys]
+        lines.extend(object_vertical_table(str(record["domain_id"]), rows))
+    return lines
+
+
+def hydrate_motif_info_section(result: FrameResult) -> list[str]:
+    """Render one vertical evidence table per hydrate motif."""
+    records = hydrate_motif_records(result)
+    if not records:
+        return section_table("Hydrate Motif", ["item", "value"], [["motif_count", 0]])
+    lines = ["", "## Hydrate Motif", ""]
+    keys = (
+        "cluster_id",
+        "domain_id",
+        "hydrate_type",
+        "status",
+        "completeness",
+        "consistency",
+        "confidence",
+        "cage_count",
+        "core_cage_count",
+        "support_cage_count",
+        "cage_composition",
+        "core_cage_composition",
+        "internal_shared_face_count",
+        "classification_method",
+    )
+    for record in records:
+        rows = [[key, record.get(key, "")] for key in keys]
+        lines.extend(object_vertical_table(str(record["motif_id"]), rows))
+    return lines
+
+
+def hydrate_boundary_info_section(result: FrameResult) -> list[str]:
+    """Render phase-labelled, unclassified, and ambiguous boundaries."""
+    clusters = [cluster for cluster in result.hydrate_clusters if cluster.boundary_cage_ids]
+    if not clusters:
+        return section_table("Hydrate Boundary", ["item", "value"], [["boundary_cage_count", 0]])
+    lines = ["", "## Hydrate Boundary", ""]
+    cage_by_id = {cage.object_id: cage for cage in result.cages}
+    for cluster in clusters:
+        unclassified_counts = Counter(
+            cage_by_id[cage_id].cage_type for cage_id in cluster.unclassified_cage_ids if cage_id in cage_by_id
+        )
+        ambiguous_counts = Counter(
+            cage_by_id[cage_id].cage_type for cage_id in cluster.ambiguous_cage_ids if cage_id in cage_by_id
+        )
+        labelled_ids: dict[str, list[str]] = defaultdict(list)
+        for cage_id, label in cluster.phase_boundary_labels:
+            labelled_ids[label].append(cage_id)
+        rows = [
+            ["boundary_cage_count", len(cluster.boundary_cage_ids)],
+            ["interphase_boundary_cage_count", len(cluster.transition_cage_ids)],
+            ["unclassified_cage_count", len(cluster.unclassified_cage_ids)],
+            ["unclassified_composition", format_cage_type_counts(unclassified_counts)],
+            ["ambiguous_cage_count", len(cluster.ambiguous_cage_ids)],
+            ["ambiguous_composition", format_cage_type_counts(ambiguous_counts)],
+        ]
+        for label, cage_ids in sorted(labelled_ids.items()):
+            counts = Counter(
+                cage_by_id[cage_id].cage_type
+                for cage_id in cage_ids
+                if cage_id in cage_by_id
+            )
+            rows.append([f"{label}_boundary_cage_count", len(cage_ids)])
+            rows.append([f"{label}_boundary_composition", format_cage_type_counts(counts)])
+        lines.extend(object_vertical_table(cluster.object_id, rows))
+    return lines
+
+
+def format_cage_type_counts(counts: Counter) -> str:
+    """Format nonzero cage-type counts for compact info tables."""
+    return ";".join(
+        f"{cage_display_label(cage_type)}:{counts[cage_type]}"
+        for cage_type in present_cage_types(counts)
+    )
+
+
+def append_tree_value_rows(rows: list[list[Any]], label: str, item_label: str, values: list[str]) -> None:
+    """Append a vertical, consistently branched list to a two-column table."""
+    rows.append([label, ""])
+    for index, value in enumerate(values):
+        branch = TREE_LAST if index == len(values) - 1 else TREE_MIDDLE
+        rows.append([f"{branch} {item_label}", value])
+
+
+def split_record_ids(value: Any) -> list[str]:
+    """Split a semicolon-delimited workbook field for vertical info output."""
+    return [item for item in str(value).split(";") if item]
+
+
+def hydrate_cluster_detail_records(
+    result: FrameResult,
+    guests_by_id: dict[str, Any],
+    guest_order: list[str],
+) -> list[dict[str, Any]]:
+    """Return one plotting-friendly detail record per hydrate cluster."""
+    if not result.hydrate_cluster_enabled:
+        return []
+    cage_by_id = {cage.object_id: cage for cage in result.cages}
+    records: list[dict[str, Any]] = []
+    for cluster in result.hydrate_clusters:
+        cluster_cages = [cage_by_id[cage_id] for cage_id in cluster.cage_ids if cage_id in cage_by_id]
+        type_counts = Counter(cage.cage_type for cage in cluster_cages)
+        ordered_types = present_cage_types(type_counts)
+        classified_fraction = 0.0 if not cluster.cage_count else len(cluster.classified_cage_ids) / cluster.cage_count
+        records.append(
+            {
+                "cluster_id": cluster.object_id,
+                "hydrate_type": cluster.hydrate_type,
+                "cage_count": cluster.cage_count,
+                "water_count": cluster.water_count,
+                "guest_count": cluster.guest_count,
+                "empty_cage_count": sum(1 for cage in cluster_cages if not cage.occupied),
+                "occupied_cage_count": sum(1 for cage in cluster_cages if cage.occupied),
+                "classified_cage_count": len(cluster.classified_cage_ids),
+                "interphase_boundary_cage_count": len(cluster.transition_cage_ids),
+                "unclassified_cage_count": len(cluster.unclassified_cage_ids),
+                "ambiguous_cage_count": len(cluster.ambiguous_cage_ids),
+                "boundary_cage_count": len(cluster.boundary_cage_ids),
+                "classified_cage_fraction": classified_fraction,
+                "domain_count": cluster.domain_count,
+                "phase_boundary_counts": dict(Counter(label for _, label in cluster.phase_boundary_labels)),
+                "cage_type_counts": {cage_type: type_counts[cage_type] for cage_type in ordered_types},
+                "cage_composition": ";".join(f"{cage_display_label(cage_type)}:{type_counts[cage_type]}" for cage_type in ordered_types),
+                "guest_composition": cluster_guest_composition(cluster.guest_ids, guests_by_id, guest_order),
+                "domain_ids": ";".join(cluster.domain_ids),
+                "cage_ids": ";".join(cluster.cage_ids),
+                "boundary_cage_ids": ";".join(cluster.boundary_cage_ids),
+                "interphase_boundary_cage_ids": ";".join(cluster.transition_cage_ids),
+                "phase_boundary_labels": ";".join(
+                    f"{cage_id}:{label}" for cage_id, label in cluster.phase_boundary_labels
+                ),
+                "shared_face_count": len(cluster.shared_faces),
+            }
+        )
+    return records
+
+
+def hydrate_domain_records(
+    result: FrameResult,
+    guests_by_id: dict[str, Any],
+    guest_order: list[str],
+) -> list[dict[str, Any]]:
+    """Return one plotting-friendly record per hydrate domain."""
+    if not result.hydrate_cluster_enabled:
+        return []
+    cage_by_id = {cage.object_id: cage for cage in result.cages}
+    records: list[dict[str, Any]] = []
+    for domain in result.hydrate_domains:
+        domain_cages = [cage_by_id[cage_id] for cage_id in domain.cage_ids if cage_id in cage_by_id]
+        type_counts = Counter(cage.cage_type for cage in domain_cages)
+        ordered_types = present_cage_types(type_counts)
+        seed_cage_ids = set(domain.seed_cage_ids)
+        records.append(
+            {
+                "domain_id": domain.object_id,
+                "cluster_id": domain.cluster_id,
+                "hydrate_type": domain.hydrate_type,
+                "status": domain.status,
+                "cage_count": domain.cage_count,
+                "seed_count": domain.seed_count,
+                "seed_cage_count": len(seed_cage_ids),
+                "expanded_cage_count": domain.cage_count - len(seed_cage_ids),
+                "classified_fraction": domain.classified_fraction,
+                "water_count": domain.water_count,
+                "guest_count": domain.guest_count,
+                "boundary_contact_count": len(domain.boundary_cage_ids),
+                "cage_composition": ";".join(f"{cage_display_label(cage_type)}:{type_counts[cage_type]}" for cage_type in ordered_types),
+                "guest_composition": cluster_guest_composition(domain.guest_ids, guests_by_id, guest_order),
+                "cage_ids": ";".join(domain.cage_ids),
+                "seed_cage_ids": ";".join(domain.seed_cage_ids),
+                "boundary_cage_ids": ";".join(domain.boundary_cage_ids),
+            }
+        )
+    return records
+
+
+def hydrate_motif_records(result: FrameResult) -> list[dict[str, Any]]:
+    """Return one record per overlapping local topology motif."""
+    if not result.hydrate_cluster_enabled:
+        return []
+    cage_by_id = {cage.object_id: cage for cage in result.cages}
+    records: list[dict[str, Any]] = []
+    for motif in result.hydrate_motifs:
+        member_cages = [cage_by_id[cage_id] for cage_id in motif.cage_ids if cage_id in cage_by_id]
+        type_counts = Counter(cage.cage_type for cage in member_cages)
+        ordered_types = present_cage_types(type_counts)
+        core_cages = [cage_by_id[cage_id] for cage_id in motif.anchor_cage_ids if cage_id in cage_by_id]
+        core_type_counts = Counter(cage.cage_type for cage in core_cages)
+        ordered_core_types = present_cage_types(core_type_counts)
+        anchor_types = [cage_display_label(cage_by_id[cage_id].cage_type) for cage_id in motif.anchor_cage_ids if cage_id in cage_by_id]
+        records.append(
+            {
+                "motif_id": motif.object_id,
+                "cluster_id": motif.cluster_id,
+                "domain_id": motif.domain_id,
+                "hydrate_type": motif.hydrate_type,
+                "status": motif.status,
+                "completeness": motif.completeness,
+                "consistency": motif.consistency,
+                "confidence": motif.confidence,
+                "anchor_cage_types": ";".join(anchor_types),
+                "anchor_cage_ids": ";".join(motif.anchor_cage_ids),
+                "member_cage_count": motif.cage_count,
+                "cage_count": motif.cage_count,
+                "support_cage_count": motif.cage_count - len(motif.anchor_cage_ids),
+                "cage_composition": ";".join(f"{cage_display_label(cage_type)}:{type_counts[cage_type]}" for cage_type in ordered_types),
+                "core_cage_count": len(motif.anchor_cage_ids),
+                "core_cage_composition": ";".join(f"{cage_display_label(cage_type)}:{core_type_counts[cage_type]}" for cage_type in ordered_core_types),
+                "core_cage_ids": ";".join(motif.anchor_cage_ids),
+                "motif_cage_ids": ";".join(motif.cage_ids),
+                "member_cage_ids": ";".join(motif.cage_ids),
+                "shared_face_count": len(motif.shared_face_ids),
+                "internal_shared_face_count": len(motif.shared_face_ids),
+                "shared_face_ids": ";".join(motif.shared_face_ids),
+                "internal_shared_face_ids": ";".join(motif.shared_face_ids),
+                "classification_method": motif.classification_method,
+            }
+        )
+    return records
+
+
+def cluster_guest_composition(guest_ids: tuple[str, ...], guests_by_id: dict[str, Any], guest_order: list[str]) -> str:
+    """Summarize all guest residue names inside one hydrate cluster."""
+    names = [guests_by_id[item].resname for item in guest_ids if item in guests_by_id]
+    if not names:
+        return ""
+    counts = Counter(names)
+    order_index = {name: index for index, name in enumerate(guest_order)}
+    ordered_names = sorted(counts, key=lambda name: (order_index.get(name, 10_000), name))
+    return "+".join(name if counts[name] == 1 else f"{name}x{counts[name]}" for name in ordered_names)
+
+
+def cluster_size_distribution(clusters) -> str:
+    """Summarize cluster sizes as cage_count:number_of_clusters."""
+    if not clusters:
+        return ""
+    counts = Counter(cluster.cage_count for cluster in clusters)
+    return ";".join(f"{size}:{counts[size]}" for size in sorted(counts))
+
+
 def patch_counts(patches) -> dict[str, int]:
     """Count open cage patches by patch_type."""
     counts: dict[str, int] = {}
@@ -336,6 +889,7 @@ def write_frame_info(result: FrameResult, frame_dir: Path, ring_sizes: list[int]
     lines.extend(cage_info_section(result, cage_types))
     lines.extend(cage_isomer_description_section(result, cage_types))
     lines.extend(cage_occupancy_section(result, cage_types))
+    lines.extend(hydrate_cluster_info_section(result, row))
 
     order_headers = ["metric", "count", "mean"]
     order_rows = [
@@ -376,19 +930,37 @@ def section_table(title: str, headers: list[str], rows: list[list[Any]]) -> list
 
 
 def markdown_rows(headers: list[str], rows: list[list[Any]]) -> str:
-    """Render rows as a compact markdown table."""
+    """Render a source-aligned Markdown table using Unicode display widths."""
     text_rows = [[format_summary_cell(value) for value in row] for row in rows]
-    widths = [len(str(header)) for header in headers]
+    header_text = [str(header) for header in headers]
+    widths = [max(3, display_width(header)) for header in header_text]
     for row in text_rows:
         for idx, value in enumerate(row):
-            widths[idx] = max(widths[idx], len(value))
+            widths[idx] = max(widths[idx], display_width(value))
     lines = [
-        "| " + " | ".join(str(header).ljust(widths[idx]) for idx, header in enumerate(headers)) + " |",
+        "| " + " | ".join(pad_display(header, widths[idx]) for idx, header in enumerate(header_text)) + " |",
         "| " + " | ".join("-" * widths[idx] for idx in range(len(headers))) + " |",
     ]
     for row in text_rows:
-        lines.append("| " + " | ".join(value.ljust(widths[idx]) for idx, value in enumerate(row)) + " |")
+        padded = [*row, *([""] * (len(headers) - len(row)))]
+        lines.append("| " + " | ".join(pad_display(padded[idx], widths[idx]) for idx in range(len(headers))) + " |")
     return "\n".join(lines) + "\n"
+
+
+def display_width(value: Any) -> int:
+    """Return a practical monospace width for Markdown source alignment."""
+    width = 0
+    for char in str(value):
+        if unicodedata.combining(char):
+            continue
+        width += 2 if unicodedata.east_asian_width(char) in {"F", "W"} else 1
+    return width
+
+
+def pad_display(value: Any, width: int) -> str:
+    """Right-pad text to a requested Unicode display width."""
+    text = str(value)
+    return text + " " * max(0, width - display_width(text))
 
 
 def molecule_count_rows(result: FrameResult) -> list[list[Any]]:
@@ -527,6 +1099,12 @@ def ordered_cage_types(types) -> list[str]:
     return ordered + extras
 
 
+def present_cage_types(types) -> list[str]:
+    """Return canonical cage ordering restricted to values that are present."""
+    values = set(types.keys() if isinstance(types, dict) else types)
+    return [cage_type for cage_type in ordered_cage_types(values) if cage_type in values]
+
+
 def cage_sort_key(cage_type: str) -> tuple[int, tuple[tuple[int, int], ...], str]:
     """Sort other cages by face count and then by label."""
     counts = parse_cage_face_label(cage_type)
@@ -576,12 +1154,13 @@ def cage_occupancy_section(result: FrameResult, cage_types: list[str]) -> list[s
         key=lambda label: guest_composition_sort_key(label, guest_order),
     )
     child_labels = [*guest_labels, *extra_guest_labels]
+    child_markers = [TREE_LAST if index == len(child_labels) - 1 else TREE_MIDDLE for index in range(len(child_labels))]
     headers = [
         "cage type",
         "total",
         "empty",
         "occupied",
-        *[f"{COLUMN_CHILD} {label}" for label in child_labels],
+        *[f"{marker} {label}" for marker, label in zip(child_markers, child_labels)],
     ]
     table_rows: list[list[Any]] = []
     for cage_type in cage_types:
@@ -594,7 +1173,7 @@ def cage_occupancy_section(result: FrameResult, cage_types: list[str]) -> list[s
                 empty + occupied,
                 empty,
                 occupied,
-                *[f"{COLUMN_CHILD} {cage_counts.get(label, 0)}" for label in child_labels],
+                *[f"{marker} {cage_counts.get(label, 0)}" for marker, label in zip(child_markers, child_labels)],
             ]
         )
 
@@ -607,8 +1186,8 @@ def cage_occupancy_section(result: FrameResult, cage_types: list[str]) -> list[s
             total_empty,
             total_occupied,
             *[
-                f"{COLUMN_CHILD} {sum(counts.get(cage_type, {}).get(label, 0) for cage_type in cage_types)}"
-                for label in child_labels
+                f"{marker} {sum(counts.get(cage_type, {}).get(label, 0) for cage_type in cage_types)}"
+                for marker, label in zip(child_markers, child_labels)
             ],
         ]
     )
@@ -911,9 +1490,12 @@ def summary_dashboard_table(data: pd.DataFrame, run_info: dict[str, Any], config
         ["Search sizes", excel_scalar(config.get("ring", {}).get("sizes", ""))],
         ["Ring report sizes", excel_scalar(configured_ring_report_sizes(config))],
         ["Quasi-cage sizes", f"{excel_scalar(config.get('quasi_cage', {}).get('base_sizes', 'auto'))} / {excel_scalar(config.get('quasi_cage', {}).get('side_sizes', 'auto'))}"],
-        ["Quasi max layers", config.get("quasi_cage", {}).get("max_layers", "")],
+        ["Quasi max layer", config.get("quasi_cage", {}).get("max_layers", "")],
         ["Cage report types", dashboard_cage_targets(config)],
-        ["Maximum cage faces", config.get("cage", {}).get("max_faces", 20)],
+        ["Maximum cage face", config.get("cage", {}).get("max_faces", 20)],
+        ["Hydrate cluster", "on" if config.get("hydrate_cluster", {}).get("enabled", False) else "off"],
+        ["Cluster min cage", config.get("hydrate_cluster", {}).get("min_cage", 2)],
+        ["Cluster detail", "on" if config.get("hydrate_cluster", {}).get("detail", False) else "off"],
         ["Q_l degree", excel_scalar(config.get("order", {}).get("q_degree", [6, 12]))],
         ["Q_l neighbor mode", config.get("order", {}).get("q_neighbor_mode", "graph")],
         ["Q_l cutoff (nm)", config.get("order", {}).get("q_cutoff_nm", 0.35)],
@@ -936,6 +1518,8 @@ def summary_dashboard_table(data: pd.DataFrame, run_info: dict[str, Any], config
         ["Cage total", sum_numeric_column(data, "cage_total")],
         ["Empty cage", sum_numeric_column(data, "cage_empty")],
         ["Occupied cage", sum_numeric_column(data, "cage_occupied")],
+        ["Hydrate cluster", sum_numeric_column(data, "hydrate_cluster_count")],
+        ["Isolated cage", sum_numeric_column(data, "isolated_cage_count")],
         ["Ice-like waters", sum_numeric_column(data, "ice_like_waters")],
     ])
     return pd.DataFrame(rows)
@@ -1079,9 +1663,19 @@ def format_table_sheet(worksheet) -> None:
         letter = get_column_letter(column_index)
         width = estimated_column_width(worksheet, column_index)
         worksheet.column_dimensions[letter].width = width
+    no_wrap_columns = {
+        column_index
+        for column_index, cell in enumerate(worksheet[1], start=1)
+        if str(cell.value or "").endswith("_ids")
+    }
     for row in worksheet.iter_rows(min_row=2):
+        worksheet.row_dimensions[row[0].row].height = 18
         for cell in row:
-            cell.alignment = Alignment(horizontal="left", vertical="top", wrap_text=True)
+            cell.alignment = Alignment(
+                horizontal="left",
+                vertical="center",
+                wrap_text=cell.column not in no_wrap_columns,
+            )
 
 
 def estimated_column_width(worksheet, column_index: int) -> int:
@@ -1168,10 +1762,20 @@ def summary_sheet_tables(data: pd.DataFrame, config: dict[str, Any]) -> dict[str
         "cage": cage_summary_table(data),
         "cage_occupancy": cage_occupancy_summary_table(data, markdown_style=False),
         "cage_isomer": cage_isomer_summary_table(data, include_zero_rows=True),
+        "hydrate_cluster": hydrate_cluster_summary_table(data),
+        "hydrate_domain": hydrate_domain_table(data),
         "order_parameter": order_parameter_summary_table(data),
         "ice": summary_simple_table(data, ["frame", "time_ps", "ice_like_waters", "ice_i_waters", "interfacial_ice_waters"]),
     }
-    return {name: table for name, table in tables.items() if not table.empty}
+    detail_enabled = bool(config.get("hydrate_cluster", {}).get("detail", False))
+    if detail_enabled:
+        tables["hydrate_cluster_detail"] = hydrate_cluster_detail_table(data)
+    keep_empty: set[str] = set()
+    if hydrate_cluster_is_enabled(data):
+        keep_empty.add("hydrate_domain")
+        if detail_enabled:
+            keep_empty.add("hydrate_cluster_detail")
+    return {name: table for name, table in tables.items() if not table.empty or name in keep_empty}
 
 
 def frame_summary_table(data: pd.DataFrame, ring_sizes: list[int]) -> pd.DataFrame:
@@ -1194,6 +1798,18 @@ def frame_summary_table(data: pd.DataFrame, ring_sizes: list[int]) -> pd.DataFra
         "cage_total",
         "cage_empty",
         "cage_occupied",
+    ])
+    if hydrate_cluster_is_enabled(data):
+        columns.extend([
+            "hydrate_cluster_count",
+            "hydrate_domain_count",
+            "boundary_cage_count",
+            "transition_cage_count",
+            "isolated_cage_count",
+            "largest_cluster_cage_count",
+            "largest_cluster_water_count",
+        ])
+    columns.extend([
         "F3_mean",
         "F3_count",
         "F4_mean",
@@ -1207,6 +1823,105 @@ def frame_summary_table(data: pd.DataFrame, ring_sizes: list[int]) -> pd.DataFra
         "interfacial_ice_waters",
     ])
     return summary_simple_table(data, columns)
+
+
+def hydrate_cluster_summary_table(data: pd.DataFrame) -> pd.DataFrame:
+    """Build the per-frame hydrate_cluster summary sheet."""
+    if not hydrate_cluster_is_enabled(data):
+        return pd.DataFrame()
+    columns = [
+        "frame",
+        "time_ps",
+        "hydrate_cluster_count",
+        "sI_cluster_count",
+        "sII_cluster_count",
+        "sH_cluster_count",
+        "mixed_cluster_count",
+        "unclassified_cluster_count",
+        "hydrate_domain_count",
+        "sI_domain_count",
+        "sII_domain_count",
+        "sH_domain_count",
+        "boundary_cage_count",
+        "transition_cage_count",
+        "sI_boundary_cage_count",
+        "sII_boundary_cage_count",
+        "sH_boundary_cage_count",
+        "sI_sII_boundary_cage_count",
+        "sI_sH_boundary_cage_count",
+        "sII_sH_boundary_cage_count",
+        "sI_sII_sH_boundary_cage_count",
+        "isolated_cage_count",
+        "largest_cluster_cage_count",
+        "largest_cluster_water_count",
+        "cluster_size_distribution",
+    ]
+    return summary_simple_table(data, columns)
+
+
+def hydrate_cluster_is_enabled(data: pd.DataFrame) -> bool:
+    """Return whether any frame requested hydrate_cluster reporting."""
+    if "hydrate_cluster_enabled" not in data.columns:
+        return False
+    return bool(data["hydrate_cluster_enabled"].astype(str).str.lower().eq("on").any())
+
+
+def hydrate_cluster_detail_table(data: pd.DataFrame) -> pd.DataFrame:
+    """Expand stored per-frame cluster details into one row per cluster."""
+    return expanded_hydrate_table(data, "hydrate_cluster_detail")
+
+
+def hydrate_domain_table(data: pd.DataFrame) -> pd.DataFrame:
+    """Expand stored per-frame domain details into one row per domain."""
+    return expanded_hydrate_table(data, "hydrate_domain_detail")
+
+
+def hydrate_motif_table(data: pd.DataFrame) -> pd.DataFrame:
+    """Expand stored per-frame motif evidence into one row per motif."""
+    return expanded_hydrate_table(data, "hydrate_motif_detail")
+
+
+def expanded_hydrate_table(data: pd.DataFrame, column: str) -> pd.DataFrame:
+    """Expand one stored list of hydrate records into a flat workbook table."""
+    schemas = {
+        "hydrate_cluster_detail": [
+            "cluster_id", "hydrate_type", "cage_count", "water_count", "guest_count",
+            "empty_cage_count", "occupied_cage_count", "classified_cage_count",
+            "interphase_boundary_cage_count", "unclassified_cage_count", "ambiguous_cage_count", "boundary_cage_count",
+            "classified_cage_fraction", "domain_count", "phase_boundary_counts", "cage_type_counts",
+            "cage_composition", "guest_composition", "domain_ids", "cage_ids",
+            "boundary_cage_ids", "interphase_boundary_cage_ids", "phase_boundary_labels", "shared_face_count",
+        ],
+        "hydrate_domain_detail": [
+            "domain_id", "cluster_id", "hydrate_type", "status", "cage_count", "seed_count",
+            "seed_cage_count", "expanded_cage_count", "classified_fraction", "water_count", "guest_count",
+            "boundary_contact_count", "cage_composition", "guest_composition", "cage_ids",
+            "seed_cage_ids", "boundary_cage_ids",
+        ],
+        "hydrate_motif_detail": [
+            "motif_id", "cluster_id", "domain_id", "hydrate_type", "status",
+            "completeness", "consistency", "confidence", "cage_count",
+            "core_cage_count", "support_cage_count", "cage_composition",
+            "core_cage_composition", "core_cage_ids", "motif_cage_ids", "internal_shared_face_count",
+            "internal_shared_face_ids", "classification_method",
+        ],
+    }
+    columns = ["frame", "time_ps", *schemas.get(column, [])]
+    if column not in data.columns:
+        return pd.DataFrame(columns=columns)
+    rows: list[dict[str, Any]] = []
+    for _, record in data.iterrows():
+        details = record.get(column, [])
+        if not isinstance(details, list):
+            continue
+        for item in details:
+            row = {
+                "frame": record.get("frame", ""),
+                "time_ps": record.get("time_ps", ""),
+            }
+            row.update(item)
+            rows.append(row)
+    return pd.DataFrame(rows).reindex(columns=columns)
 
 
 def connection_sheet_name(data: pd.DataFrame) -> str:
@@ -1539,6 +2254,8 @@ def markdown_table(data: pd.DataFrame) -> str:
 
 def format_summary_cell(value: Any) -> str:
     """Format markdown cells while keeping count columns readable."""
+    if isinstance(value, (list, tuple, dict)):
+        return repr(value)
     if pd.isna(value):
         return ""
     if isinstance(value, float) and value.is_integer():

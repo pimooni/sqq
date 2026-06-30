@@ -40,6 +40,7 @@ from .core.cage import (
 )
 from .core.f3f4 import compute_order_parameters, normalize_q_degree
 from .core.graph import build_water_graph
+from .core.hydrate_cluster import analyze_hydrate_clusters
 from .core.ice import classify_ice_waters
 from .core.quasi_cage import find_cage_patches
 from .core.ring import find_rings
@@ -171,7 +172,10 @@ def build_run_info(
         "quasi_cage_base_sizes": config["quasi_cage"].get("base_sizes", "auto"),
         "quasi_cage_side_sizes": config["quasi_cage"].get("side_sizes", "auto"),
         "cage_report_types": config["cage"].get("report_types", []),
-        "max_cage_faces": config["cage"].get("max_faces", 20),
+        "max_cage_face": config["cage"].get("max_faces", 20),
+        "hydrate_cluster": on_off_text(config.get("hydrate_cluster", {}).get("enabled", False)),
+        "cluster_min_cage": config.get("hydrate_cluster", {}).get("min_cage", 2),
+        "cluster_detail": on_off_text(config.get("hydrate_cluster", {}).get("detail", False)),
         "q_enabled": config["order"].get("q_enabled", True),
         "q_degree": config["order"].get("q_degree", [6, 12]),
         "q_neighbor_mode": config["order"].get("q_neighbor_mode", "graph"),
@@ -217,9 +221,12 @@ def print_run_header(
     print_terminal_field("search_sizes", config["ring"]["sizes"])
     print_terminal_field("ring_report_sizes", config["ring"]["report_sizes"])
     print_terminal_field("quasi_cage_sizes", f"{config['quasi_cage'].get('base_sizes', 'auto')} / {config['quasi_cage'].get('side_sizes', 'auto')}")
-    print_terminal_field("quasi_max_layers", config["quasi_cage"].get("max_layers", ""))
+    print_terminal_field("quasi_max_layer", config["quasi_cage"].get("max_layers", ""))
     print_terminal_field("cage_report_types", dashboard_cage_targets(config))
-    print_terminal_field("max_cage_faces", config["cage"].get("max_faces", 20))
+    print_terminal_field("max_cage_face", config["cage"].get("max_faces", 20))
+    print_terminal_field("hydrate_cluster", on_off_text(config.get("hydrate_cluster", {}).get("enabled", False)))
+    print_terminal_field("cluster_min_cage", config.get("hydrate_cluster", {}).get("min_cage", 2))
+    print_terminal_field("cluster_detail", on_off_text(config.get("hydrate_cluster", {}).get("detail", False)))
     print_terminal_field("Q_l", q_config_text(config))
     print_terminal_field("output_layout", config["output"].get("structure_layout", "grouped"))
     print_terminal_field("worker_policy", worker_policy_text(config))
@@ -251,6 +258,11 @@ def q_config_text(config: dict[str, Any]) -> str:
     n_text = "NULL" if n_neighbors in (None, "", "null", "NULL") else str(n_neighbors)
     degree = ",".join(str(item) for item in normalize_q_degree(order.get("q_degree", [6, 12])))
     return f"degree={degree}; mode={order.get('q_neighbor_mode', 'graph')}; cutoff={order.get('q_cutoff_nm', 0.35)} nm; n={n_text}"
+
+
+def on_off_text(value: Any) -> str:
+    """Render on/off settings using the CLI vocabulary."""
+    return "on" if parse_on_off(value, "on/off setting") else "off"
 
 
 def format_terminal_value(value: Any) -> str:
@@ -466,6 +478,7 @@ PARALLEL_STAGE_GROUPS = (
         ("searching rings", "ring"),
         ("searching half/quasi cage", "half/quasi"),
         ("searching cage", "cage"),
+        ("classifying hydrate cluster", "cluster"),
     ),
     (
         ("filtering free patches", "filtering"),
@@ -869,17 +882,17 @@ def apply_cli_overrides(config: dict[str, Any], args: Namespace) -> None:
         config["quasi_cage"]["side_sizes"] = args.size
     if getattr(args, "ring_size", None):
         config["ring"]["report_sizes"] = args.ring_size
-    if getattr(args, "quasi_sizes", None):
-        config["quasi_cage"]["base_sizes"] = args.quasi_sizes
-        config["quasi_cage"]["side_sizes"] = args.quasi_sizes
-    if getattr(args, "quasi_base_sizes", None):
-        config["quasi_cage"]["base_sizes"] = args.quasi_base_sizes
-    if getattr(args, "quasi_side_sizes", None):
-        config["quasi_cage"]["side_sizes"] = args.quasi_side_sizes
-    if getattr(args, "quasi_max_layers", None) is not None:
-        if args.quasi_max_layers < 1:
-            raise ValueError("--quasi-max-layers must be at least 1.")
-        config["quasi_cage"]["max_layers"] = args.quasi_max_layers
+    if getattr(args, "quasi_size", None):
+        config["quasi_cage"]["base_sizes"] = args.quasi_size
+        config["quasi_cage"]["side_sizes"] = args.quasi_size
+    if getattr(args, "quasi_base_size", None):
+        config["quasi_cage"]["base_sizes"] = args.quasi_base_size
+    if getattr(args, "quasi_side_size", None):
+        config["quasi_cage"]["side_sizes"] = args.quasi_side_size
+    if getattr(args, "quasi_max_layer", None) is not None:
+        if args.quasi_max_layer < 1:
+            raise ValueError("--quasi-max-layer must be at least 1.")
+        config["quasi_cage"]["max_layers"] = args.quasi_max_layer
     if getattr(args, "no_q", False):
         config["order"]["q_enabled"] = False
     if getattr(args, "q_degree", None):
@@ -901,10 +914,18 @@ def apply_cli_overrides(config: dict[str, Any], args: Namespace) -> None:
             config["order"]["q_n_neighbor"] = count
     if getattr(args, "cage_size", None):
         config["cage"]["report_types"] = args.cage_size
-    if getattr(args, "max_cage_faces", None) is not None:
-        if args.max_cage_faces < 1:
-            raise ValueError("--max-cage-faces must be at least 1.")
-        config["cage"]["max_faces"] = args.max_cage_faces
+    if getattr(args, "max_cage_face", None) is not None:
+        if args.max_cage_face < 1:
+            raise ValueError("--max-cage-face must be at least 1.")
+        config["cage"]["max_faces"] = args.max_cage_face
+    if getattr(args, "hydrate_cluster", None):
+        config["hydrate_cluster"]["enabled"] = parse_on_off(args.hydrate_cluster, "--hydrate-cluster")
+    if getattr(args, "cluster_min_cage", None) is not None:
+        if args.cluster_min_cage < 1:
+            raise ValueError("--cluster-min-cage must be at least 1.")
+        config["hydrate_cluster"]["min_cage"] = args.cluster_min_cage
+    if getattr(args, "cluster_detail", None):
+        config["hydrate_cluster"]["detail"] = parse_on_off(args.cluster_detail, "--cluster-detail")
     bond_mode = getattr(args, "bond_mode", None)
     if args.pairs:
         if bond_mode not in (None, "pairs"):
@@ -957,7 +978,7 @@ def normalize_analysis_scopes(config: dict[str, Any]) -> None:
 
     max_faces = int(config["cage"].get("max_faces", 20))
     if max_faces < 1:
-        raise ValueError("cage.max_faces / --max-cage-faces must be at least 1.")
+        raise ValueError("cage.max_faces / --max-cage-face must be at least 1.")
     report_types = resolve_cage_report_types(
         config["cage"].get("report_types", []),
         search_sizes,
@@ -967,7 +988,26 @@ def normalize_analysis_scopes(config: dict[str, Any]) -> None:
     config["ring"]["report_sizes"] = ring_report_sizes
     config["cage"]["report_types"] = "all" if report_types is None else list(report_types)
     config["cage"]["max_faces"] = max_faces
+    hydrate_cluster = config.setdefault("hydrate_cluster", {})
+    hydrate_cluster["enabled"] = parse_on_off(hydrate_cluster.get("enabled", False), "hydrate_cluster.enabled")
+    min_cage = int(hydrate_cluster.get("min_cage", 2))
+    if min_cage < 1:
+        raise ValueError("hydrate_cluster.min_cage / --cluster-min-cage must be at least 1.")
+    hydrate_cluster["min_cage"] = min_cage
+    hydrate_cluster["detail"] = parse_on_off(hydrate_cluster.get("detail", False), "hydrate_cluster.detail")
     config["order"]["q_degree"] = list(normalize_q_degree(config.get("order", {}).get("q_degree", [6, 12])))
+
+
+def parse_on_off(value: Any, key: str) -> bool:
+    """Parse YAML booleans and CLI on/off strings consistently."""
+    if isinstance(value, bool):
+        return value
+    text = str(value).strip().lower()
+    if text in {"on", "true", "yes", "1"}:
+        return True
+    if text in {"off", "false", "no", "0", "", "none"}:
+        return False
+    raise ValueError(f"{key} must be on/off or true/false.")
 
 
 def resolve_cage_report_types(
@@ -1010,7 +1050,7 @@ def resolve_cage_report_types(
             )
         if sum(counts.values()) > max_faces:
             raise ValueError(
-                f"Cage type {item} has {sum(counts.values())} faces, above --max-cage-faces={max_faces}."
+                f"Cage type {item} has {sum(counts.values())} faces, above --max-cage-face={max_faces}."
             )
         if cage_type not in resolved:
             resolved.append(cage_type)
@@ -1108,6 +1148,29 @@ def analyze_frame(
         warnings=warnings,
     )
     cages = select_reported_cages(all_cages, cage_report_types)
+    hydrate_cluster_enabled = bool(config.get("hydrate_cluster", {}).get("enabled", False))
+    hydrate_cluster_detail = bool(config.get("hydrate_cluster", {}).get("detail", False))
+    if hydrate_cluster_enabled:
+        report_stage(stage_callback, "classifying hydrate cluster")
+        ring_sizes_by_id = {
+            ring.object_id: ring.size
+            for ring_group in rings.values()
+            for ring in ring_group
+        }
+        rings_by_id = {
+            ring.object_id: ring
+            for ring_group in rings.values()
+            for ring in ring_group
+        }
+        hydrate_clusters, hydrate_motifs, hydrate_domains, isolated_cage_ids = analyze_hydrate_clusters(
+            cages,
+            min_cage=int(config.get("hydrate_cluster", {}).get("min_cage", 2)),
+            ring_sizes=ring_sizes_by_id,
+            frame=frame,
+            rings_by_id=rings_by_id,
+        )
+    else:
+        hydrate_clusters, hydrate_motifs, hydrate_domains, isolated_cage_ids = [], [], [], ()
     report_stage(stage_callback, "filtering free patches")
     quasi_cages = filter_free_patches(quasi_cages, all_cages)
     half_cages = filter_free_patches(half_cages, all_cages, higher_priority_patches=quasi_cages)
@@ -1148,6 +1211,12 @@ def analyze_frame(
         cages=cages,
         all_cages=all_cages,
         cage_report_types=cage_report_types,
+        hydrate_cluster_enabled=hydrate_cluster_enabled,
+        hydrate_cluster_detail=hydrate_cluster_detail,
+        hydrate_clusters=hydrate_clusters,
+        hydrate_motifs=hydrate_motifs,
+        hydrate_domains=hydrate_domains,
+        isolated_cage_ids=isolated_cage_ids,
         f3f4=f3f4,
         ice_like_waters=ice_classes.ice_like,
         ice_i_waters=ice_classes.ice_i,

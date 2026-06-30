@@ -29,6 +29,7 @@ Examples:
   sqq analyze -i traj.xtc --top topol.gro -c config.yaml -o ./result_sqq
   sqq analyze -i ./gro -m 00 -b hbond --workers 4 -o ./result_sqq
   sqq analyze -i md.gro -s 4,5,6 --cage-size H -o ./result_sqq_h
+  sqq analyze -i md.gro -s 4,5,6 --hydrate-cluster on -o ./result_sqq_cluster
 
 Analysis modes:
   -m 00  Rigorous: hbond, 4/5/6 search, 25% CPU workers
@@ -87,10 +88,10 @@ def build_parser() -> argparse.ArgumentParser:
         help="Set ring/quasi-cage search sizes; cage detection uses the selected 4/5/6 sizes.",
     )
     analyze_parser.add_argument("--ring-size", metavar="4,5,6,7", help="Report a subset of searched ring sizes; default auto follows --size.")
-    analyze_parser.add_argument("--quasi-sizes", metavar="4,5,6,7", help="Override quasi-cage base and side sizes together.")
-    analyze_parser.add_argument("--quasi-base-sizes", metavar="4,5,6,7", help="Override quasi-cage base-ring sizes.")
-    analyze_parser.add_argument("--quasi-side-sizes", metavar="4,5,6,7", help="Override quasi-cage side-ring sizes.")
-    analyze_parser.add_argument("--quasi-max-layers", metavar="N", type=int, help="Override quasi_cage.max_layers; default 1 reports L1 quasi_cage and standard half_cage only.")
+    analyze_parser.add_argument("--quasi-size", metavar="4,5,6,7", help="Override quasi-cage base and side size lists together.")
+    analyze_parser.add_argument("--quasi-base-size", metavar="4,5,6,7", help="Override quasi-cage base-ring size list.")
+    analyze_parser.add_argument("--quasi-side-size", metavar="4,5,6,7", help="Override quasi-cage side-ring size list.")
+    analyze_parser.add_argument("--quasi-max-layer", metavar="N", type=int, help="Override quasi_cage.max_layers; default 1 reports L1 quasi_cage and standard half_cage only.")
     analyze_parser.add_argument("--no-q", action="store_true", help="Disable Steinhardt Q_l order-parameter calculation.")
     analyze_parser.add_argument("-q", "--q-degree", metavar="4,6,8,10,12", help="Comma-separated Q_l degree list to report; default 6,12.")
     analyze_parser.add_argument("--q-neighbor-mode", choices=["graph", "cutoff", "nearest", "lammps"], help="Neighbor source for Q_l; default graph follows the active water network.")
@@ -101,7 +102,10 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="GROUP[,GROUP...]",
         help="Report cage groups I, II, H, HS-I, TS-I, or I2II; auto/all report every detected type. Default auto follows --size.",
     )
-    analyze_parser.add_argument("--max-cage-faces", metavar="N", type=int, help="Maximum face count searched for Euler-compatible cages; default 20.")
+    analyze_parser.add_argument("--max-cage-face", metavar="N", type=int, help="Maximum face count searched for Euler-compatible cages; default 20.")
+    analyze_parser.add_argument("--hydrate-cluster", choices=("on", "off"), help="Enable or disable reported-cage hydrate_cluster analysis; default off.")
+    analyze_parser.add_argument("--cluster-min-cage", metavar="N", type=int, help="Minimum connected cage count required for a hydrate_cluster; default 2.")
+    analyze_parser.add_argument("--cluster-detail", choices=("on", "off"), help="Enable or disable the detailed hydrate_cluster workbook sheet; default off.")
     analyze_parser.add_argument("--recursive", action="store_true", help="Read input directory recursively.")
     analyze_parser.add_argument("--pairs", metavar="PAIRS.txt", help="Pair file for bond_mode=pairs; each line contains two water ids.")
     analyze_parser.add_argument("--pair-id", metavar="KIND", choices=["resid", "oxygen_index", "atomid"], help="How ids in --pairs are interpreted; default resid.")
@@ -137,5 +141,3 @@ def main(argv: list[str] | None = None) -> int:
         analyze(args)
         return 0
     raise AssertionError(f"Unhandled command: {args.command}")
-
-
