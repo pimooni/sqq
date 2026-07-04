@@ -2,6 +2,8 @@
 
 **SQQ: Python Joint Toolkit for Water-Shell Topology Analysis.**
 
+Current release: **0.2.2**
+
 SQQ builds a water network, reports coordination diagnostics, and finds rings, standard half-cages, quasi-cages, closed cages, reported-cage hydrate clusters, per-frame phase domains and boundaries, cage guest occupancy, F3/F4/Q_l order parameters, and ice-like waters. Detailed algorithms are documented in `docs/design.md`; version notes are documented in `docs/update.md`.
 
 ## Install
@@ -80,7 +82,9 @@ sqq analyze -i ./gro -m 50 -o ./result_standard
 sqq analyze -i ./gro -m 99 -o ./result_performance
 ```
 
-Modes do not change `quasi_cage.max_layers`; L1 remains the default in every mode. Use `--quasi-max-layer` explicitly for L2/L3. Automatic workers are capped by the number of independent GRO/XYZ files. A single coordinate file or XTC/TRR trajectory still runs with one worker. `--workers N` overrides the mode percentage. Parallel runs display live aggregate stages and up to six active files with per-stage and per-file timings.
+Modes do not change `quasi_cage.max_layers`; L1 remains the default in every mode. Use `--quasi-max-layer` explicitly for L2/L3. Automatic workers are capped by the number of independent GRO/XYZ files. A single coordinate file or XTC/TRR trajectory still runs with one worker. `--workers N` overrides the mode percentage.
+
+Version 0.2.2 uses the same compact three-row stage model for serial and parallel progress: file preparation (`reading`, `settings`, `selecting`), core topology search (`graph`, `ring`, `half/quasi`, `cage`, and optional `cluster`), and post-processing (`filtering`, `order`, `ice`, `output`). The `cluster` stage appears only when hydrate-cluster analysis is enabled. Parallel runs also show aggregate stage counts and up to six active files with per-stage and per-file timings.
 
 ## Common Commands
 
@@ -323,7 +327,7 @@ result_sqq/
     test1_order_parameter.tsv   # only with --write-order-tsv
 ```
 
-Each per-frame `*_info.md` report is arranged for inspection: it shows only reported ring sizes, reports final free-ring counts, includes the active network degree distribution, groups half-cage and quasi-cage isomers below composition totals, and keeps cage composition totals plus cage isomers in one vertical `Cage` table. When enabled, the same report adds `Hydrate Cluster`, hierarchy, detail, domain, and boundary sections. Internal `hc_` and `qc_` prefixes are omitted from report labels.
+Each per-frame `*_info.md` report is arranged for inspection. In version 0.2.2, `Frame Information` begins with the SQQ version, report-generation date and local timezone, absolute source path, frame name, and trajectory time. The report shows only reported ring sizes, reports final free-ring counts, includes the active network degree distribution, groups half-cage and quasi-cage isomers below composition totals, and keeps cage composition totals plus cage isomers in one vertical `Cage` table. When enabled, the same report adds `Hydrate Cluster`, hierarchy, detail, domain, and boundary sections. Internal `hc_` and `qc_` prefixes are omitted from report labels.
 
 When quasi-cage or cage isomers are present, the same report adds description tables:
 
