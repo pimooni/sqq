@@ -2,12 +2,13 @@ from __future__ import annotations
 
 """Half-cage and quasi-cage search from layered ring-face patches."""
 
-from collections import Counter, defaultdict
+from collections import Counter, defaultdict, deque
 import numpy as np
 
 from ..models import CagePatch, Frame, Ring
 from .geometry import unwrap_connected_nodes
 from .pbc import distance
+from .ring_topology import RingTopologyIndex, build_ring_topology_index
 
 
 SUPERSCRIPT_DIGITS = str.maketrans("0123456789-", "⁰¹²³⁴⁵⁶⁷⁸⁹⁻")
@@ -26,23 +27,37 @@ def find_cage_patches(
     max_layer_states_per_seed: int = 200,
     max_candidates_per_edge: int = 4,
     max_layer_candidates: int = 24,
+    topology_index: RingTopologyIndex | None = None,
+    search_policy: str = "bounded",
+    warnings: list[str] | None = None,
 ) -> tuple[list[CagePatch], list[CagePatch]]:
     """Find standard half-cages and nonstandard open quasi-cage patches."""
     if not enabled:
         return [], []
 
+    policy = str(search_policy or "bounded").strip().lower()
+    if policy not in {"bounded", "exact"}:
+        raise ValueError("quasi_cage.search_policy must be bounded or exact.")
     base_allowed = set(base_sizes or [5, 6])
     side_allowed = set(side_sizes or [5, 6])
     all_rings = [ring for group in rings.values() for ring in group]
-    ring_by_id = {ring.object_id: ring for ring in all_rings}
-    ring_centers = build_ring_centers(frame, all_rings)
+    topology = topology_index or build_ring_topology_index(frame, all_rings)
+    ring_by_id = topology.ring_by_id
+    ring_centers = topology.ring_centers
     # Shared-edge lookup is the hard topology filter; centers only rank candidates.
-    edge_to_rings = build_edge_to_rings(all_rings)
+    edge_to_rings = topology.edge_to_rings()
     half_cages: list[CagePatch] = []
     quasi_cages: list[CagePatch] = []
     seen_half: set[frozenset[str]] = set()
     seen_quasi: set[frozenset[str]] = set()
     type_counts: dict[str, int] = defaultdict(int)
+    ring_distance_cache = topology.distance_cache
+    layer_expansion_cache: dict[
+        tuple[tuple[str, ...], tuple[str, ...], int, int],
+        tuple[tuple[str, ...], ...],
+    ] = {}
+    patch_geometry_cache: dict[frozenset[str], tuple[tuple[int, ...], np.ndarray]] = {}
+    search_status: dict[str, bool] = {}
 
     for base in all_rings:
         if base.size not in base_allowed:
@@ -55,11 +70,13 @@ def find_cage_patches(
             ring_centers,
             frame.box,
             max_candidates_per_edge,
+            distance_cache=ring_distance_cache,
+            status=search_status,
         )
         if not candidate_lists:
             continue
 
-        for side_rings in iter_closed_side_walls(base, candidate_lists, max_combinations_per_base):
+        for side_rings in iter_closed_side_walls(base, candidate_lists, max_combinations_per_base, status=search_status):
             side_ids = [ring.object_id for ring in side_rings]
             base_patch_rings = [base, *side_rings]
             if not has_expected_nodes(base, side_rings):
@@ -78,6 +95,7 @@ def find_cage_patches(
                 seen_half,
                 seen_quasi,
                 type_counts,
+                geometry_cache=patch_geometry_cache,
             )
             if half_cage_type(base.size, (l1_sequence, "6")) is not None:
                 l2_rings = next_layer_candidates(
@@ -89,6 +107,8 @@ def find_cage_patches(
                     frame.box,
                     lower_rings=[base],
                     max_candidates=max_layer_candidates,
+                    distance_cache=ring_distance_cache,
+                    status=search_status,
                 )
                 l2_sixes = [ring for ring in l2_rings if ring.size == 6]
             else:
@@ -107,6 +127,7 @@ def find_cage_patches(
                     seen_half,
                     seen_quasi,
                     type_counts,
+                    geometry_cache=patch_geometry_cache,
                 )
 
             # L2/L3 grow from exposed frontier edges and may remain dangling.
@@ -129,8 +150,24 @@ def find_cage_patches(
                 seen_quasi=seen_quasi,
                 seen_half=seen_half,
                 type_counts=type_counts,
+                distance_cache=ring_distance_cache,
+                expansion_cache=layer_expansion_cache,
+                search_policy=policy,
+                warnings=warnings,
+                status=search_status,
+                geometry_cache=patch_geometry_cache,
             )
 
+    if warnings is not None:
+        warning_messages = {
+            "hit_edge_candidate_limit": "Quasi-cage L1 candidate ranking reached quasi_cage.max_candidates_per_edge; increase it for exhaustive L1 walls.",
+            "hit_layer_candidate_limit": "Quasi-cage outer-layer ranking reached quasi_cage.max_layer_candidates; increase it for exhaustive L2/L3 candidates.",
+            "hit_wall_combination_limit": "Quasi-cage L1 wall search reached quasi_cage.max_combinations_per_base; increase it for exhaustive L1 walls.",
+            "hit_layer_state_limit": "Quasi-cage growth reached quasi_cage.max_layer_states_per_seed; increase it for exhaustive outer layers.",
+        }
+        for key, message in warning_messages.items():
+            if search_status.get(key) and message not in warnings:
+                warnings.append(message)
     half_cages = remove_subset_patches(half_cages)
     half_sets = {frozenset(patch.rings) for patch in half_cages}
     quasi_cages = [patch for patch in quasi_cages if frozenset(patch.rings) not in half_sets]
@@ -154,17 +191,41 @@ def nearest_rings(
     ring_centers: dict[str, np.ndarray],
     box: np.ndarray | None,
     limit: int,
+    distance_cache: dict[tuple[str, str], float] | None = None,
+    status: dict[str, bool] | None = None,
+    limit_key: str = "hit_candidate_limit",
 ) -> list[Ring]:
     """Keep the nearest topological candidates by ring-center distance."""
     if limit <= 0 or len(candidates) <= limit:
         return candidates
+    if status is not None:
+        status[limit_key] = True
 
     def score(ring: Ring) -> tuple[float, str]:
-        center = ring_centers[ring.object_id]
-        nearest = min(distance(center, ring_centers[reference.object_id], box) for reference in references)
+        nearest = min(
+            cached_ring_distance(ring, reference, ring_centers, box, distance_cache)
+            for reference in references
+        )
         return nearest, ring.object_id
 
     return sorted(candidates, key=score)[:limit]
+
+
+def cached_ring_distance(
+    left: Ring,
+    right: Ring,
+    ring_centers: dict[str, np.ndarray],
+    box: np.ndarray | None,
+    cache: dict[tuple[str, str], float] | None,
+) -> float:
+    """Return a cached symmetric minimum-image distance between ring centers."""
+    key = tuple(sorted((left.object_id, right.object_id)))
+    if cache is not None and key in cache:
+        return cache[key]
+    value = distance(ring_centers[left.object_id], ring_centers[right.object_id], box)
+    if cache is not None:
+        cache[key] = value
+    return value
 
 
 def build_edge_to_rings(rings: list[Ring]) -> dict[tuple[int, int], list[Ring]]:
@@ -183,6 +244,8 @@ def side_ring_candidate_lists(
     ring_centers: dict[str, np.ndarray],
     box: np.ndarray | None,
     max_candidates_per_edge: int,
+    distance_cache: dict[tuple[str, str], float] | None = None,
+    status: dict[str, bool] | None = None,
 ) -> list[list[Ring]]:
     """Find L1 candidates by base-edge lookup, then order them geometrically."""
     candidate_lists: list[list[Ring]] = []
@@ -197,7 +260,16 @@ def side_ring_candidate_lists(
             )
             if (base.edges & ring.edges) == {edge}
         ]
-        candidates = nearest_rings(candidates, [base], ring_centers, box, max_candidates_per_edge)
+        candidates = nearest_rings(
+            candidates,
+            [base],
+            ring_centers,
+            box,
+            max_candidates_per_edge,
+            distance_cache=distance_cache,
+            status=status,
+            limit_key="hit_edge_candidate_limit",
+        )
         if not candidates:
             return []
         candidate_lists.append(candidates)
@@ -246,30 +318,53 @@ def side_wall_closed(base: Ring, side_rings: list[Ring]) -> bool:
     return True
 
 
-def iter_closed_side_walls(base: Ring, candidate_lists: list[list[Ring]], max_states: int):
-    """Yield side-ring walls while pruning non-adjacent choices early."""
+def iter_closed_side_walls(base: Ring, candidate_lists: list[list[Ring]], max_states: int, status: dict[str, bool] | None = None):
+    """Yield closed L1 walls with adjacency compatibility and forward checking."""
     if not candidate_lists or max_states <= 0:
         return
     base_edges = base.edges
+    compatibility: list[dict[str, frozenset[str]]] = []
+    for index in range(len(candidate_lists) - 1):
+        next_candidates = candidate_lists[index + 1]
+        compatibility.append(
+            {
+                ring.object_id: frozenset(
+                    candidate.object_id
+                    for candidate in next_candidates
+                    if side_rings_touch(ring, candidate, base_edges)
+                )
+                for ring in candidate_lists[index]
+            }
+        )
+
     emitted = 0
-    stack: list[tuple[int, list[Ring], set[str]]] = []
+    stack: list[tuple[int, tuple[Ring, ...], frozenset[str]]] = []
     for ring in reversed(candidate_lists[0]):
-        stack.append((1, [ring], {ring.object_id}))
+        if compatibility and not compatibility[0].get(ring.object_id):
+            continue
+        stack.append((1, (ring,), frozenset([ring.object_id])))
 
     while stack and emitted < max_states:
         edge_index, selected, used = stack.pop()
         if edge_index == len(candidate_lists):
-            if side_rings_touch(selected[-1], selected[0], base_edges):
-                emitted += 1
-                yield list(selected)
+            emitted += 1
+            yield list(selected)
             continue
         previous = selected[-1]
+        allowed_next = compatibility[edge_index - 1].get(previous.object_id, frozenset())
         for ring in reversed(candidate_lists[edge_index]):
-            if ring.object_id in used:
+            ring_id = ring.object_id
+            if ring_id in used or ring_id not in allowed_next:
                 continue
-            if not side_rings_touch(previous, ring, base_edges):
+            if edge_index == len(candidate_lists) - 1:
+                if not side_rings_touch(ring, selected[0], base_edges):
+                    continue
+            elif not (compatibility[edge_index].get(ring_id, frozenset()) - used):
                 continue
-            stack.append((edge_index + 1, [*selected, ring], {*used, ring.object_id}))
+            stack.append((edge_index + 1, (*selected, ring), used | {ring_id}))
+
+    if stack and emitted >= max_states and status is not None:
+        status["hit_wall_combination_limit"] = True
 
 
 def side_rings_touch(left: Ring, right: Ring, base_edges: frozenset[tuple[int, int]]) -> bool:
@@ -293,6 +388,8 @@ def next_layer_candidates(
     box: np.ndarray | None,
     lower_rings: list[Ring] | None = None,
     max_candidates: int = 24,
+    distance_cache: dict[tuple[str, str], float] | None = None,
+    status: dict[str, bool] | None = None,
 ) -> list[Ring]:
     """Collect rings attached to frontier boundary edges by reverse lookup."""
     patch_ids = {ring.object_id for ring in patch_rings}
@@ -305,7 +402,16 @@ def next_layer_candidates(
         allowed_sizes=allowed_sizes,
         blocked_edges=lower_edges,
     )
-    return nearest_rings(candidates, frontier_rings, ring_centers, box, max_candidates)
+    return nearest_rings(
+        candidates,
+        frontier_rings,
+        ring_centers,
+        box,
+        max_candidates,
+        distance_cache=distance_cache,
+        status=status,
+        limit_key="hit_layer_candidate_limit",
+    )
 
 
 def growth_edges_for_frontier(patch_rings: list[Ring], frontier_rings: list[Ring]) -> set[tuple[int, int]]:
@@ -337,6 +443,15 @@ def add_layered_quasi_cages(
     seen_quasi: set[frozenset[str]],
     seen_half: set[frozenset[str]],
     type_counts: dict[str, int],
+    distance_cache: dict[tuple[str, str], float] | None = None,
+    expansion_cache: dict[
+        tuple[tuple[str, ...], tuple[str, ...], int, int],
+        tuple[tuple[str, ...], ...],
+    ] | None = None,
+    geometry_cache: dict[frozenset[str], tuple[tuple[int, ...], np.ndarray]] | None = None,
+    search_policy: str = "bounded",
+    warnings: list[str] | None = None,
+    status: dict[str, bool] | None = None,
 ) -> None:
     """Grow and report L2/L3 quasi-cage patches from one L0+L1 seed."""
     if max_layers < 2:
@@ -347,22 +462,55 @@ def add_layered_quasi_cages(
     for _layer_index in range(2, max_layers + 1):
         next_states: list[tuple[tuple[str, ...], tuple[str, ...], tuple[str, ...]]] = []
         for patch_ids, current_frontier_ids, sequences in states:
-            patch_rings = [ring_by_id[ring_id] for ring_id in patch_ids]
-            frontier_rings = [ring_by_id[ring_id] for ring_id in current_frontier_ids]
-            lower_rings = [ring_by_id[ring_id] for ring_id in set(patch_ids) - set(current_frontier_ids)]
-            candidates = next_layer_candidates(
-                patch_rings,
-                frontier_rings,
-                edge_to_rings,
-                allowed_sizes,
-                ring_centers,
-                frame.box,
-                lower_rings=lower_rings,
-                max_candidates=max_layer_candidates,
+            cache_key = (
+                patch_ids,
+                current_frontier_ids,
+                max_rings_per_layer,
+                max_layer_candidates,
             )
+            layer_id_units = expansion_cache.get(cache_key) if expansion_cache is not None else None
+            if layer_id_units is None:
+                patch_rings = [ring_by_id[ring_id] for ring_id in patch_ids]
+                frontier_rings = [ring_by_id[ring_id] for ring_id in current_frontier_ids]
+                lower_rings = [ring_by_id[ring_id] for ring_id in set(patch_ids) - set(current_frontier_ids)]
+                candidates = next_layer_candidates(
+                    patch_rings,
+                    frontier_rings,
+                    edge_to_rings,
+                    allowed_sizes,
+                    ring_centers,
+                    frame.box,
+                    lower_rings=lower_rings,
+                    max_candidates=max_layer_candidates,
+                    distance_cache=distance_cache,
+                    status=status,
+                )
+                layer_stats: dict[str, bool] = {}
+                layer_units = connected_layer_subsets(
+                    candidates,
+                    max_rings_per_layer,
+                    max_layer_states_per_seed,
+                    edge_to_rings=edge_to_rings,
+                    exact=search_policy == "exact",
+                    status=layer_stats,
+                )
+                if layer_stats.get("hit_state_limit") and warnings is not None:
+                    message = (
+                        "Exact quasi-cage layer search reached "
+                        f"quasi_cage.max_layer_states_per_seed={max_layer_states_per_seed}; "
+                        "increase it for exhaustive connected subsets."
+                    )
+                    if message not in warnings:
+                        warnings.append(message)
+                layer_id_units = tuple(
+                    tuple(sorted(ring.object_id for ring in layer_rings))
+                    for layer_rings in layer_units
+                )
+                if expansion_cache is not None:
+                    expansion_cache[cache_key] = layer_id_units
             remaining_budget = max_layer_states_per_seed - len(next_states)
-            for layer_rings in connected_layer_subsets(candidates, max_rings_per_layer, remaining_budget):
-                layer_ids = tuple(sorted(ring.object_id for ring in layer_rings))
+            for layer_ids in layer_id_units[:remaining_budget]:
+                layer_rings = [ring_by_id[ring_id] for ring_id in layer_ids]
                 all_ids = tuple(sorted(set(patch_ids) | set(layer_ids)))
                 if len(all_ids) == len(patch_ids):
                     continue
@@ -382,34 +530,56 @@ def add_layered_quasi_cages(
                     seen_half,
                     seen_quasi,
                     type_counts,
+                    geometry_cache=geometry_cache,
                 )
                 next_states.append((all_ids, layer_ids, new_sequences))
                 if len(next_states) >= max_layer_states_per_seed:
+                    if status is not None:
+                        status["hit_layer_state_limit"] = True
                     break
             if len(next_states) >= max_layer_states_per_seed:
+                if status is not None:
+                    status["hit_layer_state_limit"] = True
                 break
-        states = unique_layer_states(next_states)
+        states = unique_layer_states(next_states, preserve_frontier=search_policy == "exact")
         if not states:
             return
 
 
-def connected_layer_subsets(candidates: list[Ring], max_size: int, max_states: int) -> list[list[Ring]]:
-    """Return bounded connected growth units for one dangling layer."""
+def connected_layer_subsets(
+    candidates: list[Ring],
+    max_size: int,
+    max_states: int,
+    edge_to_rings: dict[tuple[int, int], list[Ring]] | None = None,
+    *,
+    exact: bool = False,
+    status: dict[str, bool] | None = None,
+) -> list[list[Ring]]:
+    """Return bounded growth units, or enumerate all connected units in exact mode."""
     if max_size <= 0 or max_states <= 0:
         return []
     ring_by_id = {ring.object_id: ring for ring in candidates}
-    adjacency = layer_adjacency(candidates)
+    adjacency = layer_adjacency(candidates, edge_to_rings=edge_to_rings)
+    if exact:
+        return exact_connected_layer_subsets(ring_by_id, adjacency, max_size, max_states, status=status)
+
     units: list[list[Ring]] = []
-    seen: set[frozenset[str]] = set()
+    ordered_ids = sorted(ring_by_id)
+    ring_bits = {ring_id: 1 << index for index, ring_id in enumerate(ordered_ids)}
+    seen: set[int] = set()
 
     def add_unit(ring_ids: set[str] | frozenset[str]) -> None:
         if len(units) >= max_states:
             return
-        key = frozenset(ring_ids)
+        key = sum(ring_bits[ring_id] for ring_id in ring_ids)
         if not key or key in seen:
             return
         seen.add(key)
-        units.append([ring_by_id[ring_id] for ring_id in sorted(key)])
+        units.append([
+            ring_by_id[ring_id]
+            for ring_id in ordered_ids
+            if key & ring_bits[ring_id]
+        ])
 
     for component in connected_components(candidates, adjacency):
         if len(units) >= max_states:
@@ -417,15 +587,67 @@ def connected_layer_subsets(candidates: list[Ring], max_size: int, max_states: i
         if len(component) <= max_size:
             add_unit(component)
             continue
-
-        # Large frontiers are represented by every dangling ring plus local
-        # connected neighborhoods, rather than every possible subset.
         for ring_id in sorted(component):
             add_unit({ring_id})
         for ring_id in sorted(component):
             add_unit(limited_neighborhood(ring_id, adjacency, max_size))
     return units
 
+
+def exact_connected_layer_subsets(
+    ring_by_id: dict[str, Ring],
+    adjacency: dict[str, set[str]],
+    max_size: int,
+    max_states: int,
+    *,
+    status: dict[str, bool] | None = None,
+) -> list[list[Ring]]:
+    """Enumerate each connected candidate-ring subset once by its minimum id."""
+    ordered = sorted(ring_by_id)
+    rank = {ring_id: index for index, ring_id in enumerate(ordered)}
+    ring_bits = {ring_id: 1 << index for index, ring_id in enumerate(ordered)}
+    adjacency_masks = {
+        ring_id: sum(ring_bits[neighbor] for neighbor in adjacency.get(ring_id, set()))
+        for ring_id in ordered
+    }
+    seen: set[int] = set()
+    units: list[list[Ring]] = []
+    for start in ordered:
+        start_rank = rank[start]
+        allowed_mask = ~((1 << start_rank) - 1)
+        stack = [ring_bits[start]]
+        while stack:
+            subset = stack.pop()
+            if subset in seen:
+                continue
+            seen.add(subset)
+            units.append([
+                ring_by_id[ring_id]
+                for ring_id in ordered
+                if subset & ring_bits[ring_id]
+            ])
+            if len(units) >= max_states:
+                if status is not None:
+                    status["hit_state_limit"] = bool(stack) or start != ordered[-1]
+                return units
+            if subset.bit_count() >= max_size:
+                continue
+            boundary = 0
+            members = subset
+            while members:
+                member_bit = members & -members
+                members ^= member_bit
+                ring_id = ordered[member_bit.bit_length() - 1]
+                boundary |= adjacency_masks[ring_id]
+            boundary &= ~subset & allowed_mask
+            for neighbor_index in range(len(ordered) - 1, -1, -1):
+                neighbor_bit = 1 << neighbor_index
+                if not boundary & neighbor_bit:
+                    continue
+                expanded = subset | neighbor_bit
+                if expanded not in seen:
+                    stack.append(expanded)
+    return units
 
 def connected_components(candidates: list[Ring], adjacency: dict[str, set[str]]) -> list[set[str]]:
     """Return connected components among layer candidates."""
@@ -449,9 +671,9 @@ def connected_components(candidates: list[Ring], adjacency: dict[str, set[str]])
 def limited_neighborhood(start: str, adjacency: dict[str, set[str]], max_size: int) -> set[str]:
     """Grow a deterministic connected neighborhood around one candidate ring."""
     selected = {start}
-    queue = [start]
+    queue = deque([start])
     while queue and len(selected) < max_size:
-        current = queue.pop(0)
+        current = queue.popleft()
         for neighbor in sorted(adjacency.get(current, set())):
             if neighbor in selected:
                 continue
@@ -462,26 +684,45 @@ def limited_neighborhood(start: str, adjacency: dict[str, set[str]], max_size: i
     return selected
 
 
-def layer_adjacency(rings: list[Ring]) -> dict[str, set[str]]:
+def layer_adjacency(
+    rings: list[Ring],
+    edge_to_rings: dict[tuple[int, int], list[Ring]] | None = None,
+) -> dict[str, set[str]]:
     """Connect layer candidates that share a ring edge."""
     adjacency = {ring.object_id: set() for ring in rings}
-    for idx, left in enumerate(rings):
-        for right in rings[idx + 1 :]:
-            if left.edges & right.edges:
-                adjacency[left.object_id].add(right.object_id)
-                adjacency[right.object_id].add(left.object_id)
+    if edge_to_rings is None:
+        for idx, left in enumerate(rings):
+            for right in rings[idx + 1 :]:
+                if left.edges & right.edges:
+                    adjacency[left.object_id].add(right.object_id)
+                    adjacency[right.object_id].add(left.object_id)
+        return adjacency
+
+    candidate_ids = set(adjacency)
+    for ring in rings:
+        for edge in ring.edges:
+            for neighbor in edge_to_rings.get(edge, []):
+                neighbor_id = neighbor.object_id
+                if neighbor_id == ring.object_id or neighbor_id not in candidate_ids:
+                    continue
+                adjacency[ring.object_id].add(neighbor_id)
+                adjacency[neighbor_id].add(ring.object_id)
     return adjacency
 
 
-def unique_layer_states(states: list[tuple[tuple[str, ...], tuple[str, ...], tuple[str, ...]]]) -> list[tuple[tuple[str, ...], tuple[str, ...], tuple[str, ...]]]:
+def unique_layer_states(states: list[tuple[tuple[str, ...], tuple[str, ...], tuple[str, ...]]], preserve_frontier: bool = False) -> list[tuple[tuple[str, ...], tuple[str, ...], tuple[str, ...]]]:
     """Keep one deterministic state for each full patch ring set."""
-    seen: set[tuple[str, ...]] = set()
+    ordered_ids = sorted({ring_id for state in states for group in state[:2] for ring_id in group})
+    ring_bits = {ring_id: 1 << index for index, ring_id in enumerate(ordered_ids)}
+    seen: set[object] = set()
     unique: list[tuple[tuple[str, ...], tuple[str, ...], tuple[str, ...]]] = []
     for state in sorted(states, key=lambda item: (len(item[0]), item[0], item[1])):
-        patch_ids = state[0]
-        if patch_ids in seen:
+        patch_mask = sum(ring_bits[ring_id] for ring_id in state[0])
+        frontier_mask = sum(ring_bits[ring_id] for ring_id in state[1])
+        state_key = (patch_mask, frontier_mask) if preserve_frontier else patch_mask
+        if state_key in seen:
             continue
-        seen.add(patch_ids)
+        seen.add(state_key)
         unique.append(state)
     return unique
 
@@ -516,17 +757,39 @@ def add_classified_patch(
     seen_half: set[frozenset[str]],
     seen_quasi: set[frozenset[str]],
     type_counts: dict[str, int],
+    geometry_cache: dict[frozenset[str], tuple[tuple[int, ...], np.ndarray]] | None = None,
 ) -> bool:
     """Classify one layered patch as a standard half-cage or quasi-cage."""
+    key = frozenset(ring_ids)
     half_type = half_cage_type(base_size, layer_sequences)
     if half_type is not None:
+        if key in seen_half:
+            return False
         layers = (f"{base_size}r", *[layer_label(sequence, False) for sequence in layer_sequences])
-        patch = build_patch(frame, ring_by_id, "half_cage", half_type, ring_ids, layers)
+        patch = build_patch(
+            frame,
+            ring_by_id,
+            "half_cage",
+            half_type,
+            ring_ids,
+            layers,
+            geometry_cache=geometry_cache,
+        )
         return add_patch(patch, half_cages, seen_half, type_counts)
 
+    if key in seen_quasi:
+        return False
     label = quasi_label(base_size, layer_sequences)
     layers = (f"{base_size}r", *[layer_label(sequence, True) for sequence in layer_sequences])
-    patch = build_patch(frame, ring_by_id, "quasi_cage", label, ring_ids, layers)
+    patch = build_patch(
+        frame,
+        ring_by_id,
+        "quasi_cage",
+        label,
+        ring_ids,
+        layers,
+        geometry_cache=geometry_cache,
+    )
     return add_patch(patch, quasi_cages, seen_quasi, type_counts)
 
 
@@ -565,12 +828,20 @@ def build_patch(
     patch_type: str,
     ring_ids: list[str],
     layers: tuple[str, ...],
+    geometry_cache: dict[frozenset[str], tuple[tuple[int, ...], np.ndarray]] | None = None,
 ) -> CagePatch:
     """Build a CagePatch and compute its center from unwrapped oxygen nodes."""
     unique_ring_ids = tuple(sorted(set(ring_ids)))
-    face_rings = [ring_by_id[ring_id] for ring_id in unique_ring_ids]
-    waters = tuple(sorted({node for ring in face_rings for node in ring.nodes}))
-    center = patch_center(frame, face_rings)
+    geometry_key = frozenset(unique_ring_ids)
+    cached_geometry = geometry_cache.get(geometry_key) if geometry_cache is not None else None
+    if cached_geometry is None:
+        face_rings = [ring_by_id[ring_id] for ring_id in unique_ring_ids]
+        waters = tuple(sorted({node for ring in face_rings for node in ring.nodes}))
+        center = patch_center(frame, face_rings)
+        if geometry_cache is not None:
+            geometry_cache[geometry_key] = (waters, center)
+    else:
+        waters, center = cached_geometry
     return CagePatch(
         object_id=patch_type,
         patch_type=patch_type,
@@ -609,16 +880,27 @@ def add_patch(
 
 
 def remove_subset_patches(patches: list[CagePatch]) -> list[CagePatch]:
-    """Keep maximal patches within one class to avoid nested double counts."""
-    ring_sets = [set(patch.rings) for patch in patches]
+    """Keep maximal patches using an inverted ring index for superset candidates."""
+    ring_sets = [frozenset(patch.rings) for patch in patches]
+    ring_to_indexes: dict[str, set[int]] = defaultdict(set)
+    for index, ring_ids in enumerate(ring_sets):
+        for ring_id in ring_ids:
+            ring_to_indexes[ring_id].add(index)
     maximal: list[CagePatch] = []
     for index, patch in enumerate(patches):
         patch_rings = ring_sets[index]
-        if any(patch_rings < other_rings for other_index, other_rings in enumerate(ring_sets) if other_index != index):
+        if not patch_rings:
+            maximal.append(patch)
+            continue
+        anchor = min(patch_rings, key=lambda ring_id: len(ring_to_indexes[ring_id]))
+        if any(
+            patch_rings < ring_sets[other_index]
+            for other_index in ring_to_indexes[anchor]
+            if other_index != index
+        ):
             continue
         maximal.append(patch)
     return maximal
-
 
 def patch_center(frame: Frame, rings: list[Ring]) -> np.ndarray:
     """Use the centroid of unique, locally unwrapped oxygen nodes."""

@@ -1,7 +1,8 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 """F3/F4 AOP order parameters from the user's reference script."""
 
+from functools import lru_cache
 from itertools import combinations
 from math import atan2, cos, factorial, pi, radians, sin, sqrt
 from typing import Any
@@ -55,18 +56,36 @@ def compute_order_parameters(
     q_focus_value_lists: dict[int, list[float]] = {degree: [] for degree in q_degree_resolved}
     q_mode = normalize_q_neighbor_mode(q_neighbor_mode)
     q_fixed_neighbor = resolve_q_neighbor_count(q_mode, q_n_neighbor)
-
-    for water in waters:
-        neighbors = [idx for idx in sorted(graph.adjacency.get(water.oxygen, set())) if idx in water_by_oxygen]
-        f3 = f3_for_water(frame.atoms, water.oxygen, neighbors, frame.box) if f3f4_enabled else None
-        f4 = f4_for_water(frame.atoms, water, [water_by_oxygen[idx] for idx in neighbors], frame.box) if f3f4_enabled else None
-        q_values, q_neighbors = q_values_for_water(
+    graph_vectors = (
+        build_graph_neighbor_vector_cache(frame, waters, graph)
+        if f3f4_enabled or (q_degree_resolved and q_mode == "graph")
+        else {}
+    )
+    q_candidates = (
+        build_q_candidate_cache(
             frame,
             waters,
             graph,
-            water,
             mode=q_mode,
             cutoff_nm=q_cutoff_nm,
+            graph_vectors=graph_vectors,
+        )
+        if q_degree_resolved
+        else {}
+    )
+
+    for water in waters:
+        neighbors = [idx for idx in sorted(graph.adjacency.get(water.oxygen, set())) if idx in water_by_oxygen]
+        f3 = f3_for_water(
+            frame.atoms,
+            water.oxygen,
+            neighbors,
+            frame.box,
+            neighbor_vectors=graph_vectors.get(water.oxygen),
+        ) if f3f4_enabled else None
+        f4 = f4_for_water(frame.atoms, water, [water_by_oxygen[idx] for idx in neighbors], frame.box) if f3f4_enabled else None
+        q_values, q_neighbors = q_values_from_candidates(
+            q_candidates.get(water.oxygen, ()),
             n_neighbor=q_fixed_neighbor,
             degree=q_degree_resolved,
         ) if q_degree_resolved else ({}, 0)
@@ -127,15 +146,21 @@ def compute_order_parameters(
     )
 
 
-def f3_for_water(atoms: list[Atom], oxygen: int, neighbors: list[int], box: np.ndarray | None) -> float | None:
+def f3_for_water(
+    atoms: list[Atom],
+    oxygen: int,
+    neighbors: list[int],
+    box: np.ndarray | None,
+    neighbor_vectors: dict[int, np.ndarray] | None = None,
+) -> float | None:
     """F3: average squared deviation over neighbor-neighbor angles."""
     if len(neighbors) < 2:
         return None
     center = atoms[oxygen].xyz
     terms = []
     for a, b in combinations(neighbors, 2):
-        va = minimum_image(atoms[a].xyz - center, box)
-        vb = minimum_image(atoms[b].xyz - center, box)
+        va = neighbor_vectors[a] if neighbor_vectors is not None else minimum_image(atoms[a].xyz - center, box)
+        vb = neighbor_vectors[b] if neighbor_vectors is not None else minimum_image(atoms[b].xyz - center, box)
         norm = float(np.linalg.norm(va) * np.linalg.norm(vb))
         if norm <= 1e-12:
             continue
@@ -266,6 +291,16 @@ def q_values_for_water(
 ) -> tuple[dict[int, float | None], int]:
     """Compute requested Q_l values for one water oxygen from one neighbor list."""
     candidates = q_candidate_vectors(frame, waters, graph, water, mode=mode, cutoff_nm=cutoff_nm)
+    return q_values_from_candidates(candidates, n_neighbor=n_neighbor, degree=degree)
+
+
+def q_values_from_candidates(
+    candidates: list[tuple[float, np.ndarray]] | tuple[tuple[float, np.ndarray], ...],
+    *,
+    n_neighbor: int | None,
+    degree: tuple[int, ...],
+) -> tuple[dict[int, float | None], int]:
+    """Compute Q_l from one already ordered per-water candidate list."""
     if n_neighbor is not None:
         if len(candidates) < n_neighbor:
             # LAMMPS sets Q_l to zero when fewer than nnn neighbors are available.
@@ -274,7 +309,78 @@ def q_values_for_water(
     if not candidates:
         return {item: None for item in degree}, 0
     vectors = [vector for _, vector in candidates]
-    return {item: q_l_from_vectors(vectors, degree=item) for item in degree}, len(vectors)
+    return q_values_from_vectors(vectors, degree), len(vectors)
+
+
+def build_q_candidate_cache(
+    frame: Frame,
+    waters: list[Water],
+    graph: GraphResult,
+    *,
+    mode: str,
+    cutoff_nm: float,
+    graph_vectors: dict[int, dict[int, np.ndarray]] | None = None,
+) -> dict[int, list[tuple[float, np.ndarray]]]:
+    """Build every ordered Q_l neighbor list once for the current frame."""
+    ordered_oxygens = [water.oxygen for water in waters]
+    oxygen_rank = {oxygen: index for index, oxygen in enumerate(ordered_oxygens)}
+    candidates: dict[int, list[tuple[float, np.ndarray]]] = {
+        oxygen: [] for oxygen in ordered_oxygens
+    }
+
+    if mode == "graph":
+        resolved_graph_vectors = graph_vectors or build_graph_neighbor_vector_cache(frame, waters, graph)
+        for oxygen in ordered_oxygens:
+            neighbors = graph.adjacency.get(oxygen, set())
+            ordered_neighbors = sorted(
+                (other for other in neighbors if other in oxygen_rank),
+                key=oxygen_rank.__getitem__,
+            )
+            for other_oxygen in ordered_neighbors:
+                vector = resolved_graph_vectors[oxygen][other_oxygen]
+                pair = q_vector_candidate(vector)
+                if pair is not None:
+                    candidates[oxygen].append(pair)
+    else:
+        for left_index, left in enumerate(waters):
+            left_center = frame.atoms[left.oxygen].xyz
+            for right in waters[left_index + 1 :]:
+                vector = minimum_image(frame.atoms[right.oxygen].xyz - left_center, frame.box)
+                distance = float(np.linalg.norm(vector))
+                if distance <= 1e-12 or distance > cutoff_nm:
+                    continue
+                candidates[left.oxygen].append((distance, vector))
+                candidates[right.oxygen].append((distance, -vector))
+
+    for oxygen in candidates:
+        candidates[oxygen].sort(key=lambda item: item[0])
+    return candidates
+
+
+def build_graph_neighbor_vector_cache(
+    frame: Frame,
+    waters: list[Water],
+    graph: GraphResult,
+) -> dict[int, dict[int, np.ndarray]]:
+    """Compute each undirected graph-edge vector once and expose both directions."""
+    oxygen_set = {water.oxygen for water in waters}
+    vectors: dict[int, dict[int, np.ndarray]] = {oxygen: {} for oxygen in oxygen_set}
+    for left in sorted(oxygen_set):
+        for right in sorted(graph.adjacency.get(left, set())):
+            if right not in oxygen_set or right <= left:
+                continue
+            vector = minimum_image(frame.atoms[right].xyz - frame.atoms[left].xyz, frame.box)
+            vectors[left][right] = vector
+            vectors[right][left] = -vector
+    return vectors
+
+
+def q_vector_candidate(vector: np.ndarray) -> tuple[float, np.ndarray] | None:
+    """Return a reusable nonzero Q_l vector and its distance."""
+    distance = float(np.linalg.norm(vector))
+    if distance <= 1e-12:
+        return None
+    return distance, vector
 
 
 def q_candidate_vectors(
@@ -310,16 +416,34 @@ def q_candidate_vectors(
 
 def q_l_from_vectors(vectors: list[np.ndarray], degree: int = 6) -> float:
     """LAMMPS/Steinhardt Q_l from unweighted bond vectors."""
+    return q_values_from_vectors(vectors, (degree,))[degree]
+
+
+def q_values_from_vectors(vectors: list[np.ndarray], degrees: tuple[int, ...]) -> dict[int, float]:
+    """Compute multiple Q_l degrees while reusing vector angles and constants."""
     if not vectors:
-        return 0.0
-    components: list[complex] = []
-    for m in range(-degree, degree + 1):
-        total = 0j
-        for vector in vectors:
-            total += spherical_harmonic(degree, m, vector)
-        components.append(total / len(vectors))
-    total_norm = sum(abs(value) ** 2 for value in components)
-    return float(sqrt(4.0 * pi / (2 * degree + 1) * total_norm))
+        return {degree: 0.0 for degree in degrees}
+    totals = {degree: [0j for _ in range(2 * degree + 1)] for degree in degrees}
+    for vector in vectors:
+        norm = float(np.linalg.norm(vector))
+        if norm <= 1e-12:
+            continue
+        x, y, z = (float(value) / norm for value in vector)
+        theta_cos = max(-1.0, min(1.0, z))
+        phi = atan2(y, x)
+        for degree in degrees:
+            degree_totals = totals[degree]
+            for order in range(0, degree + 1):
+                positive = spherical_harmonic_from_angles(degree, order, theta_cos, phi)
+                degree_totals[degree + order] += positive
+                if order:
+                    degree_totals[degree - order] += ((-1) ** order) * positive.conjugate()
+    divisor = len(vectors)
+    values: dict[int, float] = {}
+    for degree in degrees:
+        total_norm = sum(abs(value / divisor) ** 2 for value in totals[degree])
+        values[degree] = float(sqrt(4.0 * pi / (2 * degree + 1) * total_norm))
+    return values
 
 
 def spherical_harmonic(degree: int, order: int, vector: np.ndarray) -> complex:
@@ -331,12 +455,23 @@ def spherical_harmonic(degree: int, order: int, vector: np.ndarray) -> complex:
     theta_cos = max(-1.0, min(1.0, z))
     phi = atan2(y, x)
     if order < 0:
-        positive = spherical_harmonic(degree, -order, vector)
+        positive = spherical_harmonic_from_angles(degree, -order, theta_cos, phi)
         return ((-1) ** order) * positive.conjugate()
+    return spherical_harmonic_from_angles(degree, order, theta_cos, phi)
+
+
+def spherical_harmonic_from_angles(degree: int, order: int, theta_cos: float, phi: float) -> complex:
+    """Return positive-order Y_lm from one normalized direction."""
     legendre = associated_legendre(degree, order, theta_cos)
-    norm_factor = sqrt((2 * degree + 1) / (4 * pi) * factorial(degree - order) / factorial(degree + order))
+    norm_factor = spherical_harmonic_normalization(degree, order)
     phase = complex(cos(order * phi), sin(order * phi))
     return norm_factor * legendre * phase
+
+
+@lru_cache(maxsize=None)
+def spherical_harmonic_normalization(degree: int, order: int) -> float:
+    """Cache the degree/order normalization shared by every water and frame."""
+    return sqrt((2 * degree + 1) / (4 * pi) * factorial(degree - order) / factorial(degree + order))
 
 
 def associated_legendre(degree: int, order: int, x: float) -> float:

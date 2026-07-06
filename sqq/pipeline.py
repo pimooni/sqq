@@ -6,9 +6,11 @@ import os
 import sys
 from argparse import Namespace
 from collections import Counter
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import FIRST_COMPLETED, ProcessPoolExecutor, ThreadPoolExecutor, as_completed, wait
 from datetime import datetime
+from multiprocessing import get_context
 from pathlib import Path
+from queue import Empty
 from threading import Event, Lock, Thread
 from time import perf_counter
 from typing import Any, Callable
@@ -39,11 +41,14 @@ from .core.cage import (
     parse_cage_face_label,
 )
 from .core.f3f4 import compute_order_parameters, normalize_q_degree
+from .core.dhop import compute_dhop_order
+from .core.mcg import compute_mcg_order
 from .core.graph import build_water_graph
 from .core.hydrate_cluster import analyze_hydrate_clusters
 from .core.ice import classify_ice_waters
 from .core.quasi_cage import find_cage_patches
 from .core.ring import find_rings
+from .core.ring_topology import build_ring_topology_index
 from .core.selection import select_guests, select_waters
 from .io.gro_writer import (
     write_cage_gro_files,
@@ -62,8 +67,17 @@ from .io.summary import (
     write_summary,
     write_vmd_script,
 )
-from .io.trajectory import expand_inputs, read_frames
-from .models import Cage, CagePatch, Frame, FrameResult
+from .io.trajectory import expand_inputs, read_frames, trajectory_frame_indices
+from .models import Cage, CagePatch, Frame, FrameResult, HydrateOrderResult
+from .parallel import (
+    effective_cpu_count,
+    initialize_file_worker,
+    initialize_trajectory_worker,
+    limited_math_threads,
+    process_file_task,
+    process_trajectory_batch_task,
+    process_worker_cap,
+)
 
 
 PARALLEL_SUFFIXES = {".gro", ".xyz"}
@@ -93,16 +107,52 @@ def analyze(args: Namespace) -> None:
     outdir.mkdir(parents=True, exist_ok=True)
 
     topology = Path(args.topology) if args.topology else None
-    parallelizable = can_parallelize_paths(paths, topology)
+    coordinate_parallelizable = can_parallelize_paths(paths, topology)
+    trajectory_parallelizable = can_parallelize_trajectory(paths, topology)
+    parallel_backend = normalize_parallel_backend(config.get("parallel", {}).get("backend", "process"))
+    trajectory_indexes: list[int] = []
+    if coordinate_parallelizable:
+        validate_unique_output_names(paths)
+        work_items = len(paths)
+    elif trajectory_parallelizable:
+        trajectory_indexes = trajectory_frame_indices(
+            paths[0],
+            topology,
+            stride=int(config["input"].get("xtc_stride", 1)),
+        )
+        work_items = len(trajectory_indexes)
+    else:
+        work_items = len(paths)
+    parallelizable = coordinate_parallelizable or (
+        trajectory_parallelizable and parallel_backend == "process"
+    )
     workers = (
-        resolve_workers(config["parallel"].get("workers"), len(paths), mode=config.get("mode", "50"))
-        if parallelizable
+        resolve_workers(
+            config["parallel"].get("workers"),
+            work_items,
+            mode=config.get("mode", "50"),
+            backend=parallel_backend,
+        )
+        if parallelizable and parallel_backend != "serial"
         else 1
     )
-    print_run_header(args, config, input_path, outdir, paths, topology, workers, run_started_at)
-    if workers > 1 and parallelizable:
+    active_backend = parallel_backend if workers > 1 and parallelizable else "serial"
+    print_run_header(args, config, input_path, outdir, paths, topology, workers, active_backend, run_started_at)
+    if workers > 1 and coordinate_parallelizable:
         rows = analyze_paths_parallel(
             paths,
+            outdir,
+            config,
+            workers=workers,
+            backend=parallel_backend,
+            strict=bool(args.strict),
+            total_started_at=started_at,
+        )
+    elif workers > 1 and trajectory_parallelizable:
+        rows = analyze_trajectory_processes(
+            paths[0],
+            topology,
+            trajectory_indexes,
             outdir,
             config,
             workers=workers,
@@ -117,6 +167,7 @@ def analyze(args: Namespace) -> None:
             topology=topology,
             strict=bool(args.strict),
             total_started_at=started_at,
+            total_frames=work_items if trajectory_parallelizable else None,
         )
 
     elapsed_seconds = perf_counter() - started_at
@@ -129,6 +180,7 @@ def analyze(args: Namespace) -> None:
         paths,
         topology,
         workers,
+        active_backend,
         elapsed_seconds,
         run_started_at,
         run_finished_at,
@@ -145,6 +197,7 @@ def build_run_info(
     paths: list[Path],
     topology: Path | None,
     workers: int,
+    parallel_backend: str,
     elapsed_seconds: float,
     started_at_wall: datetime,
     finished_at_wall: datetime,
@@ -173,9 +226,15 @@ def build_run_info(
         "quasi_cage_side_sizes": config["quasi_cage"].get("side_sizes", "auto"),
         "cage_report_types": config["cage"].get("report_types", []),
         "max_cage_face": config["cage"].get("max_faces", 20),
+        "cage_fast_closure": on_off_text(config["cage"].get("fast_closure", True)),
+        "cage_scientific_validation": on_off_text(config["cage"].get("scientific_validation", False)),
         "hydrate_cluster": on_off_text(config.get("hydrate_cluster", {}).get("enabled", False)),
         "cluster_min_cage": config.get("hydrate_cluster", {}).get("min_cage", 2),
         "cluster_detail": on_off_text(config.get("hydrate_cluster", {}).get("detail", False)),
+        "hydrate_order": hydrate_order_config_text(config),
+        "mcg3": on_off_text(config.get("hydrate_order", {}).get("mcg3_enabled", False)),
+        "dhop30": on_off_text(config.get("hydrate_order", {}).get("dhop30_enabled", False)),
+        "dhop_neighbor_cutoff_nm": config.get("hydrate_order", {}).get("dhop_neighbor_cutoff_nm", 0.35),
         "q_enabled": config["order"].get("q_enabled", True),
         "q_degree": config["order"].get("q_degree", [6, 12]),
         "q_neighbor_mode": config["order"].get("q_neighbor_mode", "graph"),
@@ -183,6 +242,8 @@ def build_run_info(
         "q_n_neighbor": config["order"].get("q_n_neighbor", None),
         "output_layout": config["output"].get("structure_layout", "grouped"),
         "workers": workers,
+        "parallel_backend": parallel_backend,
+        "math_threads": int(config.get("parallel", {}).get("math_threads", 1)),
         "summary_xlsx": str((outdir / "summary.xlsx").resolve()),
         "run_config": str((outdir / "run_config.yaml").resolve()),
     }
@@ -200,6 +261,7 @@ def print_run_header(
     paths: list[Path],
     topology: Path | None,
     workers: int,
+    parallel_backend: str,
     started_at_wall: datetime,
 ) -> None:
     """Print static run information before the live progress display starts."""
@@ -220,16 +282,23 @@ def print_run_header(
     print_terminal_field("graph_mode", bond_mode_display_name(config["graph"]["bond_mode"]))
     print_terminal_field("search_sizes", config["ring"]["sizes"])
     print_terminal_field("ring_report_sizes", config["ring"]["report_sizes"])
+    print_terminal_field("ring_definition", config["ring"].get("definition", "chordless"))
     print_terminal_field("quasi_cage_sizes", f"{config['quasi_cage'].get('base_sizes', 'auto')} / {config['quasi_cage'].get('side_sizes', 'auto')}")
     print_terminal_field("quasi_max_layer", config["quasi_cage"].get("max_layers", ""))
+    print_terminal_field("quasi_search_policy", config["quasi_cage"].get("search_policy", "bounded"))
     print_terminal_field("cage_report_types", dashboard_cage_targets(config))
     print_terminal_field("max_cage_face", config["cage"].get("max_faces", 20))
+    print_terminal_field("cage_fast_closure", on_off_text(config["cage"].get("fast_closure", True)))
+    print_terminal_field("scientific_validation", on_off_text(config["cage"].get("scientific_validation", False)))
     print_terminal_field("hydrate_cluster", on_off_text(config.get("hydrate_cluster", {}).get("enabled", False)))
     print_terminal_field("cluster_min_cage", config.get("hydrate_cluster", {}).get("min_cage", 2))
     print_terminal_field("cluster_detail", on_off_text(config.get("hydrate_cluster", {}).get("detail", False)))
+    print_terminal_field("hydrate_order", hydrate_order_config_text(config))
     print_terminal_field("Q_l", q_config_text(config))
     print_terminal_field("output_layout", config["output"].get("structure_layout", "grouped"))
     print_terminal_field("worker_policy", worker_policy_text(config))
+    print_terminal_field("parallel_backend", parallel_backend)
+    print_terminal_field("math_threads", config.get("parallel", {}).get("math_threads", 1))
     print_terminal_field("workers", workers)
     print("")
 
@@ -247,6 +316,21 @@ def bond_mode_display_name(value: Any) -> str:
     """Return a readable terminal label without changing config identifiers."""
     mode = str(value)
     return BOND_MODE_DISPLAY_NAMES.get(mode, mode)
+
+
+def hydrate_order_config_text(config: dict[str, Any]) -> str:
+    """Render active MCG/DHOP settings for run metadata and the terminal header."""
+    order = config.get("hydrate_order", {})
+    active = []
+    for key, label, default in (
+        ("mcg1_enabled", "MCG-1", True),
+        ("dhop35_enabled", "DHOP35", True),
+        ("mcg3_enabled", "MCG-3", False),
+        ("dhop30_enabled", "DHOP30", False),
+    ):
+        if bool(order.get(key, default)):
+            active.append(label)
+    return ",".join(active) if active else "disabled"
 
 
 def q_config_text(config: dict[str, Any]) -> str:
@@ -568,6 +652,7 @@ class ParallelRunProgressDisplay:
         self.completed = 0
         self.failed = 0
         self._active: dict[int, dict[str, Any]] = {}
+        self._finished: set[int] = set()
         self._lock = Lock()
         self._stop_event = Event()
         self._rendered_lines = 0
@@ -579,10 +664,12 @@ class ParallelRunProgressDisplay:
             self._thread = Thread(target=self._tick, daemon=True)
             self._thread.start()
 
-    def start_file(self, frame_index: int, frame_name: str) -> Callable[[str], None]:
+    def start_file(self, frame_index: int, frame_name: str, started_at: float | None = None) -> Callable[[str], None]:
         """Register an active file and return its stage callback."""
         with self._lock:
-            now = perf_counter()
+            if frame_index in self._finished:
+                return lambda stage: None
+            now = perf_counter() if started_at is None else float(started_at)
             self._active[frame_index] = {
                 "name": frame_name,
                 "stage": "reading frame",
@@ -592,7 +679,7 @@ class ParallelRunProgressDisplay:
             self._render_locked()
         return lambda stage: self.update_stage(frame_index, stage)
 
-    def update_stage(self, frame_index: int, stage: str) -> None:
+    def update_stage(self, frame_index: int, stage: str, started_at: float | None = None) -> None:
         """Update one active file without disturbing other worker states."""
         if stage == "done":
             return
@@ -602,13 +689,16 @@ class ParallelRunProgressDisplay:
                 return
             if stage != state["stage"]:
                 state["stage"] = stage
-                state["stage_started_at"] = perf_counter()
+                state["stage_started_at"] = perf_counter() if started_at is None else float(started_at)
             self._render_locked()
 
     def complete_file(self, frame_index: int, success: bool) -> None:
         """Move one file from the active set into completed results."""
         with self._lock:
+            if frame_index in self._finished:
+                return
             self._active.pop(frame_index, None)
+            self._finished.add(frame_index)
             self.completed += 1
             if not success:
                 self.failed += 1
@@ -745,12 +835,13 @@ def analyze_paths_serial(
     topology: Path | None,
     strict: bool,
     total_started_at: float,
+    total_frames: int | None = None,
 ) -> list[dict[str, Any]]:
     """Analyze frames in input order."""
     rows: list[dict[str, Any]] = []
     frames = read_frames(paths, topology=topology, xtc_stride=int(config["input"].get("xtc_stride", 1)))
     progress = RunProgressDisplay(
-        total=len(paths),
+        total=int(total_frames if total_frames is not None else len(paths)),
         total_started_at=total_started_at,
         include_cluster_stage=bool(config.get("hydrate_cluster", {}).get("enabled", False)),
     )
@@ -770,10 +861,28 @@ def analyze_paths_parallel(
     outdir: Path,
     config: dict[str, Any],
     workers: int,
+    backend: str,
     strict: bool,
     total_started_at: float,
 ) -> list[dict[str, Any]]:
-    """Analyze independent coordinate files with live per-worker stages."""
+    """Analyze independent coordinate files with the selected concurrency backend."""
+    resolved_backend = normalize_parallel_backend(backend)
+    if resolved_backend == "thread":
+        return analyze_paths_threaded(paths, outdir, config, workers, strict, total_started_at)
+    if resolved_backend != "process":
+        raise ValueError("Parallel analysis requires backend=process or backend=thread.")
+    return analyze_paths_processes(paths, outdir, config, workers, strict, total_started_at)
+
+
+def analyze_paths_threaded(
+    paths: list[Path],
+    outdir: Path,
+    config: dict[str, Any],
+    workers: int,
+    strict: bool,
+    total_started_at: float,
+) -> list[dict[str, Any]]:
+    """Compatibility backend using the legacy shared-memory thread pool."""
     rows_by_index: dict[int, dict[str, Any]] = {}
     progress = ParallelRunProgressDisplay(
         total=len(paths),
@@ -801,6 +910,174 @@ def analyze_paths_parallel(
     return [rows_by_index[index] for index in sorted(rows_by_index)]
 
 
+def analyze_paths_processes(
+    paths: list[Path],
+    outdir: Path,
+    config: dict[str, Any],
+    workers: int,
+    strict: bool,
+    total_started_at: float,
+) -> list[dict[str, Any]]:
+    """Use spawned processes so CPU-bound topology search can use multiple cores."""
+    rows_by_index: dict[int, dict[str, Any]] = {}
+    progress = ParallelRunProgressDisplay(
+        total=len(paths),
+        workers=workers,
+        total_started_at=total_started_at,
+        include_cluster_stage=bool(config.get("hydrate_cluster", {}).get("enabled", False)),
+    )
+    context = get_context("spawn")
+    stage_queue = context.Queue()
+    math_threads = int(config.get("parallel", {}).get("math_threads", 1))
+    try:
+        with limited_math_threads(math_threads):
+            with ProcessPoolExecutor(
+                max_workers=workers,
+                mp_context=context,
+                initializer=initialize_file_worker,
+                initargs=(config, str(outdir), strict, stage_queue),
+            ) as executor:
+                task_iterator = iter(enumerate(paths))
+                futures: dict[Any, int] = {}
+                max_in_flight = process_in_flight_limit(workers)
+
+                def fill_queue() -> None:
+                    while len(futures) < max_in_flight:
+                        try:
+                            frame_index, path = next(task_iterator)
+                        except StopIteration:
+                            return
+                        future = executor.submit(process_file_task, frame_index, str(path))
+                        futures[future] = frame_index
+
+                fill_queue()
+                while futures:
+                    drain_process_stage_events(stage_queue, progress)
+                    done, _ = wait(set(futures), timeout=0.1, return_when=FIRST_COMPLETED)
+                    for future in done:
+                        expected_index = futures.pop(future)
+                        try:
+                            frame_index, row = future.result()
+                        except Exception:
+                            progress.complete_file(expected_index, False)
+                            for queued in futures:
+                                queued.cancel()
+                            raise
+                        rows_by_index[frame_index] = row
+                        progress.complete_file(frame_index, row.get("status") == "ok")
+                    fill_queue()
+                drain_process_stage_events(stage_queue, progress)
+    finally:
+        progress.close()
+        stage_queue.close()
+        stage_queue.join_thread()
+    return [rows_by_index[index] for index in sorted(rows_by_index)]
+
+
+def analyze_trajectory_processes(
+    trajectory: Path,
+    topology: Path | None,
+    raw_frame_indexes: list[int],
+    outdir: Path,
+    config: dict[str, Any],
+    workers: int,
+    strict: bool,
+    total_started_at: float,
+) -> list[dict[str, Any]]:
+    """Analyze selected frames with one private MDAnalysis Universe per process."""
+    if topology is None:
+        raise ValueError("XTC/TRR process analysis requires a topology file.")
+    rows_by_index: dict[int, dict[str, Any]] = {}
+    progress = ParallelRunProgressDisplay(
+        total=len(raw_frame_indexes),
+        workers=workers,
+        total_started_at=total_started_at,
+        include_cluster_stage=bool(config.get("hydrate_cluster", {}).get("enabled", False)),
+    )
+    context = get_context("spawn")
+    stage_queue = context.Queue()
+    math_threads = int(config.get("parallel", {}).get("math_threads", 1))
+    try:
+        with limited_math_threads(math_threads):
+            with ProcessPoolExecutor(
+                max_workers=workers,
+                mp_context=context,
+                initializer=initialize_trajectory_worker,
+                initargs=(config, str(outdir), strict, stage_queue, str(trajectory), str(topology)),
+            ) as executor:
+                batch_iterator = iter(trajectory_task_batches(raw_frame_indexes, workers))
+                futures: dict[Any, tuple[tuple[int, int], ...]] = {}
+                max_in_flight = process_in_flight_limit(workers)
+
+                def fill_queue() -> None:
+                    while len(futures) < max_in_flight:
+                        try:
+                            batch = next(batch_iterator)
+                        except StopIteration:
+                            return
+                        future = executor.submit(process_trajectory_batch_task, batch)
+                        futures[future] = batch
+
+                fill_queue()
+                while futures:
+                    drain_process_stage_events(stage_queue, progress)
+                    done, _ = wait(set(futures), timeout=0.1, return_when=FIRST_COMPLETED)
+                    for future in done:
+                        batch = futures.pop(future)
+                        try:
+                            results = future.result()
+                        except Exception:
+                            for frame_index, _ in batch:
+                                progress.complete_file(frame_index, False)
+                            for queued in futures:
+                                queued.cancel()
+                            raise
+                        for frame_index, row in results:
+                            rows_by_index[frame_index] = row
+                    fill_queue()
+                drain_process_stage_events(stage_queue, progress)
+    finally:
+        progress.close()
+        stage_queue.close()
+        stage_queue.join_thread()
+    return [rows_by_index[index] for index in sorted(rows_by_index)]
+
+def process_in_flight_limit(workers: int) -> int:
+    """Bound queued process tasks without reducing active worker capacity."""
+    return max(1, int(workers)) * 3
+
+
+def trajectory_task_batches(
+    raw_frame_indexes: list[int],
+    workers: int,
+) -> list[tuple[tuple[int, int], ...]]:
+    """Group adjacent selected frames into small ordered process tasks."""
+    if not raw_frame_indexes:
+        return []
+    resolved_workers = max(1, int(workers))
+    target_batches = resolved_workers * 4
+    batch_size = max(1, min(8, (len(raw_frame_indexes) + target_batches - 1) // target_batches))
+    indexed = list(enumerate(raw_frame_indexes))
+    return [
+        tuple(indexed[start : start + batch_size])
+        for start in range(0, len(indexed), batch_size)
+    ]
+
+
+def drain_process_stage_events(stage_queue: Any, progress: ParallelRunProgressDisplay) -> None:
+    """Apply every queued worker event in the terminal-owning main process."""
+    while True:
+        try:
+            kind, frame_index, value, timestamp = stage_queue.get_nowait()
+        except Empty:
+            return
+        if kind == "start":
+            progress.start_file(frame_index, value, started_at=timestamp)
+        elif kind == "stage":
+            progress.update_stage(frame_index, value, started_at=timestamp)
+        elif kind == "complete":
+            progress.complete_file(frame_index, value == "ok")
+
 def process_single_file_path(
     frame_index: int,
     path: Path,
@@ -811,7 +1088,12 @@ def process_single_file_path(
 ) -> tuple[int, dict[str, Any]]:
     """Read and analyze one standalone coordinate file."""
     callback = progress.start_file(frame_index, path.name) if progress is not None else None
-    frame = next(iter(read_frames([path])))
+    try:
+        frame = next(iter(read_frames([path])))
+    except Exception as exc:
+        if strict:
+            raise
+        return frame_index, failed_row(path.stem, str(path), str(exc))
     return frame_index, process_frame(
         frame_index,
         frame,
@@ -921,15 +1203,29 @@ def worker_policy_text(config: dict[str, Any]) -> str:
     value = config.get("parallel", {}).get("workers", "auto")
     if value in (None, "", "auto"):
         percent = int(round(mode_worker_fraction(config.get("mode", "50")) * 100))
-        return f"auto ({percent}% of logical CPUs)"
+        return f"auto ({percent}% of available CPUs)"
     return f"explicit ({value})"
 
 
-def resolve_workers(value: Any, n_paths: int, mode: Any = "50", cpu_total: int | None = None) -> int:
-    """Resolve the frame-level worker count and cap it by independent files."""
+def normalize_parallel_backend(value: Any) -> str:
+    """Normalize the supported serial, process, and compatibility thread backends."""
+    backend = str(value or "process").strip().lower()
+    if backend not in {"process", "thread", "serial"}:
+        raise ValueError("parallel.backend / --parallel-backend must be process, thread, or serial.")
+    return backend
+
+
+def resolve_workers(
+    value: Any,
+    n_paths: int,
+    mode: Any = "50",
+    cpu_total: int | None = None,
+    backend: str = "process",
+) -> int:
+    """Resolve file workers and cap them by inputs, affinity, and platform limits."""
     if value in (None, "", "auto"):
-        logical_cpus = max(1, int(cpu_total if cpu_total is not None else (os.cpu_count() or 1)))
-        requested = max(1, int(logical_cpus * mode_worker_fraction(mode)))
+        available_cpus = max(1, int(cpu_total if cpu_total is not None else effective_cpu_count()))
+        requested = max(1, int(available_cpus * mode_worker_fraction(mode)))
     else:
         try:
             requested = int(value)
@@ -937,15 +1233,39 @@ def resolve_workers(value: Any, n_paths: int, mode: Any = "50", cpu_total: int |
             raise ValueError("parallel.workers / --workers must be 'auto' or a positive integer.") from exc
         if requested < 1:
             raise ValueError("parallel.workers / --workers must be 'auto' or a positive integer.")
-    return min(requested, max(1, n_paths))
+    requested = min(requested, max(1, n_paths))
+    if normalize_parallel_backend(backend) == "process":
+        platform_cap = process_worker_cap()
+        if platform_cap is not None:
+            requested = min(requested, platform_cap)
+    return requested
 
+
+def validate_unique_output_names(paths: list[Path]) -> None:
+    """Reject standalone inputs whose stems would write the same frame directory."""
+    grouped: dict[str, list[Path]] = {}
+    for path in paths:
+        grouped.setdefault(path.stem.casefold(), []).append(path)
+    duplicates = [items for items in grouped.values() if len(items) > 1]
+    if not duplicates:
+        return
+    details = "; ".join(", ".join(str(path) for path in items) for items in duplicates)
+    raise ValueError(f"Independent input files must have unique stems; output directory collision: {details}")
 
 def can_parallelize_paths(paths: list[Path], topology: Path | None) -> bool:
-    """Only standalone coordinate files are parallelized in v0.1."""
+    """Return whether every input is an independent coordinate file."""
     if topology is not None:
         return False
     return bool(paths) and all(path.suffix.lower() in PARALLEL_SUFFIXES for path in paths)
 
+
+def can_parallelize_trajectory(paths: list[Path], topology: Path | None) -> bool:
+    """Parallelize frames when one indexed XTC/TRR trajectory has a topology."""
+    return (
+        topology is not None
+        and len(paths) == 1
+        and paths[0].suffix.lower() in {".xtc", ".trr"}
+    )
 
 def apply_cli_overrides(config: dict[str, Any], args: Namespace) -> None:
     """Apply command-line options after YAML/default configuration."""
@@ -970,6 +1290,10 @@ def apply_cli_overrides(config: dict[str, Any], args: Namespace) -> None:
         if args.quasi_max_layer < 1:
             raise ValueError("--quasi-max-layer must be at least 1.")
         config["quasi_cage"]["max_layers"] = args.quasi_max_layer
+    if getattr(args, "quasi_search_policy", None):
+        config["quasi_cage"]["search_policy"] = args.quasi_search_policy
+    if getattr(args, "ring_definition", None):
+        config["ring"]["definition"] = args.ring_definition
     if getattr(args, "no_q", False):
         config["order"]["q_enabled"] = False
     if getattr(args, "q_degree", None):
@@ -989,12 +1313,23 @@ def apply_cli_overrides(config: dict[str, Any], args: Namespace) -> None:
             if count < 1:
                 raise ValueError("--q-n-neighbor must be at least 1 or NULL.")
             config["order"]["q_n_neighbor"] = count
+    if getattr(args, "mcg3", None):
+        config["hydrate_order"]["mcg3_enabled"] = parse_on_off(args.mcg3, "--mcg3")
+    if getattr(args, "dhop30", None):
+        config["hydrate_order"]["dhop30_enabled"] = parse_on_off(args.dhop30, "--dhop30")
     if getattr(args, "cage_size", None):
         config["cage"]["report_types"] = args.cage_size
     if getattr(args, "max_cage_face", None) is not None:
         if args.max_cage_face < 1:
             raise ValueError("--max-cage-face must be at least 1.")
         config["cage"]["max_faces"] = args.max_cage_face
+    if getattr(args, "cage_fast_closure", None):
+        config["cage"]["fast_closure"] = parse_on_off(args.cage_fast_closure, "--cage-fast-closure")
+    if getattr(args, "cage_scientific_validation", None):
+        config["cage"]["scientific_validation"] = parse_on_off(
+            args.cage_scientific_validation,
+            "--cage-scientific-validation",
+        )
     if getattr(args, "hydrate_cluster", None):
         config["hydrate_cluster"]["enabled"] = parse_on_off(args.hydrate_cluster, "--hydrate-cluster")
     if getattr(args, "cluster_min_cage", None) is not None:
@@ -1015,6 +1350,8 @@ def apply_cli_overrides(config: dict[str, Any], args: Namespace) -> None:
         raise ValueError("--bond-mode pairs requires --pairs PAIRS.txt or graph.pair_file in config.yaml.")
     if args.pair_id:
         config["graph"]["pair_id"] = args.pair_id
+    if getattr(args, "parallel_backend", None):
+        config["parallel"]["backend"] = args.parallel_backend
     if args.workers is not None:
         config["parallel"]["workers"] = args.workers
     if getattr(args, "output_layout", None):
@@ -1065,6 +1402,28 @@ def normalize_analysis_scopes(config: dict[str, Any]) -> None:
     config["ring"]["report_sizes"] = ring_report_sizes
     config["cage"]["report_types"] = "all" if report_types is None else list(report_types)
     config["cage"]["max_faces"] = max_faces
+    cage = config.setdefault("cage", {})
+    cage["fast_closure"] = parse_on_off(cage.get("fast_closure", True), "cage.fast_closure")
+    fast_states = int(cage.get("fast_closure_max_states", 20000))
+    if fast_states < 1:
+        raise ValueError("cage.fast_closure_max_states must be at least 1.")
+    cage["fast_closure_max_states"] = fast_states
+    cage["scientific_validation"] = parse_on_off(
+        cage.get("scientific_validation", False),
+        "cage.scientific_validation",
+    )
+    planarity = float(cage.get("max_face_planarity_rms_nm", 0.06))
+    edge_cv = float(cage.get("max_face_edge_cv", 0.35))
+    min_volume = float(cage.get("min_cage_volume_nm3", 1.0e-6))
+    if planarity < 0:
+        raise ValueError("cage.max_face_planarity_rms_nm must be non-negative.")
+    if edge_cv < 0:
+        raise ValueError("cage.max_face_edge_cv must be non-negative.")
+    if min_volume <= 0:
+        raise ValueError("cage.min_cage_volume_nm3 must be positive.")
+    cage["max_face_planarity_rms_nm"] = planarity
+    cage["max_face_edge_cv"] = edge_cv
+    cage["min_cage_volume_nm3"] = min_volume
     hydrate_cluster = config.setdefault("hydrate_cluster", {})
     hydrate_cluster["enabled"] = parse_on_off(hydrate_cluster.get("enabled", False), "hydrate_cluster.enabled")
     min_cage = int(hydrate_cluster.get("min_cage", 2))
@@ -1072,7 +1431,60 @@ def normalize_analysis_scopes(config: dict[str, Any]) -> None:
         raise ValueError("hydrate_cluster.min_cage / --cluster-min-cage must be at least 1.")
     hydrate_cluster["min_cage"] = min_cage
     hydrate_cluster["detail"] = parse_on_off(hydrate_cluster.get("detail", False), "hydrate_cluster.detail")
+    ring_definition = str(config.get("ring", {}).get("definition", "chordless")).strip().lower()
+    if ring_definition not in {"chordless", "shortest_path"}:
+        raise ValueError("ring.definition / --ring-definition must be chordless or shortest_path.")
+    config["ring"]["definition"] = ring_definition
+    quasi_policy = str(config.get("quasi_cage", {}).get("search_policy", "bounded")).strip().lower()
+    if quasi_policy not in {"bounded", "exact"}:
+        raise ValueError("quasi_cage.search_policy / --quasi-search-policy must be bounded or exact.")
+    config["quasi_cage"]["search_policy"] = quasi_policy
+    parallel = config.setdefault("parallel", {})
+    parallel["backend"] = normalize_parallel_backend(parallel.get("backend", "process"))
+    math_threads = int(parallel.get("math_threads", 1))
+    if math_threads < 1:
+        raise ValueError("parallel.math_threads must be at least 1.")
+    parallel["math_threads"] = math_threads
+    guest_center_mode = str(config.get("guest", {}).get("center_mode", "center_atom")).strip().lower()
+    if guest_center_mode not in {"center_atom", "centroid", "auto"}:
+        raise ValueError("guest.center_mode must be center_atom, centroid, or auto.")
+    config["guest"]["center_mode"] = guest_center_mode
     config["order"]["q_degree"] = list(normalize_q_degree(config.get("order", {}).get("q_degree", [6, 12])))
+    hydrate_order = config.setdefault("hydrate_order", {})
+    for key, default in (
+        ("mcg1_enabled", True),
+        ("mcg3_enabled", False),
+        ("dhop35_enabled", True),
+        ("dhop30_enabled", False),
+    ):
+        hydrate_order[key] = parse_on_off(hydrate_order.get(key, default), f"hydrate_order.{key}")
+    positive_values = (
+        ("mcg_guest_cutoff_nm", 0.90),
+        ("mcg_water_cutoff_nm", 0.60),
+        ("dhop_neighbor_cutoff_nm", 0.35),
+    )
+    for key, default in positive_values:
+        value = float(hydrate_order.get(key, default))
+        if value <= 0:
+            raise ValueError(f"hydrate_order.{key} must be positive.")
+        hydrate_order[key] = value
+    cone_angle = float(hydrate_order.get("mcg_cone_half_angle_deg", 45.0))
+    if not 0 < cone_angle < 90:
+        raise ValueError("hydrate_order.mcg_cone_half_angle_deg must be between 0 and 90.")
+    hydrate_order["mcg_cone_half_angle_deg"] = cone_angle
+    for key, default in (("mcg_min_waters", 5), ("dhop_min_qualified_neighbors", 3)):
+        value = int(hydrate_order.get(key, default))
+        if value < 1:
+            raise ValueError(f"hydrate_order.{key} must be at least 1.")
+        hydrate_order[key] = value
+    planar_counts = sorted({int(value) for value in hydrate_order.get("dhop_planar_counts", [11, 12])})
+    if not planar_counts or planar_counts[0] < 0:
+        raise ValueError("hydrate_order.dhop_planar_counts must contain non-negative integers.")
+    hydrate_order["dhop_planar_counts"] = planar_counts
+    guest_names = [str(value).strip() for value in hydrate_order.get("mcg_guest_resnames", ["CH4", "MET"]) if str(value).strip()]
+    if not guest_names:
+        raise ValueError("hydrate_order.mcg_guest_resnames must contain at least one residue name.")
+    hydrate_order["mcg_guest_resnames"] = guest_names
 
 
 def parse_on_off(value: Any, key: str) -> bool:
@@ -1170,6 +1582,7 @@ def analyze_frame(
         frame.atoms,
         resnames=set(config["guest"]["resnames"]),
         center_atoms=config["guest"].get("center_atoms", {}),
+        center_mode=str(config["guest"].get("center_mode", "center_atom")),
     )
     # All structure classifiers consume the same water graph.
     report_stage(stage_callback, "building water graph")
@@ -1189,7 +1602,17 @@ def analyze_frame(
         graph.adjacency,
         sizes=ring_sizes,
         chordless=bool(config["ring"]["chordless"]),
+        definition=str(config["ring"].get("definition", "chordless")),
     )
+    scientific_validation = bool(config["cage"].get("scientific_validation", False))
+    hydrate_cluster_enabled = bool(config.get("hydrate_cluster", {}).get("enabled", False))
+    ring_topology = build_ring_topology_index(
+        frame,
+        rings,
+        compute_face_quality=scientific_validation,
+        compute_face_normals=hydrate_cluster_enabled,
+    )
+    warnings: list[str] = []
     report_stage(stage_callback, "searching half/quasi cage")
     half_cages, quasi_cages = find_cage_patches(
         frame,
@@ -1203,8 +1626,10 @@ def analyze_frame(
         max_layer_states_per_seed=int(config["quasi_cage"].get("max_layer_states_per_seed", 200)),
         max_candidates_per_edge=int(config["quasi_cage"].get("max_candidates_per_edge", 4)),
         max_layer_candidates=int(config["quasi_cage"].get("max_layer_candidates", 24)),
+        topology_index=ring_topology,
+        search_policy=str(config["quasi_cage"].get("search_policy", "bounded")),
+        warnings=warnings,
     )
-    warnings = []
     cage_seed_patches = [*half_cages, *quasi_cages]
     report_stage(stage_callback, "searching cage")
     all_cages = find_cages(
@@ -1222,29 +1647,28 @@ def analyze_frame(
         max_boundary_candidates=int(config["cage"].get("max_boundary_candidates", 8)),
         occupancy_radius_nm=float(config["cage"].get("occupancy_radius_nm", 0.5)),
         occupancy_mode=str(config["cage"].get("occupancy_mode", "polyhedron")),
+        fast_closure=bool(config["cage"].get("fast_closure", True)),
+        fast_closure_max_states=int(config["cage"].get("fast_closure_max_states", 20000)),
+        scientific_validation=scientific_validation,
+        max_face_planarity_rms_nm=float(config["cage"].get("max_face_planarity_rms_nm", 0.06)),
+        max_face_edge_cv=float(config["cage"].get("max_face_edge_cv", 0.35)),
+        min_cage_volume_nm3=float(config["cage"].get("min_cage_volume_nm3", 1.0e-6)),
+        topology_index=ring_topology,
         warnings=warnings,
     )
     cages = select_reported_cages(all_cages, cage_report_types)
-    hydrate_cluster_enabled = bool(config.get("hydrate_cluster", {}).get("enabled", False))
     hydrate_cluster_detail = bool(config.get("hydrate_cluster", {}).get("detail", False))
     if hydrate_cluster_enabled:
         report_stage(stage_callback, "classifying hydrate cluster")
-        ring_sizes_by_id = {
-            ring.object_id: ring.size
-            for ring_group in rings.values()
-            for ring in ring_group
-        }
-        rings_by_id = {
-            ring.object_id: ring
-            for ring_group in rings.values()
-            for ring in ring_group
-        }
+        rings_by_id = ring_topology.ring_by_id
+        ring_sizes_by_id = {ring_id: ring.size for ring_id, ring in rings_by_id.items()}
         hydrate_clusters, hydrate_motifs, hydrate_domains, isolated_cage_ids = analyze_hydrate_clusters(
             cages,
             min_cage=int(config.get("hydrate_cluster", {}).get("min_cage", 2)),
             ring_sizes=ring_sizes_by_id,
             frame=frame,
             rings_by_id=rings_by_id,
+            face_geometries=ring_topology.face_geometries(),
         )
     else:
         hydrate_clusters, hydrate_motifs, hydrate_domains, isolated_cage_ids = [], [], [], ()
@@ -1264,6 +1688,15 @@ def analyze_frame(
         q_n_neighbor=config["order"].get("q_n_neighbor", None),
         q_degree=config["order"].get("q_degree", [6, 12]),
         focus_resids=focus_resids,
+    )
+    hydrate_order_config = config.get("hydrate_order", {})
+    mcg1, mcg3 = compute_mcg_order(frame, waters, guests, hydrate_order_config)
+    dhop35, dhop30 = compute_dhop_order(frame, waters, hydrate_order_config)
+    hydrate_order = HydrateOrderResult(
+        mcg1=mcg1,
+        dhop35=dhop35,
+        mcg3=mcg3,
+        dhop30=dhop30,
     )
     report_stage(stage_callback, "classifying ice")
     ice_classes = classify_ice_waters(
@@ -1295,6 +1728,7 @@ def analyze_frame(
         hydrate_domains=hydrate_domains,
         isolated_cage_ids=isolated_cage_ids,
         f3f4=f3f4,
+        hydrate_order=hydrate_order,
         ice_like_waters=ice_classes.ice_like,
         ice_i_waters=ice_classes.ice_i,
         interfacial_ice_waters=ice_classes.interfacial,
@@ -1307,19 +1741,48 @@ def filter_free_patches(
     cages: list[Cage],
     higher_priority_patches: list[CagePatch] | None = None,
 ) -> list[CagePatch]:
-    """Remove patches consumed by cages or already reported as a higher-priority class."""
-    cage_ring_sets = [set(cage.rings) for cage in cages]
-    higher_priority_ring_sets = [set(patch.rings) for patch in higher_priority_patches or []]
+    """Remove consumed patches using ring-to-owner inverted indexes."""
+    cage_ring_sets = [frozenset(cage.rings) for cage in cages]
+    higher_priority_ring_sets = [frozenset(patch.rings) for patch in higher_priority_patches or []]
+    cage_index = subset_owner_index(cage_ring_sets)
+    higher_index = subset_owner_index(higher_priority_ring_sets)
     free_patches = []
     for patch in patches:
-        patch_rings = set(patch.rings)
-        if any(patch_rings <= cage_rings for cage_rings in cage_ring_sets):
+        patch_rings = frozenset(patch.rings)
+        if is_subset_of_indexed_owner(patch_rings, cage_ring_sets, cage_index, strict=False):
             continue
-        if any(patch_rings < higher_priority_rings for higher_priority_rings in higher_priority_ring_sets):
+        if is_subset_of_indexed_owner(patch_rings, higher_priority_ring_sets, higher_index, strict=True):
             continue
         free_patches.append(patch)
     return free_patches
 
+
+def subset_owner_index(ring_sets: list[frozenset[str]]) -> dict[str, set[int]]:
+    """Index candidate supersets by every ring they contain."""
+    owners: dict[str, set[int]] = {}
+    for index, ring_ids in enumerate(ring_sets):
+        for ring_id in ring_ids:
+            owners.setdefault(ring_id, set()).add(index)
+    return owners
+
+
+def is_subset_of_indexed_owner(
+    ring_ids: frozenset[str],
+    owners: list[frozenset[str]],
+    index: dict[str, set[int]],
+    *,
+    strict: bool,
+) -> bool:
+    """Test subset ownership after narrowing candidates by the rarest ring."""
+    if not ring_ids:
+        return any((not strict) or bool(owner) for owner in owners)
+    if any(ring_id not in index for ring_id in ring_ids):
+        return False
+    anchor = min(ring_ids, key=lambda ring_id: len(index[ring_id]))
+    return any(
+        ring_ids < owners[owner_index] if strict else ring_ids <= owners[owner_index]
+        for owner_index in index[anchor]
+    )
 
 def resolve_size_list(value: Any, fallback: list[int], key: str) -> list[int]:
     """Resolve ring-size settings, allowing patch sizes to follow ring sizes."""

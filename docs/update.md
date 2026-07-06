@@ -2,6 +2,119 @@
 
 This file records versioned update notes. New releases should be appended above older entries.
 
+## Version 0.2.3
+
+### Short Summary
+
+Version 0.2.3 adds true process-based multi-core analysis for independent GRO/XYZ files and selected XTC/TRR frames, accelerates the water graph, ring DFS, bounded quasi-cage growth, cage target pruning, order-parameter calculation, and shared cluster geometry, and retains the established `chordless`/`bounded` default results. It also adds MCG-1 and DHOP35 hydrate-nucleation order parameters by default, with optional MCG-3 and DHOP30 switches. Optional `shortest_path` rings and `exact` quasi-cage growth expose stricter or more complete searches explicitly. The release includes indexed half-cage closure, exact local sH cage-face fingerprints, unified sI/sII/sH domain expansion, and opt-in scientific cage validation. Non-orthogonal/triclinic boxes are not part of this update.
+
+### Parallel and Search Performance
+
+1. Process-based multi-core execution
+   - Replaced the default independent-file `ThreadPoolExecutor` path with spawned `ProcessPoolExecutor` workers, so Python ring/quasi/cage loops can execute on separate CPU cores rather than sharing one GIL.
+   - The main process alone renders progress and writes the global workbook. Workers receive configuration once, read and write one frame at a time, publish compact stage events through a process queue, and return one summary row.
+   - `parallel.backend` defaults to `process`; `thread` remains a compatibility backend and `serial` provides one-process comparison. `--parallel-backend` selects the backend directly.
+   - `parallel.math_threads` defaults to `1` and controls inherited OpenMP, OpenBLAS, MKL, Accelerate, NumExpr, and BLIS thread limits to prevent nested oversubscription.
+   - Worker resolution uses CPUs available to the current process, the mode fraction, task count, and the Windows process-pool cap. Duplicate case-insensitive standalone file stems are rejected before concurrent output can collide.
+   - A single indexed XTC/TRR trajectory can distribute selected raw frame indexes across workers. Every worker opens one private MDAnalysis Universe; coordinate arrays are not serialized from the parent.
+   - Process submission uses a rolling queue capped at `3 * workers` tasks. This bounds Future/pickle overhead without reducing concurrency: 100 effective workers can still execute 100 tasks while keeping at most 300 submitted.
+   - Selected trajectory indexes are grouped into contiguous batches sized automatically from 1 to 8. Parent and worker MDAnalysis readers are explicitly closed after use.
+
+2. Water graph and ring search
+   - Uses MDAnalysis `self_capped_distance` to generate orthorhombic cutoff candidates when available, then rechecks every distance and hydrogen-bond angle with the established float64 SQQ logic. The prior cell list remains the fallback.
+   - Pre-sorts graph adjacency once, represents path membership with integer bits, rejects chords while extending the DFS, and removes reverse-direction duplicates before final canonical ordering.
+   - `ring.definition: chordless` remains the default. `ring.definition: shortest_path` / `--ring-definition shortest_path` additionally applies the Franzblau all-pairs shortest-path criterion and can therefore change downstream patch/cage results.
+   - Shortest-path validation caches each bounded BFS distance map by source and depth for the current frame; acceptance rules are unchanged.
+
+3. Bounded and exact quasi-cage policies
+   - `quasi_cage.search_policy: bounded` remains the default and preserves the established candidate limits and large-frontier representation.
+   - L1 candidate lists now use precomputed adjacent-list compatibility and forward checking; repeated distance, expansion, geometry, growth-edge, and adjacency work is cached per frame.
+   - Patch subset filtering uses ring-to-patch inverted indexes instead of scanning every pair.
+   - `quasi_cage.search_policy: exact` / `--quasi-search-policy exact` enumerates connected outer-layer subsets up to `max_rings_per_layer` and preserves distinct `(patch, frontier)` states. It can add L2/L3 half-layers that bounded local neighborhoods do not represent.
+   - Candidate, wall-combination, and layer-state limits now add explicit frame warnings instead of truncating silently.
+   - Connected-subset, patch, and frontier identities use integer masks internally while preserving the existing deterministic traversal and output order.
+
+4. Cage target and edge-state pruning
+   - Each grow state carries the cage compositions still compatible with its 4/5/6 face counts; branches that fit no single target stop immediately instead of surviving under merged per-size maxima.
+   - Face membership, edge-used-once, and edge-used-twice state is represented with integer bitsets. Adding a face promotes shared edges without copying a complete edge-count dictionary.
+   - Edge-to-ring choices and compatible target compositions are also represented as bitmasks. Remaining face-edge incidence and parity provide exact necessary-condition pruning before a branch is expanded.
+   - The minimum-remaining-value boundary-edge rule and deterministic candidate ranking are retained. Exceeding `cage.max_boundary_candidates` is reported as a frame warning.
+
+5. Shared hydrate-cluster geometry and active guest centers
+   - Ring plane centers/normals can be cached in the shared `RingTopologyIndex` and reused by hydrate-cluster shared-face resolution; sI/sII/sH fingerprints and growth rules are unchanged.
+   - The cluster/domain hierarchy follows the HTR+ cage-graph concept (DOI 10.1088/1361-648X/ad52df) while retaining SQQ's explicit labelled-face fingerprints, strict seeds, and deterministic boundary rules.
+   - `guest.center_mode` is now active: `center_atom`/`auto` uses a configured center atom when present and falls back to the residue centroid; `centroid` always uses the residue centroid.
+   - Historical no-op defaults `ring.primitive` and `quasi_cage.mode` are no longer emitted. Explicit behavior is controlled by `ring.definition` and `quasi_cage.search_policy`.
+
+6. Equivalent order and geometry calculation
+   - F3 and graph-mode Q_l reuse one PBC-aware graph-neighbor vector cache. Cutoff/nearest/LAMMPS Q_l candidates are built once per pair, and every requested degree shares normalized vectors and spherical angles.
+   - Spherical-harmonic normalization constants are cached. When both ring normals and scientific face-quality values are required, one SVD supplies both rather than fitting the face twice.
+
+7. Verification
+   - Added process policy/spawn integration tests, serial/process row-equivalence coverage, incremental ring and shortest-path tests, exact connected-layer tests, target/edge-budget tests, Q_l cache reference tests, trajectory batching/cleanup tests, and existing cluster/quasi regression coverage.
+   - All 70 tests pass. The search/cache-only code completed the local `1200ns.gro` serial run in 18.2 s versus the 26.6 s pre-refinement baseline. The current default run including MCG-1 and DHOP35 completed in about 21.6 s; every overlapping pre-existing analysis column matched the earlier workbook.
+   - The scheduling and search-cache refinements add no scientific-value change. The MCG/DHOP addition below intentionally adds `hydrate_order`, two optional CLI switches, and frame-level order-parameter output columns without changing pre-existing graph, ring, half/quasi, cage, cluster, occupancy, F3/F4/Q_l, or ice values.
+   - The current implementation intentionally retains the existing orthorhombic box representation. GRO nine-term boxes and non-orthogonal/triclinic minimum-image support remain out of scope.
+
+### MCG and DHOP Hydrate-Nucleation Order Parameters
+
+1. Defaults and controls
+   - Added `hydrate_order` configuration. MCG-1 and DHOP35 are enabled by default; MCG-3 and DHOP30 remain off unless enabled with `--mcg3 on` and `--dhop30 on` or YAML.
+   - MCG defaults to methane-like residue names `CH4` and `MET`, a 0.90 nm guest-pair cutoff, a 0.60 nm shared-water cutoff, opposing 45-degree cones, and at least five coordinated waters.
+   - DHOP uses a dedicated O-O graph with a 0.35 nm default cutoff for the all-atom TIP4P/Ice workflow. The cutoff is configurable, including 0.325 nm for the original mW-water definition. The DHOP35/DHOP30 names refer to angular thresholds.
+
+2. Corrected and bounded implementation
+   - MCG accepts five **or more** coordinating waters, builds connectivity only from qualifying MCG edges, and applies MCG-1/MCG-3 as one-pass degree filters before deterministic connected components.
+   - DHOP evaluates each undirected central O-O bond once, accumulates the equivalent directed-center counts for both endpoints, accepts counts 11 or 12, applies the three-qualified-neighbor criterion, includes the first neighbor shell, and reports the largest tagged-water component.
+   - Orthorhombic-PBC cutoff candidates use deterministic cell lists followed by exact float64 minimum-image checks. Dynamic adjacency sets remove the fixed neighbor and atom-index array limits in the reference companion program.
+   - The implementation intentionally does not copy the companion code's hard-coded residue names, O(N^2) loops, uninitialized arrays, exactly-five-water MCG test, truncated Perl neighbor readers, or non-qualifying guest-distance links.
+
+3. Output and compatibility
+   - Per-frame `*_info.md` adds `Hydrate Nucleation Order Parameters` immediately after the existing F3/F4/Q_l section, reporting largest cluster size and member type. An unavailable MCG guest selection is `N/A`, distinct from a valid zero-sized cluster.
+   - `summary.xlsx` adds `MCG-1` and `DHOP35` to `order_parameter`; `MCG-3` and `DHOP30` columns appear only when enabled.
+   - These descriptors are read-only analyses. They do not change the active water graph, rings, half/quasi cages, closed cages, occupancy, cage-based hydrate clusters, F3/F4/Q_l, or ice classification. Existing scientific outputs retain their values; the order-parameter output schema gains the new columns and section.
+
+4. Reference validation
+   - On the published companion `panding.gro` sample (300 methane and 3487 water molecules), corrected SQQ geometry gives MCG-1=227, MCG-3=167, DHOP35=1112, and DHOP30=1009 with the 0.35 nm all-atom cutoff.
+   - References: Barnes et al., MCG (DOI 10.1063/1.4871898); Knott et al., MCG nucleation coordinate (DOI 10.1021/jp507959q); DeFever and Sarupria, DHOP (DOI 10.1063/1.4996132); Li et al., all-atom hydrate nucleation (DOI 10.1073/pnas.2011755117).
+
+### Main Changes
+
+1. Equivalent quasi-cage search acceleration
+   - Reuses the existing graph-edge-to-ring reverse index to construct candidate-ring adjacency from shared bonds instead of repeatedly comparing every candidate-ring pair.
+   - Caches ring-center distances used for deterministic candidate ranking.
+   - Caches L2/L3 expansion units by the sorted patch and frontier ring identifiers while retaining the existing per-seed state budget and ordered growth rules.
+   - Rejects already-seen half-cage or quasi-cage ring sets before PBC unwrapping and patch-center construction, and reuses geometry for identical ring sets within one frame.
+   - The compatible default remains `quasi_cage.search_policy: bounded` with `max_layers: 1`; opt-in `exact` is explicit, and no hidden frame-global state cap is introduced.
+   - Added focused regression coverage for indexed adjacency, connected growth units, open L2 half-layers, distance/geometry caches, and max-layer behavior. Exact comparison against tag `v0.2.2` matched half/quasi results for `max_layers = 1/2/3`.
+
+2. sH phase topology and domain growth
+   - Added strict local sH fingerprints for `5^12`, `4^3 5^6 6^3`, and `5^12 6^8`, keyed by neighboring cage type and shared-face size.
+   - The ideal fingerprints distinguish pentagonal `5^12` contacts, square medium-medium contacts, equatorial medium-large hexagonal contacts, and axial large-large hexagonal contacts. Shared-face incidence counts follow the ideal sH cell ratio `3:2:1`.
+   - Retained the existing two-anchor composite sH seed as supplemental high-confidence evidence rather than the only sH recognition path.
+   - Extended the existing compatible-edge, two-contact growth rule to sH, so all three hydrate phases use the same deterministic expansion and exclusive-domain construction.
+   - Added regression coverage for a complete 24-cage synthetic sH face graph while preserving the prior composite-seed test.
+
+3. Shared ring topology and indexed half-cage closure
+   - Added one frame-local ring topology index containing `ring_by_id`, locally unwrapped ring centers, `edge_to_ring_ids`, ring adjacency, and a shared symmetric distance cache.
+   - Half/quasi and cage analysis now reuse the same topology object instead of rebuilding ring centers and edge incidence independently.
+   - Added deterministic indexed closure of connected two-, three-, and four-half-cage combinations. Face-count overflow and edge overuse are pruned before ordinary closed-polyhedron validation.
+   - Generic grow remains the normal path and its detections are retained first. Fast closure is skipped when grow finishes within its budgets; if grow reaches a state limit, the recovery path can add a missed standard shell without discarding grow results.
+   - `cage.fast_closure` defaults to `true`, `cage.fast_closure_max_states` defaults to `20000`, and `--cage-fast-closure on/off` provides direct comparison control.
+   - On `1200ns.gro`, fast closure off/on completed in 32.25/32.35 s and all ten analysis sheets matched exactly; the recovery traversal was skipped because grow finished within budget.
+
+4. Optional scientific cage validation
+   - Added PBC-aware SVD face-planarity RMS, cyclic edge-length coefficient of variation, and projected-area measurements.
+   - Added edge-connected face-shell and cyclic vertex-link checks to reject disconnected, pinched, or non-manifold shell topology.
+   - Added oriented triangle-shell volume validation and tetrahedral volume-centroid calculation.
+   - `cage.scientific_validation` defaults to `false` and is enabled with `--cage-scientific-validation on`. Default runs retain the prior topological acceptance and mean-water cage center.
+   - When enabled, the explicit defaults are `max_face_planarity_rms_nm: 0.06`, `max_face_edge_cv: 0.35`, and `min_cage_volume_nm3: 1.0e-6`. Enabling the option can remove distorted cages and can change occupancy, ownership-filtered free-ring/free-patch output, or geometry-resolved cluster edges; raw ring/patch search, order, and ice calculations are unchanged.
+   - On `1200ns.gro`, enabling the default scientific thresholds reduced accepted cages from 301 to 290 while leaving order-parameter and ice sheets unchanged.
+
+5. Package version
+   - Updated `pyproject.toml` and `sqq.__version__` from `0.2.2` to `0.2.3`.
+   - Updated current-release references in the README and design documentation.
+
 ## Version 0.2.2
 
 ### Short Summary

@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 """Shared data models for one SQQ analysis run."""
 
@@ -234,6 +234,26 @@ class F3F4Result:
     q_n_neighbor: int | None = None
 
 
+@dataclass(frozen=True)
+class ClusterOrderValue:
+    """Largest connected component for one hydrate nucleation order parameter."""
+
+    largest_cluster_size: int | None
+    members: tuple[int, ...] = ()
+    eligible_count: int = 0
+    member_type: str = ""
+
+
+@dataclass(frozen=True)
+class HydrateOrderResult:
+    """MCG and DHOP values reported for one frame."""
+
+    mcg1: ClusterOrderValue
+    dhop35: ClusterOrderValue
+    mcg3: ClusterOrderValue | None = None
+    dhop30: ClusterOrderValue | None = None
+
+
 # FrameResult carries both raw selections and derived topology for exporters.
 @dataclass
 class GraphResult:
@@ -262,6 +282,7 @@ class FrameResult:
     hydrate_domains: list[HydrateDomain] = field(default_factory=list)
     isolated_cage_ids: tuple[str, ...] = ()
     f3f4: F3F4Result | None = None
+    hydrate_order: HydrateOrderResult | None = None
     ice_like_waters: tuple[int, ...] = ()
     ice_i_waters: tuple[int, ...] = ()
     interfacial_ice_waters: tuple[int, ...] = ()

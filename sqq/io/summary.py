@@ -101,6 +101,10 @@ SUMMARY_COLUMNS = [
     "largest_cluster_cage_count",
     "largest_cluster_water_count",
     "cluster_size_distribution",
+    "MCG1_largest_cluster",
+    "DHOP35_largest_cluster",
+    "MCG3_largest_cluster",
+    "DHOP30_largest_cluster",
     "F3_mean",
     "F4_mean",
     "q6_mean",
@@ -246,6 +250,12 @@ def result_row(result: FrameResult) -> dict[str, Any]:
         "largest_cluster_cage_count": 0 if largest_cluster is None else largest_cluster.cage_count,
         "largest_cluster_water_count": 0 if largest_cluster is None else largest_cluster.water_count,
         "cluster_size_distribution": cluster_size_distribution(result.hydrate_clusters),
+        "MCG1_largest_cluster": None if result.hydrate_order is None else result.hydrate_order.mcg1.largest_cluster_size,
+        "DHOP35_largest_cluster": None if result.hydrate_order is None else result.hydrate_order.dhop35.largest_cluster_size,
+        "MCG3_largest_cluster": None if result.hydrate_order is None or result.hydrate_order.mcg3 is None else result.hydrate_order.mcg3.largest_cluster_size,
+        "DHOP30_largest_cluster": None if result.hydrate_order is None or result.hydrate_order.dhop30 is None else result.hydrate_order.dhop30.largest_cluster_size,
+        "MCG3_enabled": result.hydrate_order is not None and result.hydrate_order.mcg3 is not None,
+        "DHOP30_enabled": result.hydrate_order is not None and result.hydrate_order.dhop30 is not None,
         "hydrate_cluster_detail": cluster_details,
         "hydrate_domain_detail": domain_details,
         "F3_mean": None if f3f4 is None else f3f4.f3_mean,
@@ -913,6 +923,23 @@ def write_frame_info(result: FrameResult, frame_dir: Path, ring_sizes: list[int]
             order_rows[index].extend([row.get(f"{prefix}_focus_count"), row.get(f"{prefix}_focus_mean")])
     lines.extend(section_table("Order Parameters", order_headers, order_rows))
 
+    if result.hydrate_order is not None:
+        hydrate_order_rows = [
+            ["MCG-1", order_size_label(result.hydrate_order.mcg1.largest_cluster_size), result.hydrate_order.mcg1.member_type],
+            ["DHOP35", order_size_label(result.hydrate_order.dhop35.largest_cluster_size), result.hydrate_order.dhop35.member_type],
+        ]
+        if result.hydrate_order.mcg3 is not None:
+            hydrate_order_rows.append(["MCG-3", order_size_label(result.hydrate_order.mcg3.largest_cluster_size), result.hydrate_order.mcg3.member_type])
+        if result.hydrate_order.dhop30 is not None:
+            hydrate_order_rows.append(["DHOP30", order_size_label(result.hydrate_order.dhop30.largest_cluster_size), result.hydrate_order.dhop30.member_type])
+        lines.extend(
+            section_table(
+                "Hydrate Nucleation Order Parameters",
+                ["parameter", "largest cluster", "member type"],
+                hydrate_order_rows,
+            )
+        )
+
     ice_rows = [
         ["ice_like_waters", row["ice_like_waters"]],
         ["ice_i_waters", row["ice_i_waters"]],
@@ -923,6 +950,11 @@ def write_frame_info(result: FrameResult, frame_dir: Path, ring_sizes: list[int]
         lines.extend(["", "## Warnings", ""])
         lines.extend(f"- {warning}" for warning in result.warnings)
     (frame_dir / f"{result.frame.name}_info.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def order_size_label(value: int | None) -> int | str:
+    """Render unavailable order parameters explicitly without conflating them with zero."""
+    return "N/A" if value is None else value
 
 
 def section_table(title: str, headers: list[str], rows: list[list[Any]]) -> list[str]:
@@ -1515,19 +1547,26 @@ def summary_dashboard_table(data: pd.DataFrame, run_info: dict[str, Any], config
         ["Graph mode", first_data_value(data, "connection_mode", run_info.get("graph_mode", ""))],
         ["Search sizes", excel_scalar(config.get("ring", {}).get("sizes", ""))],
         ["Ring report sizes", excel_scalar(configured_ring_report_sizes(config))],
+        ["Ring definition", config.get("ring", {}).get("definition", "chordless")],
         ["Quasi-cage sizes", f"{excel_scalar(config.get('quasi_cage', {}).get('base_sizes', 'auto'))} / {excel_scalar(config.get('quasi_cage', {}).get('side_sizes', 'auto'))}"],
         ["Quasi max layer", config.get("quasi_cage", {}).get("max_layers", "")],
+        ["Quasi search policy", config.get("quasi_cage", {}).get("search_policy", "bounded")],
         ["Cage report types", dashboard_cage_targets(config)],
         ["Maximum cage face", config.get("cage", {}).get("max_faces", 20)],
         ["Hydrate cluster", "on" if config.get("hydrate_cluster", {}).get("enabled", False) else "off"],
         ["Cluster min cage", config.get("hydrate_cluster", {}).get("min_cage", 2)],
         ["Cluster detail", "on" if config.get("hydrate_cluster", {}).get("detail", False) else "off"],
+        ["Hydrate order", run_info.get("hydrate_order", "")],
+        ["MCG guest / water cutoff (nm)", f"{config.get('hydrate_order', {}).get('mcg_guest_cutoff_nm', 0.90)} / {config.get('hydrate_order', {}).get('mcg_water_cutoff_nm', 0.60)}"],
+        ["DHOP O-O cutoff (nm)", config.get("hydrate_order", {}).get("dhop_neighbor_cutoff_nm", 0.35)],
         ["Q_l degree", excel_scalar(config.get("order", {}).get("q_degree", [6, 12]))],
         ["Q_l neighbor mode", config.get("order", {}).get("q_neighbor_mode", "graph")],
         ["Q_l cutoff (nm)", config.get("order", {}).get("q_cutoff_nm", 0.35)],
         ["Q_l n neighbor", config.get("order", {}).get("q_n_neighbor", "NULL")],
         ["Output layout", run_info.get("output_layout", "")],
         ["Worker policy", run_info.get("worker_policy", "")],
+        ["Parallel backend", run_info.get("parallel_backend", "serial")],
+        ["Math threads per worker", run_info.get("math_threads", 1)],
         ["Workers", run_info.get("workers", "")],
         ["", ""],
         ["Analysis Results", ""],
@@ -2006,7 +2045,7 @@ def summary_simple_table(data: pd.DataFrame, columns: list[str]) -> pd.DataFrame
 
 
 def order_parameter_summary_table(data: pd.DataFrame) -> pd.DataFrame:
-    """Build the per-frame F3/F4/Q_l order-parameter table."""
+    """Build the per-frame F3/F4/Q_l and hydrate order-parameter table."""
     columns = [
         "frame",
         "time_ps",
@@ -2014,7 +2053,18 @@ def order_parameter_summary_table(data: pd.DataFrame) -> pd.DataFrame:
         "F3_count",
         "F4_mean",
         "F4_count",
+        "MCG1_largest_cluster",
+        "DHOP35_largest_cluster",
     ]
+    optional_columns = (
+        ("MCG3_largest_cluster", "MCG3_enabled"),
+        ("DHOP30_largest_cluster", "DHOP30_enabled"),
+    )
+    for optional, enabled_flag in optional_columns:
+        enabled = enabled_flag in data.columns and data[enabled_flag].fillna(False).astype(bool).any()
+        has_value = optional in data.columns and not data[optional].replace("", pd.NA).isna().all()
+        if enabled or has_value:
+            columns.append(optional)
     for degree in q_degree_from_data(data):
         columns.extend([f"q{degree}_mean", f"q{degree}_count"])
     columns.extend([
@@ -2025,7 +2075,15 @@ def order_parameter_summary_table(data: pd.DataFrame) -> pd.DataFrame:
     ])
     for degree in q_degree_from_data(data):
         columns.extend([f"q{degree}_focus_mean", f"q{degree}_focus_count"])
-    return summary_simple_table(data, columns)
+    table = summary_simple_table(data, columns)
+    return table.rename(
+        columns={
+            "MCG1_largest_cluster": "MCG-1",
+            "DHOP35_largest_cluster": "DHOP35",
+            "MCG3_largest_cluster": "MCG-3",
+            "DHOP30_largest_cluster": "DHOP30",
+        }
+    )
 
 
 def q_degree_from_data(data: pd.DataFrame) -> list[int]:

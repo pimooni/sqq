@@ -7,48 +7,110 @@ from collections import defaultdict
 from ..models import Ring
 
 
-def find_rings(adjacency: dict[int, set[int]], sizes: list[int], chordless: bool = True) -> dict[int, list[Ring]]:
-    """Find primitive candidate rings with a bounded, non-recursive DFS."""
+def find_rings(
+    adjacency: dict[int, set[int]],
+    sizes: list[int],
+    chordless: bool = True,
+    definition: str = "chordless",
+) -> dict[int, list[Ring]]:
+    """Find bounded cycles with incremental chord pruning and symmetry breaking."""
     if not sizes:
         return {}
-    min_size = min(sizes)
+    ring_definition = str(definition or "chordless").strip().lower()
+    if ring_definition not in {"chordless", "shortest_path"}:
+        raise ValueError("ring.definition must be chordless or shortest_path.")
+    require_chordless = bool(chordless) or ring_definition == "shortest_path"
     max_size = max(sizes)
     allowed = set(sizes)
     found: set[tuple[int, ...]] = set()
+    shortest_path_cache: dict[tuple[int, int], dict[int, int]] = {}
     nodes = sorted(adjacency)
+    ordered_neighbors = {node: tuple(sorted(adjacency.get(node, ()))) for node in nodes}
+    bit_for_node = {node: 1 << index for index, node in enumerate(nodes)}
 
     for start in nodes:
-        # Store partial paths explicitly instead of relying on Python recursion.
-        stack: list[list[int]] = [[start]]
+        start_bit = bit_for_node[start]
+        stack: list[tuple[tuple[int, ...], int]] = [((start,), start_bit)]
         while stack:
-            path = stack.pop()
+            path, visited = stack.pop()
             current = path[-1]
-            if len(path) > max_size:
+            if len(path) >= max_size:
                 continue
-            for nb in sorted(adjacency.get(current, ())):
-                if nb == start and len(path) in allowed:
-                    if not chordless or is_chordless(path, adjacency):
-                        found.add(canonical_cycle(path))
+            for neighbor in reversed(ordered_neighbors.get(current, ())):
+                if neighbor <= start or visited & bit_for_node.get(neighbor, 0):
                     continue
-                if len(path) >= max_size:
+                if require_chordless:
+                    earlier_neighbors = adjacency.get(neighbor, set()).intersection(path[:-1])
+                    closes_cycle = len(path) >= 2 and start in earlier_neighbors
+                    if earlier_neighbors - ({start} if closes_cycle else set()):
+                        continue
+                    new_path = (*path, neighbor)
+                    if closes_cycle:
+                        if len(new_path) in allowed and new_path[1] < new_path[-1]:
+                            if ring_definition != "shortest_path" or is_shortest_path_ring(
+                                new_path,
+                                adjacency,
+                                distance_cache=shortest_path_cache,
+                            ):
+                                found.add(canonical_cycle(list(new_path)))
+                        continue
+                    stack.append((new_path, visited | bit_for_node[neighbor]))
                     continue
-                if nb in path:
-                    continue
-                # This ordering rule prevents rediscovering the same cycle from
-                # every node while preserving all canonical cycles.
-                if nb < start:
-                    continue
-                stack.append(path + [nb])
+
+                new_path = (*path, neighbor)
+                if start in adjacency.get(neighbor, set()) and len(new_path) in allowed and new_path[1] < new_path[-1]:
+                    found.add(canonical_cycle(list(new_path)))
+                stack.append((new_path, visited | bit_for_node[neighbor]))
 
     by_size: dict[int, list[Ring]] = defaultdict(list)
     counts: dict[int, int] = defaultdict(int)
     for nodes_tuple in sorted(found, key=lambda item: (len(item), item)):
-        # Stable object ids make downstream membership and GRO output readable.
         size = len(nodes_tuple)
         counts[size] += 1
         by_size[size].append(Ring(object_id=f"ring{size}_{counts[size]:05d}", nodes=nodes_tuple))
     return dict(by_size)
 
+
+def is_shortest_path_ring(
+    path: tuple[int, ...] | list[int],
+    adjacency: dict[int, set[int]],
+    distance_cache: dict[tuple[int, int], dict[int, int]] | None = None,
+) -> bool:
+    """Apply Franzblau's all-pairs shortest-path criterion to one cycle."""
+    cycle = tuple(path)
+    size = len(cycle)
+    max_required = size // 2
+    for source_index, source in enumerate(cycle):
+        cache_key = (source, max_required)
+        distances = None if distance_cache is None else distance_cache.get(cache_key)
+        if distances is None:
+            distances = bounded_graph_distances(source, adjacency, max_required)
+            if distance_cache is not None:
+                distance_cache[cache_key] = distances
+        for target_index in range(source_index + 1, size):
+            along = target_index - source_index
+            cycle_distance = min(along, size - along)
+            if distances.get(cycle[target_index]) != cycle_distance:
+                return False
+    return True
+
+
+def bounded_graph_distances(start: int, adjacency: dict[int, set[int]], limit: int) -> dict[int, int]:
+    """Return BFS distances no farther than the largest distance needed by a ring."""
+    distances = {start: 0}
+    frontier = [start]
+    for depth in range(1, limit + 1):
+        next_frontier: list[int] = []
+        for node in frontier:
+            for neighbor in adjacency.get(node, set()):
+                if neighbor in distances:
+                    continue
+                distances[neighbor] = depth
+                next_frontier.append(neighbor)
+        frontier = next_frontier
+        if not frontier:
+            break
+    return distances
 
 def canonical_cycle(path: list[int]) -> tuple[int, ...]:
     """Return the lexicographically smallest rotation over both directions."""

@@ -29,6 +29,11 @@ PHASE_TEMPLATES: dict[str, dict[str, Counter[tuple[str, int]]]] = {
         "512": Counter({("512", 5): 6, ("51264", 5): 6}),
         "51264": Counter({("512", 5): 12, ("51264", 6): 4}),
     },
+    "sH": {
+        "512": Counter({("512", 5): 4, ("435663", 5): 4, ("51268", 5): 4}),
+        "435663": Counter({("435663", 4): 3, ("512", 5): 6, ("51268", 6): 3}),
+        "51268": Counter({("512", 5): 12, ("435663", 6): 6, ("51268", 6): 2}),
+    },
 }
 STRICT_COUNT_TOLERANCE = 1
 EXPANSION_COUNT_TOLERANCE = 1
@@ -78,6 +83,7 @@ def analyze_hydrate_clusters(
     ring_sizes: dict[str, int] | None = None,
     frame: Frame | None = None,
     rings_by_id: dict[str, Ring] | None = None,
+    face_geometries: dict[str, tuple[np.ndarray, np.ndarray]] | None = None,
 ) -> tuple[list[HydrateCluster], list[HydrateMotif], list[HydrateDomain], tuple[str, ...]]:
     """Build clusters, identify strict phase seeds, and expand phase domains.
 
@@ -89,11 +95,8 @@ def analyze_hydrate_clusters(
     if not cages:
         return [], [], [], ()
 
-    face_geometries = (
-        build_ring_face_geometries(frame, rings_by_id)
-        if frame is not None and rings_by_id is not None
-        else None
-    )
+    if face_geometries is None and frame is not None and rings_by_id is not None:
+        face_geometries = build_ring_face_geometries(frame, rings_by_id)
     adjacency, shared_faces, face_sizes = build_cage_graph(
         cages,
         ring_sizes,
@@ -380,11 +383,11 @@ def find_strict_phase_seeds(
     signatures: dict[int, Counter[tuple[str, int]]],
     evidence: dict[int, dict[tuple[str, int], tuple[tuple[int, str], ...]]],
 ) -> list[PhaseSeed]:
-    """Find strict sI/sII fingerprints and conservative composite sH seeds."""
+    """Find strict local phase fingerprints plus composite sH evidence."""
     found: dict[tuple[str, tuple[int, ...], tuple[int, ...]], PhaseSeed] = {}
     for center in component:
         cage_type = cages[center].cage_type
-        for phase in ("sI", "sII"):
+        for phase in PHASE_TYPES:
             expected = PHASE_TEMPLATES[phase].get(cage_type)
             if expected is None or not strict_signature_match(signatures[center], expected):
                 continue
@@ -461,7 +464,7 @@ def find_s_h_seeds(
     shared_faces: dict[tuple[int, int], set[str]],
     face_sizes: dict[str, int],
 ) -> list[PhaseSeed]:
-    """Find sH seeds without combinatorial subset enumeration."""
+    """Find supplemental high-confidence sH composite seeds."""
     component_set = set(component)
     candidate_pairs: set[tuple[int, int]] = set()
     for small in component:
@@ -525,10 +528,6 @@ def expand_phase_from_seeds(
     if not seed_members:
         return set()
     accepted = set(seed_members)
-    if phase == "sH":
-        # The characteristic sH composite is already broad. Until a canonical
-        # per-cage sH fingerprint is available, overlapping strict seeds expand it.
-        return accepted
 
     compatible_nodes = {
         index
@@ -575,8 +574,6 @@ def phase_edge_compatible(
     pair = edge_key(left, right)
     if pair in seed_edges:
         return True
-    if phase == "sH":
-        return False
     left_expected = PHASE_TEMPLATES[phase].get(cages[left].cage_type)
     right_expected = PHASE_TEMPLATES[phase].get(cages[right].cage_type)
     if left_expected is None or right_expected is None:

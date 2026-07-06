@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 """Trajectory and coordinate readers."""
 
@@ -126,36 +126,73 @@ def read_xyz(path: Path, scale: float = 0.1) -> Frame:
     return Frame(name=path.stem, atoms=atoms, source=path)
 
 
-def read_mdanalysis(path: Path, topology: Path | None, stride: int = 1) -> Iterable[Frame]:
-    """Read XTC/TRR through MDAnalysis using a separate topology file."""
+def open_mdanalysis_universe(path: Path, topology: Path | None):
+    """Open one trajectory with its topology using the optional MDAnalysis runtime."""
     if topology is None:
         raise ValueError("XTC/TRR input requires --top, for example --top topol.gro.")
     try:
         import MDAnalysis as mda
     except ImportError as exc:
         raise RuntimeError("Reading XTC/TRR requires MDAnalysis.") from exc
-
-    universe = mda.Universe(str(topology), str(path))
-    stride = max(1, int(stride))
-    for ts in universe.trajectory[::stride]:
-        # MDAnalysis stores coordinates in Angstrom for GROMACS-like inputs.
-        positions_nm = universe.atoms.positions / 10.0
-        atoms = [
-            Atom(
-                index=index,
-                resid=int(atom.resid),
-                resname=str(atom.resname),
-                atomname=str(atom.name),
-                atomid=int(atom.id),
-                xyz=np.asarray(xyz, dtype=float),
-            )
-            for index, (atom, xyz) in enumerate(zip(universe.atoms, positions_nm, strict=True))
-        ]
-        box = None
-        if ts.dimensions is not None and len(ts.dimensions) >= 3:
-            box = np.asarray(ts.dimensions[:3], dtype=float) / 10.0
-        yield Frame(name=f"{path.stem}_frame{ts.frame:06d}", atoms=atoms, box=box, time_ps=float(ts.time), source=path)
+    return mda.Universe(str(topology), str(path))
 
 
+def close_mdanalysis_universe(universe) -> None:
+    """Close a Universe trajectory reader when the backend exposes close()."""
+    trajectory = getattr(universe, "trajectory", None)
+    close = getattr(trajectory, "close", None)
+    if callable(close):
+        close()
 
+
+def trajectory_frame_indices(path: Path, topology: Path | None, stride: int = 1) -> list[int]:
+    """Return raw trajectory indexes selected by the configured stride."""
+    universe = open_mdanalysis_universe(path, topology)
+    try:
+        step = max(1, int(stride))
+        return list(range(0, len(universe.trajectory), step))
+    finally:
+        close_mdanalysis_universe(universe)
+
+
+def frame_from_mdanalysis_universe(universe, path: Path, raw_frame_index: int) -> Frame:
+    """Materialize one selected MDAnalysis frame as the SQQ data model."""
+    ts = universe.trajectory[int(raw_frame_index)]
+    positions_nm = universe.atoms.positions / 10.0
+    atoms = [
+        Atom(
+            index=index,
+            resid=int(atom.resid),
+            resname=str(atom.resname),
+            atomname=str(atom.name),
+            atomid=int(atom.id),
+            xyz=np.asarray(xyz, dtype=float),
+        )
+        for index, (atom, xyz) in enumerate(zip(universe.atoms, positions_nm, strict=True))
+    ]
+    box = None
+    if ts.dimensions is not None and len(ts.dimensions) >= 3:
+        box = np.asarray(ts.dimensions[:3], dtype=float) / 10.0
+    return Frame(
+        name=f"{path.stem}_frame{ts.frame:06d}",
+        atoms=atoms,
+        box=box,
+        time_ps=float(ts.time),
+        source=path,
+    )
+
+
+def read_mdanalysis(path: Path, topology: Path | None, stride: int = 1) -> Iterable[Frame]:
+    """Read XTC/TRR through MDAnalysis using a separate topology file."""
+    universe = open_mdanalysis_universe(path, topology)
+    try:
+        for raw_frame_index in trajectory_frame_indices_from_length(len(universe.trajectory), stride):
+            yield frame_from_mdanalysis_universe(universe, path, raw_frame_index)
+    finally:
+        close_mdanalysis_universe(universe)
+
+
+def trajectory_frame_indices_from_length(length: int, stride: int = 1) -> range:
+    """Return a lazy raw-index range for an already-open trajectory."""
+    return range(0, int(length), max(1, int(stride)))
 

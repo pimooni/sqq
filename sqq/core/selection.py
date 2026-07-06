@@ -44,8 +44,11 @@ def select_waters(atoms: list[Atom], resnames: set[str], oxygen_names: set[str],
     return waters
 
 
-def select_guests(atoms: list[Atom], resnames: set[str], center_atoms: dict[str, list[str]]) -> list[Guest]:
+def select_guests(atoms: list[Atom], resnames: set[str], center_atoms: dict[str, list[str]], center_mode: str = "center_atom") -> list[Guest]:
     """Group guest residues and select their preferred center atom when present."""
+    mode = str(center_mode or "center_atom").strip().lower()
+    if mode not in {"center_atom", "centroid", "auto"}:
+        raise ValueError("guest.center_mode must be center_atom, centroid, or auto.")
     resname_keys = normalize_names(resnames)
     center_atom_keys = {
         normalize_name(resname): normalize_names(set(atom_names))
@@ -61,7 +64,7 @@ def select_guests(atoms: list[Atom], resnames: set[str], center_atoms: dict[str,
     for (resname_key, resid), indices in sorted(groups.items(), key=lambda item: (item[0][1], item[0][0])):
         resname = atoms[indices[0]].resname
         preferred = center_atom_keys.get(resname_key, set())
-        center = next((idx for idx in indices if normalize_name(atoms[idx].atomname) in preferred), None)
+        center = None if mode == "centroid" else next((idx for idx in indices if normalize_name(atoms[idx].atomname) in preferred), None)
         guests.append(Guest(resid=resid, resname=resname, atoms=tuple(indices), center_atom=center))
     return guests
 

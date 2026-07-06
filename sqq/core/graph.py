@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 """Build the water graph used by rings, open cage patches, cages, and order metrics."""
 
@@ -47,6 +47,7 @@ def build_water_graph(
         a, b = sorted((wa.oxygen, wb.oxygen))
         edges.append((a, b))
 
+    edges.sort()
     adjacency = adjacency_from_edges(waters, edges)
     return GraphResult(mode=mode, edges=edges, adjacency=adjacency)
 
@@ -107,7 +108,47 @@ def water_id_map(atoms: list[Atom], waters: list[Water], pair_id: str) -> dict[i
 
 
 def iter_water_pairs(atoms: list[Atom], waters: list[Water], box: np.ndarray | None, cutoff: float):
-    """Yield water pairs using a small cell list when an orthorhombic box exists."""
+    """Yield cutoff candidates using MDAnalysis, with a deterministic cell-list fallback."""
+    accelerated = mdanalysis_water_pairs(atoms, waters, box, cutoff)
+    if accelerated is not None:
+        yield from accelerated
+        return
+    yield from cell_list_water_pairs(atoms, waters, box, cutoff)
+
+
+def mdanalysis_water_pairs(
+    atoms: list[Atom],
+    waters: list[Water],
+    box: np.ndarray | None,
+    cutoff: float,
+) -> list[tuple[Water, Water]] | None:
+    """Use the installed MDAnalysis neighbor search for an orthorhombic frame."""
+    try:
+        from MDAnalysis.lib.distances import self_capped_distance
+    except ImportError:
+        return None
+    if not waters:
+        return []
+    coordinates = np.asarray([atoms[water.oxygen].xyz for water in waters], dtype=float)
+    dimensions = None
+    if box is not None and len(box) >= 3 and np.all(np.asarray(box[:3], dtype=float) > 0):
+        lengths = np.asarray(box[:3], dtype=float)
+        dimensions = np.asarray([*lengths, 90.0, 90.0, 90.0], dtype=float)
+    try:
+        pairs = self_capped_distance(
+            coordinates,
+            max_cutoff=float(cutoff) + 1.0e-7,
+            box=dimensions,
+            return_distances=False,
+        )
+    except (RuntimeError, ValueError, TypeError):
+        return None
+    normalized = sorted({tuple(sorted((int(left), int(right)))) for left, right in np.asarray(pairs) if left != right})
+    return [(waters[left], waters[right]) for left, right in normalized]
+
+
+def cell_list_water_pairs(atoms: list[Atom], waters: list[Water], box: np.ndarray | None, cutoff: float):
+    """Yield water pairs using the established orthorhombic cell list."""
     if box is None or len(box) < 3 or np.any(np.asarray(box[:3]) <= 0):
         yield from combinations(waters, 2)
         return
@@ -121,7 +162,6 @@ def iter_water_pairs(atoms: list[Atom], waters: list[Water], box: np.ndarray | N
         cells[key].append(water)
 
     visited: set[tuple[int, int]] = set()
-    # Neighboring periodic cells cover all pairs within the cutoff.
     offsets = [(i, j, k) for i in (-1, 0, 1) for j in (-1, 0, 1) for k in (-1, 0, 1)]
     for key, local in cells.items():
         for dx, dy, dz in offsets:
@@ -135,7 +175,6 @@ def iter_water_pairs(atoms: list[Atom], waters: list[Water], box: np.ndarray | N
                         continue
                     visited.add(pair)
                     yield wa, wb
-
 
 def hbond_angle_ok(
     atoms: list[Atom],

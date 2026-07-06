@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 """Closed cage search by ring-face growth and polyhedron validation."""
 
@@ -10,6 +10,13 @@ import numpy as np
 from ..models import Cage, CagePatch, Frame, Guest, Ring
 from .geometry import unwrap_connected_nodes
 from .pbc import distance, minimum_image
+from .ring_topology import (
+    RingFaceQuality,
+    RingTopologyIndex,
+    build_ring_topology_index,
+    measure_ring_face_quality,
+    ring_unwrapped_coordinates,
+)
 
 
 KNOWN_CAGE_TYPES = ["512", "51262", "51263", "51264", "51268", "435663"]
@@ -48,6 +55,13 @@ def find_cages(
     max_boundary_candidates: int = 8,
     occupancy_radius_nm: float = 0.5,
     occupancy_mode: str = "polyhedron",
+    fast_closure: bool = True,
+    fast_closure_max_states: int = 20000,
+    scientific_validation: bool = False,
+    max_face_planarity_rms_nm: float = 0.06,
+    max_face_edge_cv: float = 0.35,
+    min_cage_volume_nm3: float = 1.0e-6,
+    topology_index: RingTopologyIndex | None = None,
     warnings: list[str] | None = None,
 ) -> list[Cage]:
     """Find every Euler-compatible closed cage in the configured face-size scope."""
@@ -62,10 +76,28 @@ def find_cages(
     targets = build_cage_targets(allowed_sizes, max_faces)
     active_sizes = {size for counts in targets.values() for size, count in counts.items() if count > 0}
     all_rings = [ring for group in rings.values() for ring in group if ring.size in allowed_sizes and ring.size in active_sizes]
-    ring_by_id = {ring.object_id: ring for ring in all_rings}
-    ring_centers = build_ring_centers(frame, all_rings)
+    topology = topology_index or build_ring_topology_index(
+        frame,
+        all_rings,
+        compute_face_quality=scientific_validation,
+    )
+    active_ring_ids = {ring.object_id for ring in all_rings}
+    ring_by_id = {
+        ring_id: ring
+        for ring_id, ring in topology.ring_by_id.items()
+        if ring_id in active_ring_ids
+    }
+    ring_centers = {
+        ring_id: center
+        for ring_id, center in topology.ring_centers.items()
+        if ring_id in active_ring_ids
+    }
     # Cage growth is driven by shared boundary edges, not by scanning all faces.
-    edge_to_ring_ids = build_edge_to_ring_ids(all_rings)
+    edge_to_ring_ids = {
+        edge: {ring_id for ring_id in ring_ids if ring_id in active_ring_ids}
+        for edge, ring_ids in topology.edge_to_ring_ids.items()
+        if any(ring_id in active_ring_ids for ring_id in ring_ids)
+    }
     found: dict[frozenset[str], Cage] = {}
     seen_water_keys: set[tuple[str, tuple[int, ...]]] = set()
     type_counts: dict[str, int] = defaultdict(int)
@@ -77,14 +109,34 @@ def find_cages(
         # A face-count match is not enough; the ring patch must be a closed shell.
         if not is_closed_polyhedron(face_rings):
             return
+        unwrapped = cage_unwrapped_nodes(frame, face_rings)
+        if scientific_validation:
+            qualities = {}
+            for ring in face_rings:
+                quality = topology.face_quality.get(ring.object_id)
+                if quality is None:
+                    quality = measure_ring_face_quality(ring_unwrapped_coordinates(frame, ring))
+                    topology.face_quality[ring.object_id] = quality
+                qualities[ring.object_id] = quality
+            geometry = scientific_polyhedron_geometry(
+                face_rings,
+                unwrapped,
+                qualities,
+                max_face_planarity_rms_nm=max_face_planarity_rms_nm,
+                max_face_edge_cv=max_face_edge_cv,
+                min_cage_volume_nm3=min_cage_volume_nm3,
+            )
+            if geometry is None:
+                return
+            center, _ = geometry
+        else:
+            center = np.mean([unwrapped[node] for node in sorted(unwrapped)], axis=0)
         waters = tuple(sorted({node for ring in face_rings for node in ring.nodes}))
         water_key = (cage_type, waters)
         if water_key in seen_water_keys:
             return
         seen_water_keys.add(water_key)
         type_counts[cage_type] += 1
-        unwrapped = cage_unwrapped_nodes(frame, face_rings)
-        center = np.mean([unwrapped[node] for node in sorted(unwrapped)], axis=0)
         guest_ids = assigned_guests(
             frame,
             guests,
@@ -135,6 +187,33 @@ def find_cages(
                 warnings.append(
                     f"Cage search reached cage.max_total_states={max_total_states}; "
                     "increase it for exhaustive cage counts."
+                )
+            if search_status.get("hit_boundary_candidate_limit"):
+                warnings.append(
+                    "Cage search ranked more shared-edge candidates than "
+                    f"cage.max_boundary_candidates={max_boundary_candidates}; increase it for exhaustive branches."
+                )
+        if fast_closure and (search_status["hit_seed_limit"] or search_status["hit_total_limit"]):
+            fast_status = {"hit_state_limit": False}
+            half_patch_sets = [
+                frozenset(patch.rings)
+                for patch in patches
+                if patch.kind == "half_cage"
+            ]
+            for face_ids, cage_type in fast_patch_closure_candidates(
+                half_patch_sets,
+                ring_by_id,
+                targets,
+                max_patches=4,
+                max_states=fast_closure_max_states,
+                status=fast_status,
+            ):
+                add_candidate(face_ids, cage_type)
+            if warnings is not None and fast_status["hit_state_limit"]:
+                warnings.append(
+                    "Cage fast closure reached "
+                    f"cage.fast_closure_max_states={fast_closure_max_states}; "
+                    "generic grow results are still retained."
                 )
     elif mode in {"pair", "patch_pair"}:
         # Compatibility/debug path only: two open-patch boundaries close into a shell.
@@ -245,77 +324,130 @@ def grow_cage_candidates(
     max_boundary_candidates: int,
     status: dict[str, bool] | None = None,
 ):
-    """Yield closed shells grown from open-patch or ring face seeds."""
+    """Yield closed shells using target masks and compact edge-degree bitsets."""
     ring_ids = sorted(ring_by_id)
-    rank = {ring_id: idx for idx, ring_id in enumerate(ring_ids)}
+    rank = {ring_id: index for index, ring_id in enumerate(ring_ids)}
+    ring_bits = {ring_id: 1 << index for index, ring_id in enumerate(ring_ids)}
+    edge_ids = sorted(edge_to_ring_ids)
+    edge_bits = {edge: 1 << index for index, edge in enumerate(edge_ids)}
+    edge_by_bit = {1 << index: edge for index, edge in enumerate(edge_ids)}
+    ring_edge_masks = {
+        ring_id: sum(edge_bits[edge] for edge in ring.edges)
+        for ring_id, ring in ring_by_id.items()
+    }
+    edge_ring_masks = {
+        edge: sum(ring_bits[ring_id] for ring_id in ring_ids)
+        for edge, ring_ids in edge_to_ring_ids.items()
+    }
+    ring_id_by_bit = {bit: ring_id for ring_id, bit in ring_bits.items()}
+    target_names = tuple(targets)
+    all_target_mask = (1 << len(target_names)) - 1
+    target_count_masks = build_target_count_masks(target_names, targets)
     seed_index_by_anchor = build_seed_index_by_anchor(seed_face_sets)
-    max_counts = max_target_face_counts(targets)
-    seen_states: set[frozenset[str]] = set()
+    seen_states: set[int] = set()
     total_states = 0
 
     for seed_index, seed_face_ids in enumerate(seed_face_sets):
-        # Single-ring seeds use rank pruning to avoid rediscovering a shell
-        # from every face. Patch seeds already represent larger directed patches;
-        # allowing lower-ranked added faces avoids missing cages whose complete
-        # shell has an earlier ring outside the selected patch seed.
         seed_rank = rank[next(iter(seed_face_ids))] if len(seed_face_ids) == 1 else -1
-        seed_edge_counts = candidate_edge_counts(seed_face_ids, ring_by_id)
-        if any(count > 2 for count in seed_edge_counts.values()):
+        seed_mask = sum(ring_bits[ring_id] for ring_id in seed_face_ids)
+        edge_state = edge_state_for_faces(seed_face_ids, ring_edge_masks)
+        if edge_state is None:
             continue
+        seed_once, seed_twice = edge_state
         seed_counts = face_counts(seed_face_ids, ring_by_id)
+        compatible_targets = compatible_target_mask(
+            seed_counts,
+            all_target_mask,
+            target_count_masks,
+        )
+        compatible_targets = prune_target_mask_by_edge_budget(
+            compatible_targets,
+            seed_counts,
+            seed_once,
+            target_names,
+            targets,
+        )
+        if not compatible_targets:
+            continue
         if total_states >= max_total_states:
             if status is not None:
                 status["hit_total_limit"] = True
             return
-        if not counts_fit(seed_counts, max_counts):
-            continue
 
-        stack = [(seed_face_ids, seed_edge_counts, seed_counts)]
+        stack = [(seed_face_ids, seed_mask, seed_once, seed_twice, seed_counts, compatible_targets)]
         local_states = 0
 
         while stack and local_states < max_states_per_seed and total_states < max_total_states:
-            face_ids, edge_counts, counts = stack.pop()
-            if face_ids in seen_states:
+            face_ids, face_mask, once_mask, twice_mask, counts, compatible = stack.pop()
+            if face_mask in seen_states:
                 continue
             if len(seed_face_ids) > 1 and contains_earlier_seed(face_ids, seed_index, seed_index_by_anchor):
                 continue
-            seen_states.add(face_ids)
+            seen_states.add(face_mask)
             local_states += 1
             total_states += 1
 
-            boundary_edges = [edge for edge, count in edge_counts.items() if count == 1]
-            if not boundary_edges:
+            if once_mask == 0:
                 cage_type = target_type_for_counts(counts, targets)
                 if cage_type is not None:
                     yield face_ids, cage_type
                 continue
 
-            # Grow once against the union of target limits, then classify only
-            # closed shells. This avoids repeating the same branch for every
-            # standard cage type.
-            next_ids = ordered_boundary_candidates(
+            next_ids = ordered_boundary_candidates_bitset(
                 face_ids,
-                edge_counts,
+                face_mask,
+                once_mask,
+                twice_mask,
                 counts,
-                max_counts,
-                edge_to_ring_ids,
+                compatible,
+                target_count_masks,
+                edge_by_bit,
+                edge_ring_masks,
+                ring_id_by_bit,
                 ring_by_id,
+                ring_bits,
+                ring_edge_masks,
                 rank,
                 seed_rank,
                 ring_centers,
                 box,
                 max_boundary_candidates,
+                status=status,
             )
             for next_id in reversed(next_ids):
                 ring = ring_by_id[next_id]
-                next_edge_counts = add_ring_edges(edge_counts, ring)
-                if next_edge_counts is None:
+                ring_edge_mask = ring_edge_masks[next_id]
+                if ring_edge_mask & twice_mask:
                     continue
+                promoted = ring_edge_mask & once_mask
+                next_twice = twice_mask | promoted
+                next_once = (once_mask ^ ring_edge_mask) & ~next_twice
                 next_counts = dict(counts)
-                next_counts[ring.size] = next_counts.get(ring.size, 0) + 1
-                if not counts_fit(next_counts, max_counts):
+                next_count = next_counts.get(ring.size, 0) + 1
+                next_counts[ring.size] = next_count
+                next_compatible = compatible & target_count_masks.get(
+                    (ring.size, next_count),
+                    0,
+                )
+                next_compatible = prune_target_mask_by_edge_budget(
+                    next_compatible,
+                    next_counts,
+                    next_once,
+                    target_names,
+                    targets,
+                )
+                if not next_compatible:
                     continue
-                stack.append((frozenset([*face_ids, next_id]), next_edge_counts, next_counts))
+                stack.append(
+                    (
+                        frozenset((*face_ids, next_id)),
+                        face_mask | ring_bits[next_id],
+                        next_once,
+                        next_twice,
+                        next_counts,
+                        next_compatible,
+                    )
+                )
         if stack and local_states >= max_states_per_seed and status is not None:
             status["hit_seed_limit"] = True
         if stack and total_states >= max_total_states:
@@ -323,6 +455,147 @@ def grow_cage_candidates(
                 status["hit_total_limit"] = True
             return
 
+
+def edge_state_for_faces(
+    face_ids: frozenset[str],
+    ring_edge_masks: dict[str, int],
+) -> tuple[int, int] | None:
+    """Build disjoint edge-once and edge-twice masks for a face patch."""
+    once_mask = 0
+    twice_mask = 0
+    for ring_id in sorted(face_ids):
+        ring_mask = ring_edge_masks[ring_id]
+        if ring_mask & twice_mask:
+            return None
+        promoted = ring_mask & once_mask
+        twice_mask |= promoted
+        once_mask = (once_mask ^ ring_mask) & ~twice_mask
+    return once_mask, twice_mask
+
+
+def compatible_target_names(
+    counts: dict[int, int],
+    targets: dict[str, dict[int, int]],
+) -> tuple[str, ...]:
+    """Return only cage compositions that can still contain the partial face counts."""
+    return tuple(name for name, target in targets.items() if counts_fit(counts, target))
+
+
+def build_target_count_masks(
+    target_names: tuple[str, ...],
+    targets: dict[str, dict[int, int]],
+) -> dict[tuple[int, int], int]:
+    """Precompute target bits that permit each face-size count."""
+    sizes = sorted({size for target in targets.values() for size in target})
+    masks: dict[tuple[int, int], int] = {}
+    for size in sizes:
+        maximum = max((target.get(size, 0) for target in targets.values()), default=0)
+        for count in range(maximum + 1):
+            mask = 0
+            for index, name in enumerate(target_names):
+                if count <= targets[name].get(size, 0):
+                    mask |= 1 << index
+            masks[(size, count)] = mask
+    return masks
+
+
+def compatible_target_mask(
+    counts: dict[int, int],
+    all_target_mask: int,
+    target_count_masks: dict[tuple[int, int], int],
+) -> int:
+    """Return target bits compatible with all current face counts."""
+    mask = all_target_mask
+    for size, count in counts.items():
+        mask &= target_count_masks.get((size, count), 0)
+        if not mask:
+            break
+    return mask
+
+
+def prune_target_mask_by_edge_budget(
+    target_mask: int,
+    counts: dict[int, int],
+    once_mask: int,
+    target_names: tuple[str, ...],
+    targets: dict[str, dict[int, int]],
+) -> int:
+    """Remove targets whose remaining face incidences cannot close the boundary."""
+    open_edges = once_mask.bit_count()
+    kept = 0
+    remaining = target_mask
+    while remaining:
+        bit = remaining & -remaining
+        remaining ^= bit
+        name = target_names[bit.bit_length() - 1]
+        target = targets[name]
+        remaining_incidence = sum(
+            (target.get(size, 0) - counts.get(size, 0)) * size
+            for size in target
+        )
+        if remaining_incidence < open_edges:
+            continue
+        if (remaining_incidence - open_edges) % 2:
+            continue
+        kept |= bit
+    return kept
+
+
+def ordered_boundary_candidates_bitset(
+    face_ids: frozenset[str],
+    face_mask: int,
+    once_mask: int,
+    twice_mask: int,
+    counts: dict[int, int],
+    compatible_targets: int,
+    target_count_masks: dict[tuple[int, int], int],
+    edge_by_bit: dict[int, tuple[int, int]],
+    edge_ring_masks: dict[tuple[int, int], int],
+    ring_id_by_bit: dict[int, str],
+    ring_by_id: dict[str, Ring],
+    ring_bits: dict[str, int],
+    ring_edge_masks: dict[str, int],
+    rank: dict[str, int],
+    seed_rank: int,
+    ring_centers: dict[str, np.ndarray],
+    box: np.ndarray | None,
+    max_boundary_candidates: int,
+    status: dict[str, bool] | None = None,
+) -> list[str]:
+    """Choose the minimum-remaining-value boundary edge using compact state masks."""
+    best: list[str] | None = None
+    remaining = once_mask
+    while remaining:
+        edge_bit = remaining & -remaining
+        remaining ^= edge_bit
+        edge = edge_by_bit[edge_bit]
+        candidates: list[str] = []
+        candidate_mask = edge_ring_masks.get(edge, 0) & ~face_mask
+        while candidate_mask:
+            ring_bit = candidate_mask & -candidate_mask
+            candidate_mask ^= ring_bit
+            ring_id = ring_id_by_bit[ring_bit]
+            if rank[ring_id] < seed_rank:
+                continue
+            ring = ring_by_id[ring_id]
+            if ring_edge_masks[ring_id] & twice_mask:
+                continue
+            next_count = counts.get(ring.size, 0) + 1
+            if not compatible_targets & target_count_masks.get((ring.size, next_count), 0):
+                continue
+            candidates.append(ring_id)
+        if not candidates:
+            return []
+        if best is None or len(candidates) < len(best):
+            best = candidates
+    if not best:
+        return []
+    if max_boundary_candidates > 0 and len(best) > max_boundary_candidates:
+        if status is not None:
+            status["hit_boundary_candidate_limit"] = True
+        best.sort(key=lambda ring_id: (candidate_distance_to_patch(ring_id, face_ids, ring_centers, box), rank[ring_id]))
+        return best[:max_boundary_candidates]
+    return sorted(best, key=lambda ring_id: rank[ring_id])
 
 def grow_seed_face_sets(patches: list[CagePatch], ring_by_id: dict[str, Ring], seed_mode: str) -> list[frozenset[str]]:
     """Build cage-grow seeds from open cage patches, or rings for comparison."""
@@ -511,6 +784,82 @@ def fast_pair_cage_candidates(
                 yield candidate, cage_type
 
 
+def fast_patch_closure_candidates(
+    patch_face_sets: list[frozenset[str]],
+    ring_by_id: dict[str, Ring],
+    targets: dict[str, dict[int, int]],
+    *,
+    max_patches: int = 4,
+    max_states: int = 20000,
+    status: dict[str, bool] | None = None,
+):
+    """Yield closed cages assembled from two to four indexed half-cage patches."""
+    unique = sorted(
+        {
+            face_ids
+            for face_ids in patch_face_sets
+            if face_ids and all(ring_id in ring_by_id for ring_id in face_ids)
+        },
+        key=lambda item: (len(item), tuple(sorted(item))),
+    )
+    if len(unique) < 2 or max_patches < 2 or max_states <= 0:
+        return
+
+    boundaries = []
+    for face_ids in unique:
+        edge_counts = candidate_edge_counts(face_ids, ring_by_id)
+        boundaries.append({edge for edge, count in edge_counts.items() if count == 1})
+
+    neighbors: dict[int, set[int]] = {index: set() for index in range(len(unique))}
+    for left, right in combinations(range(len(unique)), 2):
+        if unique[left] & unique[right] or boundaries[left] & boundaries[right]:
+            neighbors[left].add(right)
+            neighbors[right].add(left)
+
+    max_counts = max_target_face_counts(targets)
+    emitted: set[frozenset[str]] = set()
+    seen_combinations: set[tuple[int, ...]] = set()
+    state_count = 0
+
+    for start in range(len(unique)):
+        stack = [((start,), unique[start], {item for item in neighbors[start] if item > start})]
+        while stack:
+            combo, face_ids, frontier = stack.pop()
+            if combo in seen_combinations:
+                continue
+            seen_combinations.add(combo)
+            state_count += 1
+            if state_count > max_states:
+                if status is not None:
+                    status["hit_state_limit"] = True
+                return
+
+            if len(combo) >= 2:
+                cage_type = target_type_for_faces(face_ids, ring_by_id, targets)
+                if cage_type is not None and face_ids not in emitted:
+                    face_rings = [ring_by_id[ring_id] for ring_id in sorted(face_ids)]
+                    if is_closed_polyhedron(face_rings):
+                        emitted.add(face_ids)
+                        yield face_ids, cage_type
+            if len(combo) >= max_patches:
+                continue
+
+            for next_index in sorted(frontier, reverse=True):
+                next_combo = tuple(sorted((*combo, next_index)))
+                next_faces = face_ids | unique[next_index]
+                if next_combo in seen_combinations:
+                    continue
+                if not counts_fit(face_counts(next_faces, ring_by_id), max_counts):
+                    continue
+                if not no_edge_overuse(next_faces, ring_by_id):
+                    continue
+                next_frontier = set(frontier)
+                next_frontier.update(neighbors[next_index])
+                next_frontier.difference_update(next_combo)
+                next_frontier = {item for item in next_frontier if item > start}
+                stack.append((next_combo, next_faces, next_frontier))
+
+
 def build_edge_to_ring_ids(rings: list[Ring]) -> dict[tuple[int, int], set[str]]:
     """Map each oxygen-network edge to all ring faces that use it."""
     edge_to_ring_ids: dict[tuple[int, int], set[str]] = defaultdict(set)
@@ -610,6 +959,123 @@ def is_closed_polyhedron(rings: list[Ring]) -> bool:
         return False
     return len(nodes) - len(edge_counts) + len(rings) == 2
 
+
+
+def scientific_polyhedron_geometry(
+    rings: list[Ring],
+    unwrapped_nodes: dict[int, np.ndarray],
+    face_quality: dict[str, RingFaceQuality],
+    *,
+    max_face_planarity_rms_nm: float,
+    max_face_edge_cv: float,
+    min_cage_volume_nm3: float,
+) -> tuple[np.ndarray, float] | None:
+    """Apply opt-in manifold/face checks and return the volume centroid."""
+    if not face_adjacency_connected(rings) or not vertex_links_are_manifold(rings):
+        return None
+    for ring in rings:
+        quality = face_quality.get(ring.object_id)
+        if quality is None:
+            return None
+        if quality.projected_area_nm2 <= 1.0e-12:
+            return None
+        if quality.planarity_rms_nm > max_face_planarity_rms_nm:
+            return None
+        if quality.edge_length_cv > max_face_edge_cv:
+            return None
+
+    reference = np.mean([unwrapped_nodes[node] for node in sorted(unwrapped_nodes)], axis=0)
+    triangles = triangulate_cage_faces(rings, unwrapped_nodes, reference)
+    geometry = polyhedron_volume_centroid(triangles, reference)
+    if geometry is None:
+        return None
+    center, volume = geometry
+    if volume < min_cage_volume_nm3:
+        return None
+    return center, volume
+
+
+def face_adjacency_connected(rings: list[Ring]) -> bool:
+    """Require all shell faces to belong to one edge-connected component."""
+    if not rings:
+        return False
+    edge_faces: dict[tuple[int, int], list[int]] = defaultdict(list)
+    for face_index, ring in enumerate(rings):
+        for edge in ring.edges:
+            edge_faces[edge].append(face_index)
+    adjacency = {index: set() for index in range(len(rings))}
+    for face_indexes in edge_faces.values():
+        if len(face_indexes) != 2:
+            return False
+        left, right = face_indexes
+        adjacency[left].add(right)
+        adjacency[right].add(left)
+
+    visited = set()
+    stack = [0]
+    while stack:
+        current = stack.pop()
+        if current in visited:
+            continue
+        visited.add(current)
+        stack.extend(adjacency[current] - visited)
+    return len(visited) == len(rings)
+
+
+def vertex_links_are_manifold(rings: list[Ring]) -> bool:
+    """Require the incident faces around every shell vertex to form one cycle."""
+    edge_faces: dict[tuple[int, int], list[int]] = defaultdict(list)
+    vertex_faces: dict[int, set[int]] = defaultdict(set)
+    for face_index, ring in enumerate(rings):
+        for node in ring.nodes:
+            vertex_faces[node].add(face_index)
+        for edge in ring.edges:
+            edge_faces[edge].append(face_index)
+
+    for node, incident in vertex_faces.items():
+        link = {face_index: set() for face_index in incident}
+        for edge, face_indexes in edge_faces.items():
+            if node not in edge:
+                continue
+            if len(face_indexes) != 2:
+                return False
+            left, right = face_indexes
+            if left in link and right in link:
+                link[left].add(right)
+                link[right].add(left)
+        if any(len(neighbors) != 2 for neighbors in link.values()):
+            return False
+        visited = set()
+        stack = [next(iter(link))]
+        while stack:
+            current = stack.pop()
+            if current in visited:
+                continue
+            visited.add(current)
+            stack.extend(link[current] - visited)
+        if visited != set(link):
+            return False
+    return True
+
+
+def polyhedron_volume_centroid(
+    triangles: list[tuple[np.ndarray, np.ndarray, np.ndarray]],
+    reference: np.ndarray,
+) -> tuple[np.ndarray, float] | None:
+    """Return volume centroid and absolute volume from an oriented triangle shell."""
+    signed_volume = 0.0
+    weighted_centroid = np.zeros(3, dtype=float)
+    for a, b, c in triangles:
+        ar = a - reference
+        br = b - reference
+        cr = c - reference
+        tetra_volume = float(np.dot(ar, np.cross(br, cr))) / 6.0
+        signed_volume += tetra_volume
+        weighted_centroid += tetra_volume * (ar + br + cr) / 4.0
+    if abs(signed_volume) <= 1.0e-12:
+        return None
+    center = reference + weighted_centroid / signed_volume
+    return center, abs(signed_volume)
 
 
 
