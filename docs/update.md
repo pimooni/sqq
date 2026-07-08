@@ -2,6 +2,53 @@
 
 This file records versioned update notes. New releases should be appended above older entries.
 
+## Version 0.2.6
+
+### Short Summary
+
+Version 0.2.6 tightens runtime metadata, worker control, and summary-write scalability. `--worker` / `-w` now distinguishes worker counts from CPU fractions by input form, terminal output and the `summary.xlsx` dashboard share the same `SQQ version` and requested/effective `Graph mode` wording, `run_config.yaml` records resolved run metadata while preserving raw configuration values, and `summary.xlsx` keeps quasi-cage reporting compact by moving exact quasi-cage isomers to CSV detail output. Scientific analysis algorithms, coordinates, topology counts, and molecule membership are unchanged from `0.2.5`.
+
+### Main Changes
+
+1. Worker parsing by input form
+   - `-w 1` now means exactly one requested worker.
+   - `-w 1.0` and `-w 100%` mean 100% of detected physical cores before the reserve-one-core clamp.
+   - Decimal values must be in `(0, 1]`, percentages must be in `(0%, 100%]`, and positive integer text remains an explicit worker count.
+   - Final workers remain capped by one reserved physical core, task count, and the Windows `ProcessPoolExecutor` limit.
+
+2. Runtime and summary dashboard metadata alignment
+   - The terminal Configuration block now includes `SQQ version` and uses labels aligned with the `summary.xlsx` dashboard.
+   - After analysis finishes, the terminal prints a final run summary with finish time, duration, `SQQ version`, resolved `Graph mode`, worker policy, backend, and workers.
+   - The `summary.xlsx` home sheet uses the same graph-mode display as the terminal final summary.
+
+3. Requested/effective graph-mode display
+   - Explicit modes display as `hbond`, `oo`, or `pairs`.
+   - Auto mode displays as `auto -> hbond`, `auto -> oo`, or `auto -> mixed (hbond, oo)` when frames resolve differently.
+   - Per-frame `*_info.md` adds `graph_mode` while retaining the effective `bond_mode` row.
+   - Per-frame `connection_mode` columns are unchanged for plotting compatibility.
+
+4. Resolved run metadata in `run_config.yaml`
+   - Raw config values such as `graph.bond_mode: auto` and `parallel.workers: 1.0` are preserved.
+   - A `run` block records `sqq_version`, requested/effective graph mode, display graph mode, worker request, worker policy, resolved worker count, backend, and math threads.
+
+5. Compact quasi-cage workbook output
+   - The `summary.xlsx` `quasi_cage` sheet now aggregates exact quasi-cage isomers into composition-level columns such as `5r_5²6³`, matching the compact style used by the `cage` sheet.
+   - Exact nonzero quasi-cage isomer rows are written to `summary_detail/quasi_cage_isomer.csv` with `frame`, `time_ps`, `quasi_cage_type`, `isomer`, and `count`.
+   - The `detail_index` sheet records `quasi_cage_isomer.csv` beside the other generated CSV detail tables.
+   - This reduces workbook width and final openpyxl formatting time for long trajectories with many quasi-cage isomers.
+
+6. Package version
+   - Updated `pyproject.toml` and `sqq.__version__` from `0.2.5` to `0.2.6`.
+   - Updated README, design documentation, and the English/Chinese design DOCX files.
+
+### Compatibility
+
+- Scientific analysis results do not change from `0.2.5`.
+- Existing `0.2.5` commands remain compatible except for the clarified `-w 1` behavior: `1` is now one worker, while `1.0` or `100%` is the 100% physical-core fraction.
+- `summary.xlsx` dashboard and terminal text change for clarity.
+- The `summary.xlsx` `quasi_cage` sheet is intentionally more compact: columns are composition-level quasi-cage types, while exact isomer rows move to `summary_detail/quasi_cage_isomer.csv`.
+- `run_config.yaml` gains a `run` metadata block but preserves existing raw config keys.
+
 ## Version 0.2.5
 
 ### Short Summary

@@ -39,7 +39,7 @@ The mode preset controls graph mode, the shared ring-face search sizes, and the 
 
 An explicit `-b` / `--bond-mode {auto,hbond,oo,pairs}` overrides the graph mode from both the preset and `config.yaml`. `--pairs PAIRS.txt` implies pairs mode unless `-b pairs` is already given; it cannot be combined with another explicit bond mode.
 
-`parallel.workers: auto` calculates `floor(physical_core_count * mode_fraction)`, then reserves one physical core for the operating system and caps the result by the number of independent files or selected trajectory frames. Physical-core detection prefers optional `psutil`, then platform probes such as Windows CIM, macOS `sysctl`, or Linux `/proc/cpuinfo`; if physical cores cannot be detected, SQQ falls back to the CPU count visible to the process. `--worker N` / `-w N` overrides the mode fraction: values such as `50%`, `0.5`, or `1` are physical-core fractions, while values greater than one are explicit integer worker counts. The old `--workers` spelling is retained as a hidden compatibility alias. Worker resolution remains capped by task count and the Windows `ProcessPoolExecutor` limit. `parallel.backend` defaults to `process`; `thread` is retained for compatibility and `serial` forces one process.
+`parallel.workers: auto` calculates `floor(physical_core_count * mode_fraction)`, then reserves one physical core for the operating system and caps the result by the number of independent files or selected trajectory frames. Physical-core detection prefers optional `psutil`, then platform probes such as Windows CIM, macOS `sysctl`, or Linux `/proc/cpuinfo`; if physical cores cannot be detected, SQQ falls back to the CPU count visible to the process. `--worker N` / `-w N` overrides the mode fraction using form-based parsing: integer text such as `1`, `4`, or `100` is an explicit worker count; decimal text such as `0.5` or `1.0` and percentages such as `50%` or `100%` are physical-core fractions. Thus `-w 1` means one worker, while `-w 1.0` and `-w 100%` mean all detected physical cores before the reserve-one-core clamp. Percentages above `100%` and decimal values above `1.0` are rejected. The old `--workers` spelling is retained as a hidden compatibility alias. Worker resolution remains capped by task count and the Windows `ProcessPoolExecutor` limit. `parallel.backend` defaults to `process`; `thread` is retained for compatibility and `serial` forces one process.
 
 ### Process Execution Architecture
 
@@ -64,7 +64,7 @@ worker process
 main process
   -> consume stage events
   -> reorder rows by input_index
-  -> write summary.xlsx, summary_detail CSV, and run_config.yaml
+  -> write summary.xlsx, summary_detail CSV, and run_config.yaml with resolved run metadata
 ```
 
 `spawn` is selected explicitly on macOS, Windows, and Linux. This avoids forking a process after the interactive progress refresh thread exists and gives the same pickling/import contract on every platform. Worker callables and initializers are module-level functions. Only paths, raw trajectory indexes, small event tuples, and summary dictionaries cross process boundaries; atoms, rings, patches, and cages stay worker-local.
@@ -76,6 +76,10 @@ For one XTC/TRR file with `--top`, the parent opens the trajectory once to resol
 Both standalone-file and indexed-trajectory process paths maintain at most `3 * workers` submitted tasks and refill the queue as futures complete. This is a bounded submission window, not a worker cap: 100 effective workers retain 100-way execution and at most 300 submitted tasks. It avoids constructing a Future and serializing arguments for every item in a very large input set.
 
 Standalone files whose case-insensitive stems collide are rejected because the stem is the frame output-directory name. Non-strict worker-side read failures return a failed summary row; strict failures cancel queued futures and propagate to the main process. Output order is determined by the original index rather than completion order.
+
+Terminal and summary dashboard metadata share the same display helpers. The requested graph mode is preserved from config/CLI, and the effective per-frame graph modes are collected from `connection_mode` in summary rows. Explicit graph modes display as `hbond`, `oo`, or `pairs`. Automatic graph mode displays as `auto -> hbond`, `auto -> oo`, or `auto -> mixed (hbond, oo)` when different frames resolve differently. Before frame analysis completes, the terminal header may show `auto -> pending`; the final run summary and `summary.xlsx` dashboard use the resolved display value.
+
+`run_config.yaml` preserves the raw configuration values such as `graph.bond_mode: auto` and `parallel.workers: 1.0`, then adds a `run` block with `sqq_version`, requested/effective graph mode, resolved graph-mode display, worker request, worker policy, resolved workers, backend, and math threads. This keeps reproducibility data without changing the meaning of the original config keys.
 ### Terminal Progress Display
 
 Serial and parallel runs share the same three-row stage model:
@@ -278,7 +282,7 @@ ring_centers: locally unwrapped O-centroid for each ring
 
 `edge_to_rings` is the primary topology filter. `ring_centers` are only used after topology filtering to order and limit candidates.
 
-Version 0.2.5 retains frame-local caches for symmetric ring-center distances, L2/L3 topology expansions, and patch geometry. These caches are discarded after the frame and therefore never mix topology or coordinates between trajectory frames.
+Version 0.2.6 retains frame-local caches for symmetric ring-center distances, L2/L3 topology expansions, and patch geometry. These caches are discarded after the frame and therefore never mix topology or coordinates between trajectory frames.
 
 Search order:
 
@@ -544,7 +548,7 @@ frame_name/
   ice/
 ```
 
-The global workbook is `summary.xlsx`. Its first sheet is a dashboard: Configuration includes `SQQ version`, and `Analysis Results (min / mean / max)` reports per-frame min/mean/max values for result metrics while `Frames total / ok / failed` remains a run-level frame count. The workbook also contains per-frame counts, connection and coordination diagnostics, report-scoped ring/cage tables, half_cage/quasi_cage tables, optional per-frame hydrate_cluster totals, order parameters, ice, `detail_index`, and config sheets. Multi-row detail tables are written as UTF-8-SIG CSV files in `summary_detail/`.
+The global workbook is `summary.xlsx`. Its first sheet is a dashboard: Configuration includes `SQQ version` and the same requested/effective `Graph mode` display used by the final terminal run summary, and `Analysis Results (min / mean / max)` reports per-frame min/mean/max values for result metrics while `Frames total / ok / failed` remains a run-level frame count. The workbook also contains per-frame counts, connection and coordination diagnostics, report-scoped ring/cage tables, half_cage tables, compact composition-level quasi_cage tables, optional per-frame hydrate_cluster totals, order parameters, ice, `detail_index`, and config sheets. Exact quasi-cage isomer rows are written as CSV detail output so the workbook stays narrow on long trajectories. Multi-row detail tables are written as UTF-8-SIG CSV files in `summary_detail/`.
 
 Each per-frame `*_info.md` report is optimized for inspection rather than plotting:
 
@@ -560,9 +564,9 @@ Each per-frame `*_info.md` report is optimized for inspection rather than plotti
 - boundary output separates single-phase, interphase, ambiguous, and unclassified cages without assigning phase from cage composition alone;
 - per-frame info reports omit long cage-id and shared-face-id expansions; exact ids remain available in `summary_detail/*.csv`;
 - all hierarchy labels use the same short `├`, `└`, and `│` symbols, and Markdown source tables are padded using Unicode display width so their pipe columns align;
-- Frame Information starts with `sqq version`, `date & time`, `source`, `frame`, and `time_ps`, then reports bond mode, ring sizes, status, and molecule counts; Molecules, active connection coordination, Order Parameters, Hydrate Nucleation Order Parameters, and Ice are separated into compact sections.
+- Frame Information starts with `sqq version`, `date & time`, `source`, `frame`, and `time_ps`, then reports requested/effective `graph_mode`, effective `bond_mode`, ring sizes, status, and molecule counts; Molecules, active connection coordination, Order Parameters, Hydrate Nucleation Order Parameters, and Ice are separated into compact sections.
 
-The global `summary.xlsx` workbook keeps plotting-oriented analysis sheets with one input file or trajectory frame per row. Multi-row detail outputs are split into `summary_detail/cage_occupancy.csv`, `summary_detail/cage_isomer.csv`, `summary_detail/hydrate_domain.csv`, and, when `hydrate_cluster.detail = true` or `--cluster-detail on`, `summary_detail/hydrate_cluster_detail.csv`. `detail_index` records the generated CSV file paths and table dimensions. `cage_isomer.csv` defaults to nonzero isomer rows plus per-frame totals; `output.cage_isomer_rows = all` or `--cage-isomer-rows all` restores the full zero-filled matrix. Public motif output is not written. The `order_parameter` sheet reports `F3_mean`, `F3_count`, `F4_mean`, `F4_count`, one mean/count pair for each requested Q_l degree, plus focus-water columns when configured. It also reports default `MCG-1` and `DHOP35` largest clusters; optional `MCG-3` and `DHOP30` columns appear only when enabled. Per-frame Markdown places these four hydrate descriptors in a separate table immediately after F3/F4/Q_l. Optional per-water F3/F4/Q_l output is written as `*_order_parameter.tsv`; MCG/DHOP currently remain frame-level outputs.
+The global `summary.xlsx` workbook keeps plotting-oriented analysis sheets with one input file or trajectory frame per row. Its `quasi_cage` sheet aggregates exact isomer columns into composition-level columns such as `5r_5²6³`; exact quasi-cage isomers are split into `summary_detail/quasi_cage_isomer.csv` with `frame`, `time_ps`, `quasi_cage_type`, `isomer`, and `count`. Other multi-row detail outputs are split into `summary_detail/cage_occupancy.csv`, `summary_detail/cage_isomer.csv`, `summary_detail/hydrate_domain.csv`, and, when `hydrate_cluster.detail = true` or `--cluster-detail on`, `summary_detail/hydrate_cluster_detail.csv`. `detail_index` records the generated CSV file paths and table dimensions. `cage_isomer.csv` defaults to nonzero isomer rows plus per-frame totals; `output.cage_isomer_rows = all` or `--cage-isomer-rows all` restores the full zero-filled matrix. Public motif output is not written. The `order_parameter` sheet reports `F3_mean`, `F3_count`, `F4_mean`, `F4_count`, one mean/count pair for each requested Q_l degree, plus focus-water columns when configured. It also reports default `MCG-1` and `DHOP35` largest clusters; optional `MCG-3` and `DHOP30` columns appear only when enabled. Per-frame Markdown places these four hydrate descriptors in a separate table immediately after F3/F4/Q_l. Optional per-water F3/F4/Q_l output is written as `*_order_parameter.tsv`; MCG/DHOP currently remain frame-level outputs.
 
 ## Current Limits
 

@@ -1,0 +1,45 @@
+from __future__ import annotations
+
+"""Shared human-facing display helpers for terminal, Markdown, and summary output."""
+
+from typing import Any, Iterable
+
+_GRAPH_MODE_ORDER = ("hbond", "oo", "pairs")
+_EMPTY_GRAPH_MODE_VALUES = {"", "none", "null", "nan"}
+
+
+def clean_graph_mode(value: Any) -> str:
+    """Return a compact graph-mode identifier suitable for UI display."""
+    text = str(value).strip()
+    return "" if text.lower() in _EMPTY_GRAPH_MODE_VALUES else text
+
+
+def ordered_unique_graph_modes(values: Iterable[Any]) -> list[str]:
+    """Return stable unique effective graph modes, with known modes first."""
+    seen: set[str] = set()
+    modes: list[str] = []
+    for value in values:
+        mode = clean_graph_mode(value)
+        if not mode or mode in seen:
+            continue
+        seen.add(mode)
+        modes.append(mode)
+    return sorted(modes, key=lambda item: (_GRAPH_MODE_ORDER.index(item) if item in _GRAPH_MODE_ORDER else len(_GRAPH_MODE_ORDER), item))
+
+
+def graph_mode_display(requested: Any, effective_modes: Iterable[Any] | None = None) -> str:
+    """Format requested/effective graph mode consistently across run outputs.
+
+    Explicit requested modes display as their compact identifiers. Auto mode displays
+    the resolved effective mode when available, or a mixed marker when frames resolve
+    differently.
+    """
+    requested_mode = clean_graph_mode(requested) or "auto"
+    if requested_mode != "auto":
+        return requested_mode
+    modes = ordered_unique_graph_modes(effective_modes or [])
+    if len(modes) == 1:
+        return f"auto -> {modes[0]}"
+    if len(modes) > 1:
+        return "auto -> mixed (" + ", ".join(modes) + ")"
+    return "auto -> pending"

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 """Top-level analysis pipeline for the SQQ command line."""
 
+import math
 import os
 import sys
 from argparse import Namespace
@@ -31,6 +32,7 @@ except ImportError:  # pragma: no cover - exercised in minimal source-tree runs.
     def tqdm(iterable=None, total=None, desc=None, **kwargs):
         return iterable if iterable is not None else _NullProgress()
 
+from . import __version__
 from .banner import SQQ_BANNER
 from .config import load_config, mode_label, mode_worker_fraction
 from .core.cage import (
@@ -44,6 +46,7 @@ from .core.f3f4 import compute_order_parameters, normalize_q_degree
 from .core.dhop import compute_dhop_order
 from .core.mcg import compute_mcg_order
 from .core.graph import build_water_graph
+from .display import graph_mode_display, ordered_unique_graph_modes
 from .core.hydrate_cluster import analyze_hydrate_clusters
 from .core.ice import classify_ice_waters
 from .core.quasi_cage import find_cage_patches
@@ -184,7 +187,9 @@ def analyze(args: Namespace) -> None:
         elapsed_seconds,
         run_started_at,
         run_finished_at,
+        rows,
     )
+    print_run_summary(run_info)
     write_summary(rows, outdir, config, write_xlsx=config["output"]["write_xlsx_summary"], run_info=run_info)
     print(f"Wrote SQQ results: {outdir}")
 
@@ -201,8 +206,11 @@ def build_run_info(
     elapsed_seconds: float,
     started_at_wall: datetime,
     finished_at_wall: datetime,
+    rows: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
-    """Collect run-level metadata for the summary workbook."""
+    """Collect run-level metadata for terminal, run_config, and summary workbook."""
+    requested_graph_mode = config["graph"]["bond_mode"]
+    effective_graph_modes = row_effective_graph_modes(rows or [])
     info: dict[str, Any] = {
         "working_dir": str(Path.cwd()),
         "input": str(input_path),
@@ -214,12 +222,15 @@ def build_run_info(
         "finished_at": finished_at_wall.isoformat(timespec="seconds"),
         "time_zone": format_time_zone(started_at_wall),
         "config_file": args.config or "<built-in defaults>",
+        "sqq_version": __version__,
         "mode": f"{config.get('mode', '50')} ({mode_label(config.get('mode', '50'))})",
         "worker_policy": worker_policy_text(config),
         "topology": str(topology) if topology else "<none>",
         "matched_files": len(paths),
         "elapsed_seconds": round(elapsed_seconds, 3),
-        "graph_mode": config["graph"]["bond_mode"],
+        "graph_mode": requested_graph_mode,
+        "effective_graph_modes": ", ".join(ordered_unique_graph_modes(effective_graph_modes)),
+        "graph_mode_display": graph_mode_display(requested_graph_mode, effective_graph_modes),
         "search_sizes": config["ring"]["sizes"],
         "ring_report_sizes": config["ring"]["report_sizes"],
         "quasi_cage_base_sizes": config["quasi_cage"].get("base_sizes", "auto"),
@@ -277,40 +288,66 @@ def print_run_header(
     print_terminal_field("output", outdir)
     print("")
     print("Configuration")
-    print_terminal_field("config", args.config or "<built-in defaults>")
-    print_terminal_field("topology", topology or "<none>")
-    print_terminal_field("mode", f"{config.get('mode', '50')} ({mode_label(config.get('mode', '50'))})")
-    print_terminal_field("graph_mode", bond_mode_display_name(config["graph"]["bond_mode"]))
-    print_terminal_field("search_sizes", config["ring"]["sizes"])
-    print_terminal_field("ring_report_sizes", config["ring"]["report_sizes"])
-    print_terminal_field("ring_definition", config["ring"].get("definition", "chordless"))
-    print_terminal_field("quasi_cage_sizes", f"{config['quasi_cage'].get('base_sizes', 'auto')} / {config['quasi_cage'].get('side_sizes', 'auto')}")
-    print_terminal_field("quasi_max_layer", config["quasi_cage"].get("max_layers", ""))
-    print_terminal_field("quasi_search_policy", config["quasi_cage"].get("search_policy", "bounded"))
-    print_terminal_field("cage_report_types", dashboard_cage_targets(config))
-    print_terminal_field("max_cage_face", config["cage"].get("max_faces", 20))
-    print_terminal_field("cage_fast_closure", on_off_text(config["cage"].get("fast_closure", True)))
-    print_terminal_field("scientific_validation", on_off_text(config["cage"].get("scientific_validation", False)))
-    print_terminal_field("hydrate_cluster", on_off_text(config.get("hydrate_cluster", {}).get("enabled", False)))
-    print_terminal_field("cluster_min_cage", config.get("hydrate_cluster", {}).get("min_cage", 2))
-    print_terminal_field("cluster_detail", on_off_text(config.get("hydrate_cluster", {}).get("detail", False)))
-    print_terminal_field("hydrate_order", hydrate_order_config_text(config))
+    print_terminal_field("SQQ version", __version__)
+    print_terminal_field("Config file", args.config or "<built-in defaults>")
+    print_terminal_field("Topology", topology or "<none>")
+    print_terminal_field("Mode", f"{config.get('mode', '50')} ({mode_label(config.get('mode', '50'))})")
+    print_terminal_field("Graph mode", graph_mode_display(config["graph"]["bond_mode"]))
+    print_terminal_field("Search sizes", config["ring"]["sizes"])
+    print_terminal_field("Ring report sizes", config["ring"]["report_sizes"])
+    print_terminal_field("Ring definition", config["ring"].get("definition", "chordless"))
+    print_terminal_field("Quasi-cage sizes", f"{config['quasi_cage'].get('base_sizes', 'auto')} / {config['quasi_cage'].get('side_sizes', 'auto')}")
+    print_terminal_field("Quasi max layer", config["quasi_cage"].get("max_layers", ""))
+    print_terminal_field("Quasi search policy", config["quasi_cage"].get("search_policy", "bounded"))
+    print_terminal_field("Cage report types", dashboard_cage_targets(config))
+    print_terminal_field("Maximum cage face", config["cage"].get("max_faces", 20))
+    print_terminal_field("Cage fast closure", on_off_text(config["cage"].get("fast_closure", True)))
+    print_terminal_field("Scientific validation", on_off_text(config["cage"].get("scientific_validation", False)))
+    print_terminal_field("Hydrate cluster", on_off_text(config.get("hydrate_cluster", {}).get("enabled", False)))
+    print_terminal_field("Cluster min cage", config.get("hydrate_cluster", {}).get("min_cage", 2))
+    print_terminal_field("Cluster detail", on_off_text(config.get("hydrate_cluster", {}).get("detail", False)))
+    print_terminal_field("Hydrate order", hydrate_order_config_text(config))
     print_terminal_field("Q_l", q_config_text(config))
-    print_terminal_field("output_layout", config["output"].get("structure_layout", "grouped"))
-    print_terminal_field("worker_policy", worker_policy_text(config))
-    print_terminal_field("parallel_backend", parallel_backend)
-    print_terminal_field("math_threads", config.get("parallel", {}).get("math_threads", 1))
-    print_terminal_field("workers", workers)
+    print_terminal_field("Output layout", config["output"].get("structure_layout", "grouped"))
+    print_terminal_field("Worker policy", worker_policy_text(config))
+    print_terminal_field("Parallel backend", parallel_backend)
+    print_terminal_field("Math threads per worker", config.get("parallel", {}).get("math_threads", 1))
+    print_terminal_field("Workers", workers)
     print("")
 
 
-TERMINAL_LABEL_WIDTH = 22
+TERMINAL_LABEL_WIDTH = 24
 PROGRESS_BAR_WIDTH = 25
 
 
 def print_terminal_field(label: str, value: Any) -> None:
     """Print one aligned terminal key-value row."""
     print(f"  {label:<{TERMINAL_LABEL_WIDTH}}: {safe_terminal_text(value)}")
+
+
+def print_run_summary(run_info: dict[str, Any]) -> None:
+    """Print final effective run metadata after frame analysis finishes."""
+    print("Run Summary")
+    print_terminal_field("Finish time", run_info.get("finish_time", ""))
+    print_terminal_field("Duration (s)", run_info.get("elapsed_seconds", ""))
+    print_terminal_field("SQQ version", run_info.get("sqq_version", __version__))
+    print_terminal_field("Graph mode", run_info.get("graph_mode_display", run_info.get("graph_mode", "")))
+    print_terminal_field("Worker policy", run_info.get("worker_policy", ""))
+    print_terminal_field("Parallel backend", run_info.get("parallel_backend", "serial"))
+    print_terminal_field("Workers", run_info.get("workers", ""))
+    print("")
+
+
+def row_effective_graph_modes(rows: list[dict[str, Any]]) -> list[str]:
+    """Collect effective graph modes from successful per-frame summary rows."""
+    modes: list[str] = []
+    for row in rows:
+        if str(row.get("status", "ok")).lower() == "failed":
+            continue
+        mode = str(row.get("connection_mode", "")).strip()
+        if mode:
+            modes.append(mode)
+    return modes
 
 
 def bond_mode_display_name(value: Any) -> str:
@@ -1147,6 +1184,7 @@ def write_frame_outputs(result: FrameResult, frame_dir: Path, config: dict[str, 
             result,
             frame_dir,
             ring_sizes=list(result.ring_report_sizes),
+            requested_bond_mode=config["graph"]["bond_mode"],
         )
     else:
         remove_optional_info_output(result, frame_dir)
@@ -1207,7 +1245,7 @@ def worker_policy_text(config: dict[str, Any]) -> str:
     """Describe the active automatic or explicit worker policy."""
     value = config.get("parallel", {}).get("workers", "auto")
     reserve_text = "reserve 1 physical core"
-    if value in (None, "", "auto"):
+    if is_auto_worker_request(value):
         percent = int(round(mode_worker_fraction(config.get("mode", "50")) * 100))
         return f"auto ({percent}% of physical cores, {reserve_text})"
     try:
@@ -1219,16 +1257,43 @@ def worker_policy_text(config: dict[str, Any]) -> str:
 
 def describe_worker_request(value: Any) -> str:
     """Render a user-facing worker request for terminal and workbook metadata."""
-    text = str(value).strip()
+    kind, amount = classify_worker_request(value)
+    if kind == "auto":
+        return "auto"
+    if kind == "fraction":
+        return f"{format_worker_percent(float(amount))} of physical cores"
+    if kind == "count":
+        return f"{int(amount)} workers"
+    raise worker_value_error()
+
+
+def is_auto_worker_request(value: Any) -> bool:
+    """Return true for unset or textual auto worker requests."""
+    return value is None or str(value).strip().lower() in {"", "auto"}
+
+
+def classify_worker_request(value: Any) -> tuple[str, float | int | None]:
+    """Classify -w/--worker by input form rather than numeric value alone."""
+    text = str(value).strip().lower()
+    if text in {"", "auto"}:
+        return "auto", None
     if text.endswith("%"):
-        fraction = parse_worker_fraction(text[:-1], value) / 100.0
-        return f"{format_worker_percent(fraction)} of physical cores"
-    number = parse_worker_number(text, value)
-    if number <= 1:
-        return f"{format_worker_percent(number)} of physical cores"
-    if not number.is_integer():
+        percent = parse_worker_number(text[:-1], value)
+        if percent <= 0 or percent > 100:
+            raise worker_value_error()
+        return "fraction", percent / 100.0
+    if "." in text:
+        fraction = parse_worker_number(text, value)
+        if fraction <= 0 or fraction > 1:
+            raise worker_value_error()
+        return "fraction", fraction
+    try:
+        count = int(text)
+    except (TypeError, ValueError) as exc:
+        raise worker_value_error() from exc
+    if count < 1:
         raise worker_value_error()
-    return f"{int(number)} workers"
+    return "count", count
 
 
 def format_worker_percent(fraction: float) -> str:
@@ -1237,28 +1302,20 @@ def format_worker_percent(fraction: float) -> str:
     return f"{percent:g}%"
 
 
-def parse_worker_fraction(text: str, original: Any) -> float:
-    """Parse a positive percentage number from a worker option."""
-    number = parse_worker_number(text, original)
-    if number <= 0:
-        raise worker_value_error()
-    return number
-
-
 def parse_worker_number(text: str, original: Any) -> float:
-    """Parse a positive worker option number."""
+    """Parse a finite positive worker option number."""
     try:
         number = float(text)
     except (TypeError, ValueError) as exc:
         raise worker_value_error() from exc
-    if number <= 0:
+    if not math.isfinite(number) or number <= 0:
         raise worker_value_error()
     return number
 
 
 def worker_value_error() -> ValueError:
     """Build the standard worker-option validation error."""
-    return ValueError("parallel.workers / --worker must be 'auto', a positive integer worker count, a fraction <= 1, or a percentage such as 50%.")
+    return ValueError("parallel.workers / --worker must be 'auto', a positive integer worker count such as 1 or 4, a decimal CPU fraction in (0, 1] such as 0.5 or 1.0, or a percentage in (0%, 100%].")
 
 
 def normalize_parallel_backend(value: Any) -> str:
@@ -1279,7 +1336,7 @@ def resolve_workers(
     """Resolve workers from physical cores, task count, and platform caps."""
     physical_total = max(1, int(cpu_total if cpu_total is not None else physical_cpu_count()))
     usable_workers = max(1, physical_total - 1)
-    if value in (None, "", "auto"):
+    if is_auto_worker_request(value):
         requested = max(1, int(physical_total * mode_worker_fraction(mode)))
     else:
         requested = resolve_explicit_worker_request(value, physical_total)
@@ -1292,17 +1349,13 @@ def resolve_workers(
 
 
 def resolve_explicit_worker_request(value: Any, physical_total: int) -> int:
-    """Resolve -w/--worker: fractions/percentages or integer worker counts."""
-    text = str(value).strip()
-    if text.endswith("%"):
-        percent = parse_worker_fraction(text[:-1], value)
-        return max(1, int(physical_total * (percent / 100.0)))
-    number = parse_worker_number(text, value)
-    if number <= 1:
-        return max(1, int(physical_total * number))
-    if not number.is_integer():
-        raise worker_value_error()
-    return int(number)
+    """Resolve -w/--worker using form-based fraction/count semantics."""
+    kind, amount = classify_worker_request(value)
+    if kind == "fraction":
+        return max(1, int(physical_total * float(amount)))
+    if kind == "count":
+        return int(amount)
+    raise worker_value_error()
 
 
 def validate_unique_output_names(paths: list[Path]) -> None:

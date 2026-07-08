@@ -3,6 +3,7 @@ from __future__ import annotations
 """Markdown, TSV, VMD, and XLSX summary writers."""
 
 from collections import Counter, defaultdict
+from copy import deepcopy
 from datetime import datetime
 from pathlib import Path
 import re
@@ -17,6 +18,7 @@ from .. import __version__
 from ..banner import SQQ_BANNER
 from ..config import dump_config
 from ..core.cage import KNOWN_CAGE_TYPES, parse_cage_face_label
+from ..display import graph_mode_display
 from ..models import CagePatch, FrameResult
 from .occupancy import guest_composition_label, guest_lookup as build_guest_lookup, guest_resname_order as guest_resname_order_from_guests
 
@@ -137,6 +139,7 @@ SUMMARY_COLUMNS = [
 SUMMARY_DETAIL_TABLE_NAMES = (
     "cage_occupancy",
     "cage_isomer",
+    "quasi_cage_isomer",
     "hydrate_domain",
     "hydrate_cluster_detail",
 )
@@ -865,7 +868,7 @@ def failed_row(frame_name: str, source: str, error: str) -> dict[str, Any]:
     return row
 
 
-def write_frame_info(result: FrameResult, frame_dir: Path, ring_sizes: list[int] | None = None) -> None:
+def write_frame_info(result: FrameResult, frame_dir: Path, ring_sizes: list[int] | None = None, requested_bond_mode: Any | None = None) -> None:
     """Write the per-frame Markdown report with inspection-oriented tables."""
     frame_dir.mkdir(parents=True, exist_ok=True)
     row = result_row(result)
@@ -888,6 +891,7 @@ def write_frame_info(result: FrameResult, frame_dir: Path, ring_sizes: list[int]
                 ["source", source_label(result.frame.source)],
                 ["frame", result.frame.name],
                 ["time_ps", result.frame.time_ps],
+                ["graph_mode", graph_mode_display(requested_bond_mode or row["connection_mode"], [row["connection_mode"]])],
                 ["bond_mode", row["connection_mode"]],
                 ["ring_sizes", ", ".join(str(size) for size in enabled_ring_sizes)],
                 ["status", "ok"],
@@ -1499,8 +1503,9 @@ def write_summary(
     summary_md = outdir / "summary.md"
     if summary_md.exists():
         summary_md.unlink()
+    config_for_dump = config_with_run_metadata(config, run_info or {})
     with (outdir / "run_config.yaml").open("w", encoding="utf-8", newline="\n") as handle:
-        dump_config(config, handle)
+        dump_config(config_for_dump, handle)
 
     detail_index = pd.DataFrame()
     if bool(config.get("output", {}).get("write_summary_detail_csv", True)):
@@ -1513,8 +1518,29 @@ def write_summary(
                 table.to_excel(writer, sheet_name=sheet_name, index=False)
             if not detail_index.empty:
                 detail_index.to_excel(writer, sheet_name="detail_index", index=False)
-            pd.DataFrame(flatten_config(config)).to_excel(writer, sheet_name="config", index=False)
+            pd.DataFrame(flatten_config(config_for_dump)).to_excel(writer, sheet_name="config", index=False)
             format_summary_workbook(writer.book)
+
+
+def config_with_run_metadata(config: dict[str, Any], run_info: dict[str, Any]) -> dict[str, Any]:
+    """Return a config copy that preserves raw settings and records resolved run metadata."""
+    if not run_info:
+        return config
+    enriched = deepcopy(config)
+    run = enriched.setdefault("run", {})
+    parallel = config.get("parallel", {})
+    run.update({
+        "sqq_version": run_info.get("sqq_version", __version__),
+        "graph_mode_requested": run_info.get("graph_mode", config.get("graph", {}).get("bond_mode", "")),
+        "graph_mode_effective": run_info.get("effective_graph_modes", ""),
+        "graph_mode_display": run_info.get("graph_mode_display", ""),
+        "worker_request": parallel.get("workers", "auto"),
+        "worker_policy": run_info.get("worker_policy", ""),
+        "workers_resolved": run_info.get("workers", ""),
+        "parallel_backend": run_info.get("parallel_backend", "serial"),
+        "math_threads_per_worker": run_info.get("math_threads", 1),
+    })
+    return enriched
 
 
 def write_summary_detail_csvs(outdir: Path, tables: dict[str, pd.DataFrame], config: dict[str, Any]) -> pd.DataFrame:
@@ -1557,6 +1583,10 @@ def summary_dashboard_table(data: pd.DataFrame, run_info: dict[str, Any], config
         matched_count = int(matched_files)
     except (TypeError, ValueError):
         matched_count = 0
+    graph_mode_value = run_info.get("graph_mode_display") or graph_mode_display(
+        run_info.get("graph_mode", config.get("graph", {}).get("bond_mode", "auto")),
+        data.get("connection_mode", []),
+    )
 
     rows: list[list[Any]] = [
         [title, ""],
@@ -1590,7 +1620,7 @@ def summary_dashboard_table(data: pd.DataFrame, run_info: dict[str, Any], config
         ["Config file", run_info.get("config_file", "<built-in defaults>")],
         ["Topology", run_info.get("topology", "<none>")],
         ["Mode", run_info.get("mode", "")],
-        ["Graph mode", first_data_value(data, "connection_mode", run_info.get("graph_mode", ""))],
+        ["Graph mode", graph_mode_value],
         ["Search sizes", excel_scalar(config.get("ring", {}).get("sizes", ""))],
         ["Ring report sizes", excel_scalar(configured_ring_report_sizes(config))],
         ["Ring definition", config.get("ring", {}).get("definition", "chordless")],
@@ -1908,6 +1938,7 @@ def summary_detail_tables(data: pd.DataFrame, config: dict[str, Any]) -> dict[st
     tables: dict[str, pd.DataFrame] = {
         "cage_occupancy": cage_occupancy_summary_table(data, markdown_style=False),
         "cage_isomer": cage_isomer_summary_table(data, include_zero_rows=include_zero_isomers),
+        "quasi_cage_isomer": quasi_cage_isomer_summary_table(data),
         "hydrate_domain": hydrate_domain_table(data),
     }
     detail_enabled = bool(config.get("hydrate_cluster", {}).get("detail", False))
@@ -2190,7 +2221,8 @@ def patch_summary_table(data: pd.DataFrame, prefix: str) -> pd.DataFrame:
     if not columns:
         return pd.DataFrame()
     sorted_columns = sorted(columns)
-    labels = [column.removeprefix(f"{prefix}_") for column in sorted_columns]
+    labels = [patch_summary_label(column.removeprefix(f"{prefix}_"), prefix) for column in sorted_columns]
+    output_labels = sorted(set(labels))
     rows: list[dict[str, Any]] = []
     for _, record in data.iterrows():
         row: dict[str, Any] = {
@@ -2200,11 +2232,23 @@ def patch_summary_table(data: pd.DataFrame, prefix: str) -> pd.DataFrame:
         total = 0
         for column, label in zip(sorted_columns, labels):
             count = count_cell(record.get(column, 0))
-            row[label] = count
+            row[label] = row.get(label, 0) + count
             total += count
         row["total"] = total
         rows.append(row)
-    return pd.DataFrame(rows)
+    return pd.DataFrame(rows).reindex(columns=["frame", "time_ps", *output_labels, "total"])
+
+
+def patch_summary_label(patch_type: str, prefix: str) -> str:
+    """Return the workbook label for an open-patch type."""
+    if prefix != "quasi_cage":
+        return patch_type
+    return patch_composition_label(patch_type)
+
+
+def patch_composition_label(patch_type: str) -> str:
+    """Return a patch label without internal prefix or ring-sequence isomer marks."""
+    return patch_display_label(patch_type).translate(SUBSCRIPT_DIGIT_DELETE)
 
 
 def summary_cage_types_from_data(data: pd.DataFrame) -> list[str]:
@@ -2381,6 +2425,36 @@ def global_cage_isomer_labels(data: pd.DataFrame, cage_types: list[str]) -> list
                 if label not in labels:
                     labels.append(label)
     return labels
+
+
+def quasi_cage_isomer_summary_table(data: pd.DataFrame) -> pd.DataFrame:
+    """Build long-form quasi-cage isomer rows for CSV detail output."""
+    columns = [
+        column
+        for column in data.columns
+        if column.startswith("quasi_cage_") and column not in {"quasi_cage_total", "quasi_cage_breakdown"}
+    ]
+    output_columns = ["frame", "time_ps", "quasi_cage_type", "isomer", "count"]
+    if not columns:
+        return pd.DataFrame(columns=output_columns)
+
+    rows: list[dict[str, Any]] = []
+    for _, record in data.iterrows():
+        for column in sorted(columns):
+            count = count_cell(record.get(column, 0))
+            if count == 0:
+                continue
+            isomer = column.removeprefix("quasi_cage_")
+            rows.append(
+                {
+                    "frame": record.get("frame", ""),
+                    "time_ps": record.get("time_ps", ""),
+                    "quasi_cage_type": patch_composition_label(isomer),
+                    "isomer": patch_display_label(isomer),
+                    "count": count,
+                }
+            )
+    return pd.DataFrame(rows, columns=output_columns)
 
 
 def count_cell(value: Any) -> int:

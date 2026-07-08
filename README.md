@@ -2,13 +2,21 @@
 
 **SQQ: Python Joint Toolkit for Water-Shell Topology Analysis.**
 
-Current release: **0.2.5**
+Current release: **0.2.6**
 
 SQQ builds a water network, reports coordination diagnostics, and finds rings, standard half-cages, quasi-cages, closed cages, reported-cage hydrate clusters, per-frame phase domains and boundaries, cage guest occupancy, F3/F4/Q_l order parameters, MCG/DHOP hydrate-nucleation order parameters, and ice-like waters. Detailed algorithms are documented in `docs/design.md`; version notes are documented in `docs/update.md`.
 
+## Changed in 0.2.6
+
+- Worker parsing is now form-based: `-w 1` means one worker, while `-w 1.0` or `-w 100%` means all detected physical cores before the reserve-one-core clamp.
+- Runtime metadata is aligned with the `summary.xlsx` home sheet: terminal output now reports `SQQ version`, final effective `Graph mode`, worker policy, backend, and resolved workers using the same wording as the dashboard.
+- Graph mode display now preserves both requested and effective modes: `auto -> hbond`, `auto -> oo`, or `auto -> mixed (hbond, oo)`; explicit modes display as `hbond`, `oo`, or `pairs`.
+- `summary.xlsx` keeps the `quasi_cage` sheet compact by aggregating quasi-cage isomers into composition-level columns; exact quasi-cage isomers are written to `summary_detail/quasi_cage_isomer.csv`.
+- `run_config.yaml` keeps the raw configuration and adds a `run` block with resolved runtime metadata. Scientific analysis algorithms, coordinates, molecule membership, and topology counts are unchanged from 0.2.5.
+
 ## Changed in 0.2.5
 
-- Worker control: use `--worker` / `-w` with either a physical-core fraction (`50%`, `0.5`, `1`) or an explicit worker count (`4`). SQQ reserves one physical core for the system and clamps by task count and platform limits.
+- Worker control: use `--worker` / `-w` with either a physical-core fraction (`50%`, `0.5`, `1.0`) or an explicit worker count (`1`, `4`). SQQ reserves one physical core for the system and clamps by task count and platform limits.
 - Summary dashboard clarity: the first workbook sheet reports `SQQ version` in Configuration and uses `Analysis Results (min / mean / max)` for per-frame result metrics. `Frames total / ok / failed` remains a run-level frame count.
 - Single-file progress visibility: interactive serial runs now highlight the active stage with bold bright-blue text while keeping the compact three-row stage layout.
 
@@ -88,9 +96,9 @@ sqq analyze -i ./gro -m 50 -o ./result_standard
 sqq analyze -i ./gro -m 99 -o ./result_performance
 ```
 
-Modes do not change `quasi_cage.max_layers`; L1 remains the default in every mode. Use `--quasi-max-layer` explicitly for L2/L3. Automatic workers use the mode fraction of detected physical cores, reserve one physical core for the system, and are capped by the number of independent GRO/XYZ files or selected trajectory frames. Multiple standalone files use spawned processes by default; a single indexed XTC/TRR trajectory can also distribute frames across spawned workers. `--worker N` / `-w N` overrides the mode percentage; the old `--workers` spelling is retained as a compatibility alias.
+Modes do not change `quasi_cage.max_layers`; L1 remains the default in every mode. Use `--quasi-max-layer` explicitly for L2/L3. Automatic workers use the mode fraction of detected physical cores, reserve one physical core for the system, and are capped by the number of independent GRO/XYZ files or selected trajectory frames. Multiple standalone files use spawned processes by default; a single indexed XTC/TRR trajectory can also distribute frames across spawned workers. `--worker N` / `-w N` overrides the mode percentage; integer text such as `1` or `4` is a worker count, while decimal text such as `0.5` or `1.0` and percentages such as `50%` or `100%` are physical-core fractions. The old `--workers` spelling is retained as a compatibility alias.
 
-Version 0.2.5 uses process-based parallelism for independent GRO/XYZ files and selected XTC/TRR frames, so CPU-bound ring, quasi-cage, and cage searches can run on multiple cores. The main process alone owns the terminal panel and final workbook; workers report stage events through a process queue, analyze one file or a small trajectory-frame batch, write frame directories, and return summary rows. At most `3 * workers` process tasks are kept in flight; this bounds Future and serialization overhead without reducing the worker count. `parallel.math_threads: 1` prevents nested BLAS/OpenMP oversubscription.
+Version 0.2.6 uses process-based parallelism for independent GRO/XYZ files and selected XTC/TRR frames, so CPU-bound ring, quasi-cage, and cage searches can run on multiple cores. The main process alone owns the terminal panel and final workbook; workers report stage events through a process queue, analyze one file or a small trajectory-frame batch, write frame directories, and return summary rows. At most `3 * workers` process tasks are kept in flight; this bounds Future and serialization overhead without reducing the worker count. `parallel.math_threads: 1` prevents nested BLAS/OpenMP oversubscription.
 
 The default `chordless`/`bounded` path preserves the established scientific definitions while accelerating neighbor generation, incremental chord pruning, L1 forward checking, cached layer growth, integer-mask subset ownership, and cage target/edge state pruning. Cage DFS also applies exact remaining-edge incidence and parity conditions before expansion. MDAnalysis supplies orthorhombic cutoff candidates when available, but SQQ still rechecks every distance and hydrogen-bond angle with its established float64 logic. F3 and graph-mode Q_l share one graph-vector cache; all Q_l degrees share candidate lists and spherical-angle work. Optional `ring.definition: shortest_path` applies the Franzblau shortest-path criterion and reuses bounded-BFS distance maps. Optional `quasi_cage.search_policy: exact` preserves distinct frontiers and enumerates connected L2/L3 subsets; these opt-in modes can change or add results. Candidate and state truncation is reported through frame warnings.
 
@@ -260,9 +268,9 @@ built-in defaults < mode preset < config.yaml < explicit command-line options
 
 ## Parallel Execution
 
-`parallel.backend: process` is the 0.2.5 default for two or more independent GRO/XYZ inputs. SQQ uses the `spawn` start method on every supported platform. Each worker receives run configuration once, reads and writes its own frame, and sends only small stage events plus one summary row to the main process. This avoids the Python GIL limitation of the compatibility thread backend.
+`parallel.backend: process` is the default for two or more independent GRO/XYZ inputs. SQQ uses the `spawn` start method on every supported platform. Each worker receives run configuration once, reads and writes its own frame, and sends only small stage events plus one summary row to the main process. This avoids the Python GIL limitation of the compatibility thread backend.
 
-Automatic workers use the mode fraction of detected physical cores, then reserve one physical core for the operating system and cap the result by the number of files or selected trajectory frames. Physical-core detection prefers optional `psutil`, then platform probes such as Windows CIM, macOS `sysctl`, or Linux `/proc/cpuinfo`; if physical cores cannot be detected, SQQ falls back to the CPU count visible to the process. `--worker` / `-w` accepts either a fraction (`50%`, `0.5`, or `1` for 100%) or an explicit positive integer worker count. Windows `ProcessPoolExecutor` runs are capped at 61 workers; Linux workstations can use larger explicit values such as `-w 100`, subject to the reserve-one-core rule, task count, memory, and storage throughput.
+Automatic workers use the mode fraction of detected physical cores, then reserve one physical core for the operating system and cap the result by the number of files or selected trajectory frames. Physical-core detection prefers optional `psutil`, then platform probes such as Windows CIM, macOS `sysctl`, or Linux `/proc/cpuinfo`; if physical cores cannot be detected, SQQ falls back to the CPU count visible to the process. `--worker` / `-w` accepts either a fraction (`50%`, `0.5`, or `1.0` for 100%) or an explicit positive integer worker count (`1` means one worker). Windows `ProcessPoolExecutor` runs are capped at 61 workers; Linux workstations can use larger explicit values such as `-w 100`, subject to the reserve-one-core rule, task count, memory, and storage throughput.
 
 One XTC/TRR file with `--top` is frame-parallel when the process backend resolves to more than one worker. Every worker opens a private MDAnalysis Universe once and seeks small contiguous batches of selected raw frame indexes; batch size is automatically bounded from 1 to 8, and complete coordinate arrays are not serialized between processes. Parent and worker trajectory readers are explicitly closed. Multiple trajectory files and the compatibility thread backend use the serial trajectory reader.
 
@@ -377,7 +385,7 @@ References: Barnes et al., MCG ([DOI 10.1063/1.4871898](https://doi.org/10.1063/
 | `--pairs FILE` | Text pair-map file | Supply explicit water-network edges and enable pairs mode |
 | `--pair-id KIND` | `resid`, `oxygen_index`, `atomid`; default `resid` | Select the identifier type used in the pair file |
 | `--parallel-backend BACKEND` | `process`, `thread`, `serial`; default `process` | Select independent-file/frame execution backend |
-| `--worker, -w N` | `auto`, a fraction (`50%`, `0.5`, `1`), or a positive integer | Override the mode-based worker count; one physical core is reserved. `--workers` remains a hidden compatibility alias |
+| `--worker, -w N` | `auto`, a fraction (`50%`, `0.5`, `1.0`), or a positive integer (`1`, `4`) | Override the mode-based worker count; one physical core is reserved. Integer `1` means one worker, while `1.0` / `100%` means all physical cores before clamping. `--workers` remains a hidden compatibility alias |
 | `--strict` | Flag; default off | Stop on the first failed frame |
 | `--output-layout LAYOUT` | `grouped`, `flat`; default `grouped` | Select the per-frame structure-file layout |
 | `--no-info` | Flag | Disable per-frame `*_info.md` files |
@@ -415,6 +423,7 @@ result_sqq/
   summary_detail/
     cage_occupancy.csv
     cage_isomer.csv
+    quasi_cage_isomer.csv
     hydrate_domain.csv
     hydrate_cluster_detail.csv        # only with --cluster-detail on
   run_config.yaml
@@ -441,7 +450,7 @@ result_sqq/
 
 GRO structure folders, filenames, and title lines use portable ASCII structure labels since version 0.2.4, for example `5^126^2` and `qc_5r_5^36^2_56566`. Markdown/Excel scientific labels retain their readable superscript notation. This avoids Windows GBK/legacy-reader failures caused by Unicode superscript or subscript characters in generated GRO paths and titles.
 
-Each per-frame `*_info.md` report is arranged for inspection. `Frame Information` begins with the SQQ version, report-generation date and local timezone, absolute source path, frame name, and trajectory time. The report shows only reported ring sizes, reports final free-ring counts, includes the active network degree distribution, groups half-cage and quasi-cage isomers below composition totals, and keeps cage composition totals plus cage isomers in one vertical `Cage` table. When enabled, the same report adds `Hydrate Cluster`, hierarchy, detail, domain, and boundary sections. Internal `hc_` and `qc_` prefixes are omitted from report labels.
+Each per-frame `*_info.md` report is arranged for inspection. `Frame Information` begins with the SQQ version, report-generation date and local timezone, absolute source path, frame name, and trajectory time. The report shows requested/effective `graph_mode`, the effective `bond_mode`, only reported ring sizes, final free-ring counts, the active network degree distribution, groups half-cage and quasi-cage isomers below composition totals, and keeps cage composition totals plus cage isomers in one vertical `Cage` table. When enabled, the same report adds `Hydrate Cluster`, hierarchy, detail, domain, and boundary sections. Internal `hc_` and `qc_` prefixes are omitted from report labels.
 
 When quasi-cage or cage isomers are present, the same report adds description tables:
 
@@ -450,7 +459,7 @@ When quasi-cage or cage isomers are present, the same report adds description ta
 
 `Cage Occupancy` remains a separate table because it describes guest assignment rather than cage topology. It expands exact guest compositions across dynamic columns in source guest order.
 
-`summary.xlsx` remains plotting-oriented. Its first sheet is a dashboard: Configuration includes `SQQ version`, and `Analysis Results (min / mean / max)` reports per-frame min/mean/max values while `Frames total / ok / failed` stays a run-level count. The analysis sheets keep one input file or trajectory frame per row, including `frame`, connection diagnostics, `ring`, `half_cage`, `quasi_cage`, `cage`, optional per-frame `hydrate_cluster`, `order_parameter`, `ice`, `detail_index`, and `config`. Multi-row detail tables are written as UTF-8-SIG CSV files in `summary_detail/`: `cage_occupancy.csv`, `cage_isomer.csv`, `hydrate_domain.csv`, and, with `--cluster-detail on`, `hydrate_cluster_detail.csv`. `cage_isomer.csv` defaults to observed nonzero isomer rows plus per-frame totals; use `--cage-isomer-rows all` to restore the full zero-filled matrix. The `order_parameter` sheet contains `F3_mean`, `F3_count`, `F4_mean`, `F4_count`, one mean/count pair for each requested Q_l degree, and the default `MCG-1` and `DHOP35` largest-cluster columns. `MCG-3` and `DHOP30` columns appear only when their switches are enabled. By default the Q_l columns are `q6_mean`, `q6_count`, `q12_mean`, and `q12_count`. Each per-frame report places a separate `Hydrate Nucleation Order Parameters` table immediately after the F3/F4/Q_l table.
+`summary.xlsx` remains plotting-oriented. Its first sheet is a dashboard: Configuration includes `SQQ version` and requested/effective `Graph mode` such as `auto -> hbond`, and `Analysis Results (min / mean / max)` reports per-frame min/mean/max values while `Frames total / ok / failed` stays a run-level count. The analysis sheets keep one input file or trajectory frame per row, including `frame`, connection diagnostics, `ring`, `half_cage`, compact composition-level `quasi_cage`, `cage`, optional per-frame `hydrate_cluster`, `order_parameter`, `ice`, `detail_index`, and `config`. Multi-row and isomer detail tables are written as UTF-8-SIG CSV files in `summary_detail/`: `cage_occupancy.csv`, `cage_isomer.csv`, `quasi_cage_isomer.csv`, `hydrate_domain.csv`, and, with `--cluster-detail on`, `hydrate_cluster_detail.csv`. The `quasi_cage` workbook sheet aggregates exact quasi-cage isomers into composition-level columns such as `5r_5²6³`, while `quasi_cage_isomer.csv` keeps nonzero exact isomer rows with `quasi_cage_type`, `isomer`, and `count`. `cage_isomer.csv` defaults to observed nonzero isomer rows plus per-frame totals; use `--cage-isomer-rows all` to restore the full zero-filled matrix. The `order_parameter` sheet contains `F3_mean`, `F3_count`, `F4_mean`, `F4_count`, one mean/count pair for each requested Q_l degree, and the default `MCG-1` and `DHOP35` largest-cluster columns. `MCG-3` and `DHOP30` columns appear only when their switches are enabled. By default the Q_l columns are `q6_mean`, `q6_count`, `q12_mean`, and `q12_count`. Each per-frame report places a separate `Hydrate Nucleation Order Parameters` table immediately after the F3/F4/Q_l table.
 
 Output ownership is:
 

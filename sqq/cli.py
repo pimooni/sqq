@@ -116,7 +116,7 @@ def build_parser() -> argparse.ArgumentParser:
     analyze_parser.add_argument("--pairs", metavar="PAIRS.txt", help="Pair file for bond_mode=pairs; each line contains two water ids.")
     analyze_parser.add_argument("--pair-id", metavar="KIND", choices=["resid", "oxygen_index", "atomid"], help="How ids in --pairs are interpreted; default resid.")
     analyze_parser.add_argument("--parallel-backend", choices=("process", "thread", "serial"), help="Independent-file backend; default process uses multiple CPU cores.")
-    analyze_parser.add_argument("-w", "--worker", metavar="N|auto", default=None, help="Worker count or physical-core fraction; e.g. 4, 0.5, or 50%%. Reserves one physical core.")
+    analyze_parser.add_argument("-w", "--worker", metavar="N|auto", default=None, help="Worker count or physical-core fraction; e.g. 1, 4, 0.5, 1.0, or 50%%. Reserves one physical core.")
     analyze_parser.add_argument("--workers", dest="worker", metavar="N|auto", help=argparse.SUPPRESS)
     analyze_parser.add_argument("--strict", action="store_true", help="Stop on the first failed frame.")
     analyze_parser.add_argument("--output-layout", choices=["grouped", "flat"], help="GRO layout: grouped uses ring/, half_cage/<type>/, quasi_cage/<type>/, cage/<type>/, and ice/; flat keeps same-folder files.")
