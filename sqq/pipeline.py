@@ -245,6 +245,7 @@ def build_run_info(
         "parallel_backend": parallel_backend,
         "math_threads": int(config.get("parallel", {}).get("math_threads", 1)),
         "summary_xlsx": str((outdir / "summary.xlsx").resolve()),
+        "summary_detail": str((outdir / str(config.get("output", {}).get("summary_detail_dir", "summary_detail"))).resolve()),
         "run_config": str((outdir / "run_config.yaml").resolve()),
     }
     if paths:
@@ -1372,6 +1373,10 @@ def apply_cli_overrides(config: dict[str, Any], args: Namespace) -> None:
         config["output"]["write_ice_gro"] = False
     if args.no_xlsx:
         config["output"]["write_xlsx_summary"] = False
+    if getattr(args, "no_summary_detail", False):
+        config["output"]["write_summary_detail_csv"] = False
+    if getattr(args, "cage_isomer_rows", None):
+        config["output"]["cage_isomer_rows"] = args.cage_isomer_rows
     if getattr(args, "write_order_tsv", False):
         config["output"]["write_order_tsv"] = True
 
@@ -1445,6 +1450,20 @@ def normalize_analysis_scopes(config: dict[str, Any]) -> None:
     if math_threads < 1:
         raise ValueError("parallel.math_threads must be at least 1.")
     parallel["math_threads"] = math_threads
+    output = config.setdefault("output", {})
+    output["write_summary_detail_csv"] = parse_on_off(
+        output.get("write_summary_detail_csv", True),
+        "output.write_summary_detail_csv",
+    )
+    detail_dir = str(output.get("summary_detail_dir", "summary_detail")).strip() or "summary_detail"
+    detail_path = Path(detail_dir)
+    if detail_path.is_absolute() or ".." in detail_path.parts:
+        raise ValueError("output.summary_detail_dir must be a relative directory inside the output folder.")
+    output["summary_detail_dir"] = detail_dir
+    cage_isomer_rows = str(output.get("cage_isomer_rows", "nonzero")).strip().lower()
+    if cage_isomer_rows not in {"nonzero", "all"}:
+        raise ValueError("output.cage_isomer_rows / --cage-isomer-rows must be nonzero or all.")
+    output["cage_isomer_rows"] = cage_isomer_rows
     guest_center_mode = str(config.get("guest", {}).get("center_mode", "center_atom")).strip().lower()
     if guest_center_mode not in {"center_atom", "centroid", "auto"}:
         raise ValueError("guest.center_mode must be center_atom, centroid, or auto.")

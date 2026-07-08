@@ -14,7 +14,7 @@ input frames
   -> closed cage search and guest occupancy
   -> optional hydrate_cluster analysis from reported cages
   -> F3/F4/Q_l plus MCG/DHOP order parameters and ice metrics
-  -> per-frame outputs and summary.xlsx
+  -> per-frame outputs, summary.xlsx, and summary_detail CSV
 ```
 
 The shared water graph is used by ring, half_cage, quasi_cage, cage, F3/F4, default Q_l, and ice analysis. MCG and DHOP are calculated during the order stage but use dedicated guest/water cutoff graphs because their published definitions are independent of the selected SQQ bond mode. Hydrate_cluster analysis starts after cage reporting and uses reported cage-ring membership, not the raw water graph. The graph node is the water oxygen. A graph edge is an O-H...O hydrogen bond in `hbond` mode, an O-O neighbor in `oo` mode, or a user-supplied pair in `pairs` mode. Coordination diagnostics read this graph without adding, removing, or capping edges.
@@ -64,7 +64,7 @@ worker process
 main process
   -> consume stage events
   -> reorder rows by input_index
-  -> write summary.xlsx and run_config.yaml
+  -> write summary.xlsx, summary_detail CSV, and run_config.yaml
 ```
 
 `spawn` is selected explicitly on macOS, Windows, and Linux. This avoids forking a process after the interactive progress refresh thread exists and gives the same pickling/import contract on every platform. Worker callables and initializers are module-level functions. Only paths, raw trajectory indexes, small event tuples, and summary dictionaries cross process boundaries; atoms, rings, patches, and cages stay worker-local.
@@ -278,7 +278,7 @@ ring_centers: locally unwrapped O-centroid for each ring
 
 `edge_to_rings` is the primary topology filter. `ring_centers` are only used after topology filtering to order and limit candidates.
 
-Version 0.2.3 also creates frame-local caches for symmetric ring-center distances, L2/L3 topology expansions, and patch geometry. These caches are discarded after the frame and therefore never mix topology or coordinates between trajectory frames.
+Version 0.2.4 retains frame-local caches for symmetric ring-center distances, L2/L3 topology expansions, and patch geometry. These caches are discarded after the frame and therefore never mix topology or coordinates between trajectory frames.
 
 Search order:
 
@@ -529,6 +529,8 @@ Rules:
 
 ## Output Layout
 
+Per-frame output folders use the default grouped structure. Generated GRO paths and title lines use ASCII-only structure labels (`5^12`, `5^126^2`, `hc_5r_5^5`, and similar); Unicode superscripts/subscripts remain display-only in Markdown and Excel. This prevents Windows locale-dependent GRO parsers from failing before they read otherwise valid fixed-width atom records.
+
 Per-frame output folders use the default grouped structure:
 
 ```text
@@ -542,7 +544,7 @@ frame_name/
   ice/
 ```
 
-The global workbook is `summary.xlsx`. It contains run metadata, per-frame counts, connection and coordination diagnostics, report-scoped ring/cage tables, half_cage/quasi_cage tables, occupancy tables, optional hydrate_cluster tables, order parameters, ice, and config sheets.
+The global workbook is `summary.xlsx`. It contains run metadata, per-frame counts, connection and coordination diagnostics, report-scoped ring/cage tables, half_cage/quasi_cage tables, optional per-frame hydrate_cluster totals, order parameters, ice, `detail_index`, and config sheets. Multi-row detail tables are written as UTF-8-SIG CSV files in `summary_detail/`.
 
 Each per-frame `*_info.md` report is optimized for inspection rather than plotting:
 
@@ -556,11 +558,11 @@ Each per-frame `*_info.md` report is optimized for inspection rather than plotti
 - cluster hierarchy labels include total and nonzero cage-type counts, while cage composition is embedded in the corresponding cluster detail table;
 - domain detail separates strict seed counts, unique seed-covered cages, expanded cages, and adjacent boundary contacts; the hierarchy omits a dedicated seed column;
 - boundary output separates single-phase, interphase, ambiguous, and unclassified cages without assigning phase from cage composition alone;
-- per-frame info reports omit long cage-id and shared-face-id expansions; exact ids remain available in the optional workbook detail sheets;
+- per-frame info reports omit long cage-id and shared-face-id expansions; exact ids remain available in `summary_detail/*.csv`;
 - all hierarchy labels use the same short `├`, `└`, and `│` symbols, and Markdown source tables are padded using Unicode display width so their pipe columns align;
 - Frame Information starts with `sqq version`, `date & time`, `source`, `frame`, and `time_ps`, then reports bond mode, ring sizes, status, and molecule counts; Molecules, active connection coordination, Order Parameters, Hydrate Nucleation Order Parameters, and Ice are separated into compact sections.
 
-The global `summary.xlsx` workbook keeps plotting-oriented analysis sheets with one input file or trajectory frame per row. When hydrate_cluster is enabled, `hydrate_cluster` keeps one row per frame and `hydrate_domain` keeps one row per domain. With `hydrate_cluster.detail = true` or `--cluster-detail on`, `hydrate_cluster_detail` adds one row per cluster. Public motif output is not written. The `order_parameter` sheet reports `F3_mean`, `F3_count`, `F4_mean`, `F4_count`, one mean/count pair for each requested Q_l degree, plus focus-water columns when configured. It also reports default `MCG-1` and `DHOP35` largest clusters; optional `MCG-3` and `DHOP30` columns appear only when enabled. Per-frame Markdown places these four hydrate descriptors in a separate table immediately after F3/F4/Q_l. Optional per-water F3/F4/Q_l output is written as `*_order_parameter.tsv`; MCG/DHOP currently remain frame-level outputs.
+The global `summary.xlsx` workbook keeps plotting-oriented analysis sheets with one input file or trajectory frame per row. Multi-row detail outputs are split into `summary_detail/cage_occupancy.csv`, `summary_detail/cage_isomer.csv`, `summary_detail/hydrate_domain.csv`, and, when `hydrate_cluster.detail = true` or `--cluster-detail on`, `summary_detail/hydrate_cluster_detail.csv`. `detail_index` records the generated CSV file paths and table dimensions. `cage_isomer.csv` defaults to nonzero isomer rows plus per-frame totals; `output.cage_isomer_rows = all` or `--cage-isomer-rows all` restores the full zero-filled matrix. Public motif output is not written. The `order_parameter` sheet reports `F3_mean`, `F3_count`, `F4_mean`, `F4_count`, one mean/count pair for each requested Q_l degree, plus focus-water columns when configured. It also reports default `MCG-1` and `DHOP35` largest clusters; optional `MCG-3` and `DHOP30` columns appear only when enabled. Per-frame Markdown places these four hydrate descriptors in a separate table immediately after F3/F4/Q_l. Optional per-water F3/F4/Q_l output is written as `*_order_parameter.tsv`; MCG/DHOP currently remain frame-level outputs.
 
 ## Current Limits
 

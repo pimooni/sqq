@@ -134,6 +134,13 @@ SUMMARY_COLUMNS = [
     "interfacial_ice_waters",
 ]
 
+SUMMARY_DETAIL_TABLE_NAMES = (
+    "cage_occupancy",
+    "cage_isomer",
+    "hydrate_domain",
+    "hydrate_cluster_detail",
+)
+
 TREE_MIDDLE = "\u251c"
 TREE_LAST = "\u2514"
 TREE_PIPE = "\u2502"
@@ -1484,7 +1491,7 @@ def write_summary(
     write_xlsx: bool = True,
     run_info: dict[str, Any] | None = None,
 ) -> None:
-    """Write global XLSX summaries and the final run config."""
+    """Write global summaries, summary_detail CSV files, and the final run config."""
     outdir.mkdir(parents=True, exist_ok=True)
     columns = list(SUMMARY_COLUMNS)
     extra_columns = stable_extra_columns(rows, columns)
@@ -1494,13 +1501,50 @@ def write_summary(
         summary_md.unlink()
     with (outdir / "run_config.yaml").open("w", encoding="utf-8", newline="\n") as handle:
         dump_config(config, handle)
+
+    detail_index = pd.DataFrame()
+    if bool(config.get("output", {}).get("write_summary_detail_csv", True)):
+        detail_index = write_summary_detail_csvs(outdir, summary_detail_tables(data, config), config)
+
     if write_xlsx:
         with pd.ExcelWriter(outdir / "summary.xlsx", engine="openpyxl") as writer:
             summary_dashboard_table(data, run_info or {}, config).to_excel(writer, sheet_name="summary", index=False, header=False)
             for sheet_name, table in summary_sheet_tables(data, config).items():
                 table.to_excel(writer, sheet_name=sheet_name, index=False)
+            if not detail_index.empty:
+                detail_index.to_excel(writer, sheet_name="detail_index", index=False)
             pd.DataFrame(flatten_config(config)).to_excel(writer, sheet_name="config", index=False)
             format_summary_workbook(writer.book)
+
+
+def write_summary_detail_csvs(outdir: Path, tables: dict[str, pd.DataFrame], config: dict[str, Any]) -> pd.DataFrame:
+    """Write large multi-row detail tables as CSV files and return a workbook index."""
+    detail_dir_name = str(config.get("output", {}).get("summary_detail_dir", "summary_detail")).strip() or "summary_detail"
+    detail_dir = outdir / detail_dir_name
+    detail_dir.mkdir(parents=True, exist_ok=True)
+    for name in SUMMARY_DETAIL_TABLE_NAMES:
+        stale = detail_dir / f"{name}.csv"
+        if stale.exists():
+            stale.unlink()
+
+    rows: list[dict[str, Any]] = []
+    for name in SUMMARY_DETAIL_TABLE_NAMES:
+        table = tables.get(name)
+        if table is None:
+            continue
+        path = detail_dir / f"{name}.csv"
+        table.to_csv(path, index=False, encoding="utf-8-sig")
+        relative_dir = detail_dir_name.rstrip("/\\")
+        relative_file = f"{relative_dir}/{name}.csv".replace("\\", "/")
+        rows.append(
+            {
+                "table": name,
+                "file": relative_file,
+                "rows": len(table),
+                "columns": len(table.columns),
+            }
+        )
+    return pd.DataFrame(rows, columns=["table", "file", "rows", "columns"])
 
 
 def summary_dashboard_table(data: pd.DataFrame, run_info: dict[str, Any], config: dict[str, Any]) -> pd.DataFrame:
@@ -1538,6 +1582,7 @@ def summary_dashboard_table(data: pd.DataFrame, run_info: dict[str, Any], config
     rows.extend([
         ["Output directory", run_info.get("output_dir", "")],
         ["summary.xlsx", run_info.get("summary_xlsx", "")],
+        ["summary_detail", run_info.get("summary_detail", "")],
         ["run_config.yaml", run_info.get("run_config", "")],
         ["", ""],
         ["Configuration", ""],
@@ -1813,7 +1858,7 @@ def summary_markdown_tables(data: pd.DataFrame) -> list[tuple[str, pd.DataFrame]
 
 
 def summary_sheet_tables(data: pd.DataFrame, config: dict[str, Any]) -> dict[str, pd.DataFrame]:
-    """Build XLSX sheets using the configured report scopes."""
+    """Build lightweight XLSX sheets using the configured report scopes."""
     ring_sizes = configured_ring_report_sizes(config)
     ring_columns = ["frame", "time_ps"]
     for size in ring_sizes:
@@ -1825,12 +1870,20 @@ def summary_sheet_tables(data: pd.DataFrame, config: dict[str, Any]) -> dict[str
         "half_cage": patch_summary_table(data, "half_cage"),
         "quasi_cage": patch_summary_table(data, "quasi_cage"),
         "cage": cage_summary_table(data),
-        "cage_occupancy": cage_occupancy_summary_table(data, markdown_style=False),
-        "cage_isomer": cage_isomer_summary_table(data, include_zero_rows=True),
         "hydrate_cluster": hydrate_cluster_summary_table(data),
-        "hydrate_domain": hydrate_domain_table(data),
         "order_parameter": order_parameter_summary_table(data),
         "ice": summary_simple_table(data, ["frame", "time_ps", "ice_like_waters", "ice_i_waters", "interfacial_ice_waters"]),
+    }
+    return {name: table for name, table in tables.items() if not table.empty}
+
+
+def summary_detail_tables(data: pd.DataFrame, config: dict[str, Any]) -> dict[str, pd.DataFrame]:
+    """Build potentially large multi-row detail tables for summary_detail CSV output."""
+    include_zero_isomers = str(config.get("output", {}).get("cage_isomer_rows", "nonzero")).lower() == "all"
+    tables: dict[str, pd.DataFrame] = {
+        "cage_occupancy": cage_occupancy_summary_table(data, markdown_style=False),
+        "cage_isomer": cage_isomer_summary_table(data, include_zero_rows=include_zero_isomers),
+        "hydrate_domain": hydrate_domain_table(data),
     }
     detail_enabled = bool(config.get("hydrate_cluster", {}).get("detail", False))
     if detail_enabled:
@@ -1841,7 +1894,6 @@ def summary_sheet_tables(data: pd.DataFrame, config: dict[str, Any]) -> dict[str
         if detail_enabled:
             keep_empty.add("hydrate_cluster_detail")
     return {name: table for name, table in tables.items() if not table.empty or name in keep_empty}
-
 
 def frame_summary_table(data: pd.DataFrame, ring_sizes: list[int]) -> pd.DataFrame:
     """Build the main per-frame table using the active report scopes."""

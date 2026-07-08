@@ -2,6 +2,53 @@
 
 This file records versioned update notes. New releases should be appended above older entries.
 
+## Version 0.2.4
+
+### Short Summary
+
+Version 0.2.4 fixes generated GRO compatibility on Windows and other locale-dependent readers, and moves large multi-row summary details out of `summary.xlsx` into CSV files. Structure directory names, filenames, and GRO title lines now use portable ASCII labels, while Markdown and Excel retain readable scientific superscripts. Analysis algorithms, counts, coordinates, and molecule membership are unchanged.
+
+### Bug Fixes
+
+1. Generated GRO files could fail to open in Windows/locale-dependent readers
+   - Symptom: generated half-cage, quasi-cage, or cage GRO files could be rejected by tools such as MDAnalysis on Windows even though SQQ's fixed-column audit found valid atom counts, atom records, coordinates, and box lines.
+   - Cause: Unicode superscript/subscript structure labels appeared in generated directory names, filenames, and GRO title lines; some readers decoded those bytes through the active system locale, such as GBK, before parsing the file.
+   - Fix: generated structure labels and GRO title lines now use portable ASCII forms such as `5^126^2`, `hc_5r_5^5`, and `qc_5r_5^36^2_56566`. Markdown and workbook display labels keep readable scientific notation.
+
+2. Long XTC/TRR runs could fail while writing `summary.xlsx`
+   - Symptom: analysis completed all frames, then crashed at final workbook writing with an Excel size error such as `This sheet is too large`, especially for `-s 4,5,6` trajectories with many frames.
+   - Cause: multi-row detail tabs, especially `cage_isomer`, expanded one frame into many rows and could exceed Excel's 1,048,576-row sheet limit.
+   - Fix: `cage_occupancy`, `cage_isomer`, `hydrate_domain`, and optional `hydrate_cluster_detail` are written as UTF-8-SIG CSV files under `summary_detail/`; `summary.xlsx` keeps a lightweight `detail_index` sheet. `cage_isomer.csv` defaults to nonzero isomer rows plus per-frame totals.
+
+### Main Changes
+
+1. Portable GRO structure labels
+   - Converts Unicode display labels that contain superscript/subscript structure notation to ASCII path/title forms, for example `5^126^2`, `hc_5r_5^5`, and `qc_5r_5^36^2_56566`.
+   - Applies the conversion to half-cage, quasi-cage, and cage directories and filenames, and sanitizes every generated GRO title line.
+   - Keeps atom/residue names, atom membership, coordinates, box vectors, report labels, and workbook labels unchanged.
+
+2. Reader verification
+   - The reported failure was reproduced with MDAnalysis on Windows: 10 of 43 generated `1200ns.gro` structure files failed when Unicode superscript/subscript bytes were decoded through the active GBK locale.
+   - Before the fix, SQQ's strict fixed-column audit found valid atom counts, 44-character atom records, numeric coordinates, and valid box lines in all 43 files, isolating the failure to Unicode path/title compatibility.
+   - After the fix, the 76-test suite passes; regression tests require ASCII-only generated paths/titles and successful GRO re-reading. All 43 files in the complete `1200ns.gro` structure set pass fixed-column validation and MDAnalysis loading.
+
+3. Long-trajectory summary detail CSV output
+   - Moves `cage_occupancy`, `cage_isomer`, `hydrate_domain`, and optional `hydrate_cluster_detail` out of the workbook body and writes them as UTF-8-SIG CSV files under `summary_detail/`.
+   - Adds a lightweight `detail_index` sheet to `summary.xlsx` with each generated detail table path and dimensions.
+   - Makes `cage_isomer.csv` default to observed nonzero isomer rows plus per-frame totals; `--cage-isomer-rows all` or `output.cage_isomer_rows: all` restores the full zero-filled matrix.
+   - Prevents long XTC/TRR runs from failing at the final Excel-writing step when a multi-row detail sheet exceeds Excel's 1,048,576-row limit.
+
+4. Package version
+   - Updated `pyproject.toml` and `sqq.__version__` from `0.2.3` to `0.2.4`.
+   - Updated README, design documentation, and the English/Chinese design DOCX files.
+
+### Compatibility
+
+- Scientific analysis results do not change.
+- Generated GRO structure paths change from Unicode display labels to ASCII labels. Scripts that hard-coded the former Unicode paths should update those path strings.
+- Source frame names are retained; the compatibility conversion applies to SQQ-generated scientific structure labels and GRO title text.
+- `summary.xlsx` no longer contains the multi-row `cage_occupancy`, `cage_isomer`, `hydrate_domain`, or `hydrate_cluster_detail` sheets; these tables are available as CSV files in `summary_detail/` and indexed by `detail_index`.
+
 ## Version 0.2.3
 
 ### Short Summary

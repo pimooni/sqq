@@ -1,8 +1,10 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 """GRO writers for SQQ visualization outputs."""
 
 from pathlib import Path
+import re
+import unicodedata
 
 import numpy as np
 
@@ -15,6 +17,10 @@ from .occupancy import guest_composition_label, guest_lookup, guest_resname_orde
 RING_CENTER_NAMES = {4: "R4", 5: "R5", 6: "R6", 7: "R7"}
 CAGE_CENTER_NAMES = {"512": "G512", "51262": "G62", "51263": "G63", "51264": "G64", "51268": "G68", "435663": "G436"}
 SUPERSCRIPT_DIGITS = str.maketrans("0123456789-", "⁰¹²³⁴⁵⁶⁷⁸⁹⁻")
+SUPERSCRIPT_TO_ASCII = str.maketrans("⁰¹²³⁴⁵⁶⁷⁸⁹⁻", "0123456789-")
+SUBSCRIPT_TO_ASCII = str.maketrans("₀₁₂₃₄₅₆₇₈₉", "0123456789")
+SUPERSCRIPT_RUN = re.compile(r"[⁰¹²³⁴⁵⁶⁷⁸⁹⁻]+")
+SUBSCRIPT_RUN = re.compile(r"[₀₁₂₃₄₅₆₇₈₉]+")
 
 
 def write_ring_gro_files(
@@ -98,9 +104,10 @@ def write_patch_gro_files(
     for patch_type, group in sorted(by_type.items()):
         atoms = aggregate_patch_atoms(result.frame, group, water_lookup)
         if atoms or write_empty:
-            grouped_name = f"{result.frame.name}_{patch_type}.gro"
+            file_label = ascii_gro_text(patch_type)
+            grouped_name = f"{result.frame.name}_{file_label}.gro"
             flat_name = grouped_name
-            path = patch_structure_path(frame_dir, category, patch_type, grouped_name, flat_name, layout)
+            path = patch_structure_path(frame_dir, category, file_label, grouped_name, flat_name, layout)
             write_gro(path, f"{result.frame.name} {patch_type}", atoms, result.frame.box)
 
 
@@ -150,7 +157,7 @@ def write_cage_gro_files(result: FrameResult, frame_dir: Path, write_empty: bool
     for (cage_type, suffix), cages in sorted(groups.items()):
         atoms = aggregate_cage_atoms(result.frame, cages, water_lookup, guests_by_id)
         if atoms or write_empty:
-            grouped_label = cage_file_label(cage_type)
+            grouped_label = ascii_gro_text(cage_file_label(cage_type))
             display_label = f"{grouped_label}{'_' + suffix if suffix else ''}"
             grouped_name = f"{result.frame.name}_cage_{display_label}.gro"
             flat_label = f"{cage_type}{'_' + suffix if suffix else ''}"
@@ -223,10 +230,10 @@ def aggregate_water_atoms(frame: Frame, waters: list[Water], oxygens: tuple[int,
 
 
 def write_gro(path: Path, title: str, atoms: list[Atom], box: np.ndarray | None) -> None:
-    """Write a minimal, VMD-friendly GRO file."""
+    """Write a minimal GRO file whose title is safe for ASCII-oriented readers."""
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8", newline="\n") as handle:
-        handle.write(f"{title}\n")
+        handle.write(f"{ascii_gro_text(title)}\n")
         handle.write(f"{len(atoms):5d}\n")
         for serial, atom in enumerate(atoms, start=1):
             resid = atom.resid % 100000
@@ -305,6 +312,14 @@ def composition_label(sequence: str) -> str:
 def superscript_number(value: int) -> str:
     """Return an integer as superscript Arabic numerals."""
     return str(value).translate(SUPERSCRIPT_DIGITS)
+
+
+def ascii_gro_text(value: str) -> str:
+    """Convert display-oriented Unicode structure labels to portable ASCII."""
+    text = SUPERSCRIPT_RUN.sub(lambda match: "^" + match.group().translate(SUPERSCRIPT_TO_ASCII), str(value))
+    text = SUBSCRIPT_RUN.sub(lambda match: "_" + match.group().translate(SUBSCRIPT_TO_ASCII), text)
+    normalized = unicodedata.normalize("NFKD", text)
+    return "".join(character if ord(character) < 128 else "_" for character in normalized)
 
 
 def parse_generic_cage_label(label: str) -> dict[int, int]:

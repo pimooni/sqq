@@ -2,9 +2,14 @@
 
 **SQQ: Python Joint Toolkit for Water-Shell Topology Analysis.**
 
-Current release: **0.2.3**
+Current release: **0.2.4**
 
 SQQ builds a water network, reports coordination diagnostics, and finds rings, standard half-cages, quasi-cages, closed cages, reported-cage hydrate clusters, per-frame phase domains and boundaries, cage guest occupancy, F3/F4/Q_l order parameters, MCG/DHOP hydrate-nucleation order parameters, and ice-like waters. Detailed algorithms are documented in `docs/design.md`; version notes are documented in `docs/update.md`.
+
+## Fixed in 0.2.4
+
+- Generated GRO compatibility: SQQ-generated half-cage, quasi-cage, and cage GRO paths and title lines now use portable ASCII labels. This fixes Windows/locale-dependent readers that could fail to open otherwise valid GRO files when Unicode superscript/subscript labels were present.
+- Long-trajectory summary overflow: multi-row detail tables now move from `summary.xlsx` to UTF-8-SIG CSV files in `summary_detail/`, and `cage_isomer.csv` defaults to nonzero isomer rows. This prevents long XTC/TRR runs from failing during final Excel writing when detail sheets exceed Excel's row limit.
 
 ## Install
 
@@ -84,11 +89,11 @@ sqq analyze -i ./gro -m 99 -o ./result_performance
 
 Modes do not change `quasi_cage.max_layers`; L1 remains the default in every mode. Use `--quasi-max-layer` explicitly for L2/L3. Automatic workers use the CPUs available to the process and are capped by the number of independent GRO/XYZ files or selected trajectory frames. Multiple standalone files use spawned processes by default; a single indexed XTC/TRR trajectory can also distribute frames across spawned workers. `--workers N` overrides the mode percentage.
 
-Version 0.2.3 uses process-based parallelism for independent GRO/XYZ files and selected XTC/TRR frames, so CPU-bound ring, quasi-cage, and cage searches can run on multiple cores. The main process alone owns the terminal panel and final workbook; workers report stage events through a process queue, analyze one file or a small trajectory-frame batch, write frame directories, and return summary rows. At most `3 * workers` process tasks are kept in flight; this bounds Future and serialization overhead without reducing the worker count. `parallel.math_threads: 1` prevents nested BLAS/OpenMP oversubscription.
+Version 0.2.4 uses process-based parallelism for independent GRO/XYZ files and selected XTC/TRR frames, so CPU-bound ring, quasi-cage, and cage searches can run on multiple cores. The main process alone owns the terminal panel and final workbook; workers report stage events through a process queue, analyze one file or a small trajectory-frame batch, write frame directories, and return summary rows. At most `3 * workers` process tasks are kept in flight; this bounds Future and serialization overhead without reducing the worker count. `parallel.math_threads: 1` prevents nested BLAS/OpenMP oversubscription.
 
 The default `chordless`/`bounded` path preserves the established scientific definitions while accelerating neighbor generation, incremental chord pruning, L1 forward checking, cached layer growth, integer-mask subset ownership, and cage target/edge state pruning. Cage DFS also applies exact remaining-edge incidence and parity conditions before expansion. MDAnalysis supplies orthorhombic cutoff candidates when available, but SQQ still rechecks every distance and hydrogen-bond angle with its established float64 logic. F3 and graph-mode Q_l share one graph-vector cache; all Q_l degrees share candidate lists and spherical-angle work. Optional `ring.definition: shortest_path` applies the Franzblau shortest-path criterion and reuses bounded-BFS distance maps. Optional `quasi_cage.search_policy: exact` preserves distinct frontiers and enumerates connected L2/L3 subsets; these opt-in modes can change or add results. Candidate and state truncation is reported through frame warnings.
 
-Optional scientific cage validation adds PBC-aware face planarity and edge-variation limits, manifold vertex-link checks, positive-volume validation, and volume-centroid cage centers. It remains disabled by default. Version 0.2.3 continues to use the existing orthorhombic box representation; non-orthogonal/triclinic boxes are outside this update.
+Optional scientific cage validation adds PBC-aware face planarity and edge-variation limits, manifold vertex-link checks, positive-volume validation, and volume-centroid cage centers. It remains disabled by default. Version 0.2.4 continues to use the existing orthorhombic box representation; non-orthogonal/triclinic boxes are outside this update.
 
 The current release uses the same compact three-row stage model for serial and parallel progress: file preparation (`reading`, `settings`, `selecting`), core topology search (`graph`, `ring`, `half/quasi`, `cage`, and optional `cluster`), and post-processing (`filtering`, `order`, `ice`, `output`). The `cluster` stage appears only when hydrate-cluster analysis is enabled. Parallel runs also show aggregate stage counts and up to six active files with per-stage and per-file timings.
 
@@ -254,7 +259,7 @@ built-in defaults < mode preset < config.yaml < explicit command-line options
 
 ## Parallel Execution
 
-`parallel.backend: process` is the 0.2.3 default for two or more independent GRO/XYZ inputs. SQQ uses the `spawn` start method on every supported platform. Each worker receives run configuration once, reads and writes its own frame, and sends only small stage events plus one summary row to the main process. This avoids the Python GIL limitation of the compatibility thread backend.
+`parallel.backend: process` is the 0.2.4 default for two or more independent GRO/XYZ inputs. SQQ uses the `spawn` start method on every supported platform. Each worker receives run configuration once, reads and writes its own frame, and sends only small stage events plus one summary row to the main process. This avoids the Python GIL limitation of the compatibility thread backend.
 
 Automatic workers use the mode fraction of CPUs available to the current process, then cap the value by the number of files or selected trajectory frames. Scheduler/affinity restrictions are respected when the platform exposes them. Windows `ProcessPoolExecutor` runs are capped at 61 workers; Linux workstations can use larger explicit values such as `--workers 100`, subject to memory and storage throughput.
 
@@ -320,11 +325,11 @@ Within each reported cluster, SQQ builds labelled first-shell fingerprints from 
 
 The analysis is off by default and does not alter ring, patch, cage, occupancy, order-parameter, or ice results. Classification follows the final `--cage-size` scope and is per-frame; temporal grain tracking and crystallographic orientation matching are not implemented.
 
-`--cluster-detail on` adds the optional one-row-per-cluster `hydrate_cluster_detail` workbook sheet. The default workbook output includes `hydrate_cluster` and `hydrate_domain`; public motif output is not generated. Hydrate clusters do not produce separate GRO files.
+`--cluster-detail on` adds optional one-row-per-cluster `summary_detail/hydrate_cluster_detail.csv`. The workbook keeps the per-frame `hydrate_cluster` sheet, while one-row-per-domain details move to `summary_detail/hydrate_domain.csv`; public motif output is not generated. Hydrate clusters do not produce separate GRO files.
 
 ## Hydrate Nucleation Order Parameters
 
-Version 0.2.3 computes MCG-1 and DHOP35 by default. These descriptors are independent of the optional reported-cage `hydrate_cluster` classifier: MCG works on selected methane-like guest centers and surrounding waters, while DHOP works on a dedicated O-O neighbor graph. They do not change graph, ring, patch, cage, occupancy, F3/F4/Q_l, hydrate-cluster, or ice results.
+Version 0.2.4 computes MCG-1 and DHOP35 by default. These descriptors are independent of the optional reported-cage `hydrate_cluster` classifier: MCG works on selected methane-like guest centers and surrounding waters, while DHOP works on a dedicated O-O neighbor graph. They do not change graph, ring, patch, cage, occupancy, F3/F4/Q_l, hydrate-cluster, or ice results.
 
 MCG follows the mutually coordinated guest definition. Guest pairs within `0.90 nm` are connected when at least five waters lie within `0.60 nm` of both guests and inside both 45-degree opposing cones. The threshold is **at least five**, not exactly five. MCG-1 keeps guest nodes with at least one qualifying MCG edge; optional MCG-3 applies a one-pass degree-at-least-three filter to the same qualifying graph. Connected components are measured only through qualifying MCG edges. The default guest residue names are `CH4` and `MET`; change `hydrate_order.mcg_guest_resnames` for another methane naming convention. If no configured guest type is present, MCG is reported as `N/A`, not zero.
 
@@ -351,7 +356,7 @@ References: Barnes et al., MCG ([DOI 10.1063/1.4871898](https://doi.org/10.1063/
 | `--cage-scientific-validation VALUE` | `on`, `off`; default `off` | Enable strict face/manifold/volume validation and volume centroids |
 | `--hydrate-cluster VALUE` | `on`, `off`; default `off` | Enable reported-cage hydrate_cluster analysis |
 | `--cluster-min-cage N` | Positive integer; default `2` | Minimum connected cage count required for one hydrate_cluster |
-| `--cluster-detail VALUE` | `on`, `off`; default `off` | Add the one-row-per-cluster `hydrate_cluster_detail` workbook sheet |
+| `--cluster-detail VALUE` | `on`, `off`; default `off` | Add one-row-per-cluster `summary_detail/hydrate_cluster_detail.csv` |
 | `--pattern PATTERN` | Glob; default `*.gro` | Select files when `--input` is a directory |
 | `--top, --topology FILE.gro` | GRO topology file | Supply topology/structure data for XTC/TRR input |
 | `--recursive` | Flag; default off | Search input directories recursively |
@@ -382,6 +387,8 @@ References: Barnes et al., MCG ([DOI 10.1063/1.4871898](https://doi.org/10.1063/
 | `--no-cage-gro` | Flag | Disable cage GRO files |
 | `--no-ice-gro` | Flag | Disable ice GRO files |
 | `--no-xlsx` | Flag | Disable `summary.xlsx` |
+| `--no-summary-detail` | Flag | Disable `summary_detail/*.csv` detail tables |
+| `--cage-isomer-rows MODE` | `nonzero`, `all`; default `nonzero` | Choose whether `summary_detail/cage_isomer.csv` keeps only observed isomer rows or the full zero-filled matrix |
 | `--write-order-tsv` | Flag; default off | Write per-water `*_order_parameter.tsv` files |
 
 ### Bond Mode
@@ -399,11 +406,16 @@ Available values are `auto`, `hbond`, `oo`, and `pairs`. `--pairs PAIRS.txt` use
 
 ## Output Structure
 
-SQQ writes one folder per frame plus a global workbook:
+SQQ writes one folder per frame, a global workbook, and CSV detail tables:
 
 ```text
 result_sqq/
   summary.xlsx
+  summary_detail/
+    cage_occupancy.csv
+    cage_isomer.csv
+    hydrate_domain.csv
+    hydrate_cluster_detail.csv        # only with --cluster-detail on
   run_config.yaml
   test1/
     test1_info.md
@@ -426,6 +438,8 @@ result_sqq/
     test1_order_parameter.tsv   # only with --write-order-tsv
 ```
 
+GRO structure folders, filenames, and title lines use portable ASCII structure labels in version 0.2.4, for example `5^126^2` and `qc_5r_5^36^2_56566`. Markdown/Excel scientific labels retain their readable superscript notation. This avoids Windows GBK/legacy-reader failures caused by Unicode superscript or subscript characters in generated GRO paths and titles.
+
 Each per-frame `*_info.md` report is arranged for inspection. `Frame Information` begins with the SQQ version, report-generation date and local timezone, absolute source path, frame name, and trajectory time. The report shows only reported ring sizes, reports final free-ring counts, includes the active network degree distribution, groups half-cage and quasi-cage isomers below composition totals, and keeps cage composition totals plus cage isomers in one vertical `Cage` table. When enabled, the same report adds `Hydrate Cluster`, hierarchy, detail, domain, and boundary sections. Internal `hc_` and `qc_` prefixes are omitted from report labels.
 
 When quasi-cage or cage isomers are present, the same report adds description tables:
@@ -435,7 +449,7 @@ When quasi-cage or cage isomers are present, the same report adds description ta
 
 `Cage Occupancy` remains a separate table because it describes guest assignment rather than cage topology. It expands exact guest compositions across dynamic columns in source guest order.
 
-`summary.xlsx` remains plotting-oriented. Each analysis sheet keeps one input file or trajectory frame per row. When hydrate_cluster is enabled, the workbook adds `hydrate_cluster` for per-frame totals and `hydrate_domain` for one row per domain; `--cluster-detail on` additionally writes `hydrate_cluster_detail` with one row per cluster. The `order_parameter` sheet contains `F3_mean`, `F3_count`, `F4_mean`, `F4_count`, one mean/count pair for each requested Q_l degree, and the default `MCG-1` and `DHOP35` largest-cluster columns. `MCG-3` and `DHOP30` columns appear only when their switches are enabled. By default the Q_l columns are `q6_mean`, `q6_count`, `q12_mean`, and `q12_count`. Each per-frame report places a separate `Hydrate Nucleation Order Parameters` table immediately after the F3/F4/Q_l table.
+`summary.xlsx` remains plotting-oriented. Its analysis sheets keep one input file or trajectory frame per row, including `frame`, connection diagnostics, `ring`, `half_cage`, `quasi_cage`, `cage`, optional per-frame `hydrate_cluster`, `order_parameter`, `ice`, `detail_index`, and `config`. Multi-row detail tables are written as UTF-8-SIG CSV files in `summary_detail/`: `cage_occupancy.csv`, `cage_isomer.csv`, `hydrate_domain.csv`, and, with `--cluster-detail on`, `hydrate_cluster_detail.csv`. `cage_isomer.csv` defaults to observed nonzero isomer rows plus per-frame totals; use `--cage-isomer-rows all` to restore the full zero-filled matrix. The `order_parameter` sheet contains `F3_mean`, `F3_count`, `F4_mean`, `F4_count`, one mean/count pair for each requested Q_l degree, and the default `MCG-1` and `DHOP35` largest-cluster columns. `MCG-3` and `DHOP30` columns appear only when their switches are enabled. By default the Q_l columns are `q6_mean`, `q6_count`, `q12_mean`, and `q12_count`. Each per-frame report places a separate `Hydrate Nucleation Order Parameters` table immediately after the F3/F4/Q_l table.
 
 Output ownership is:
 

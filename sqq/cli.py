@@ -127,6 +127,8 @@ def build_parser() -> argparse.ArgumentParser:
     analyze_parser.add_argument("--no-cage-gro", action="store_true", help="Disable cage GRO files.")
     analyze_parser.add_argument("--no-ice-gro", action="store_true", help="Disable ice GRO files.")
     analyze_parser.add_argument("--no-xlsx", action="store_true", help="Disable summary.xlsx output.")
+    analyze_parser.add_argument("--no-summary-detail", action="store_true", help="Disable summary_detail CSV output.")
+    analyze_parser.add_argument("--cage-isomer-rows", choices=("nonzero", "all"), help="Rows written to summary_detail/cage_isomer.csv; default nonzero.")
     analyze_parser.add_argument("--write-order-tsv", action="store_true", help="Write per-water *_order_parameter.tsv files.")
     return parser
 
