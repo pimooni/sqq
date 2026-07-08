@@ -27,14 +27,14 @@ Examples:
   sqq analyze -i ./gro --pattern "*.gro" -o ./result_sqq
   sqq analyze -i "./gro/*.gro" -o ./result_sqq
   sqq analyze -i traj.xtc --top topol.gro -c config.yaml -o ./result_sqq
-  sqq analyze -i ./gro -m 00 -b hbond --workers 4 -o ./result_sqq
+  sqq analyze -i ./gro -m 00 -b hbond -w 4 -o ./result_sqq
   sqq analyze -i md.gro -s 4,5,6 --cage-size H -o ./result_sqq_h
   sqq analyze -i md.gro -s 4,5,6 --hydrate-cluster on -o ./result_sqq_cluster
 
 Analysis modes:
-  -m 00  Rigorous: hbond, 4/5/6 search, 25% CPU workers
-  -m 50  Standard: auto graph, 5/6 search, 50% CPU workers
-  -m 99  Performance: O-O graph, 5/6 search, 90% CPU workers
+  -m 00  Rigorous: hbond, 4/5/6 search, 25% physical-core workers
+  -m 50  Standard: auto graph, 5/6 search, 50% physical-core workers
+  -m 99  Performance: O-O graph, 5/6 search, 90% physical-core workers
 
 Modes do not change quasi_cage.max_layers; its default remains 1.
 -b/--bond-mode overrides the graph setting supplied by the selected mode.
@@ -116,7 +116,8 @@ def build_parser() -> argparse.ArgumentParser:
     analyze_parser.add_argument("--pairs", metavar="PAIRS.txt", help="Pair file for bond_mode=pairs; each line contains two water ids.")
     analyze_parser.add_argument("--pair-id", metavar="KIND", choices=["resid", "oxygen_index", "atomid"], help="How ids in --pairs are interpreted; default resid.")
     analyze_parser.add_argument("--parallel-backend", choices=("process", "thread", "serial"), help="Independent-file backend; default process uses multiple CPU cores.")
-    analyze_parser.add_argument("--workers", metavar="N|auto", default=None, help="Frame-level worker count for independent GRO/XYZ files; overrides the mode CPU percentage.")
+    analyze_parser.add_argument("-w", "--worker", metavar="N|auto", default=None, help="Worker count or physical-core fraction; e.g. 4, 0.5, or 50%%. Reserves one physical core.")
+    analyze_parser.add_argument("--workers", dest="worker", metavar="N|auto", help=argparse.SUPPRESS)
     analyze_parser.add_argument("--strict", action="store_true", help="Stop on the first failed frame.")
     analyze_parser.add_argument("--output-layout", choices=["grouped", "flat"], help="GRO layout: grouped uses ring/, half_cage/<type>/, quasi_cage/<type>/, cage/<type>/, and ice/; flat keeps same-folder files.")
     analyze_parser.add_argument("--no-info", action="store_true", help="Disable per-frame *_info.md output.")

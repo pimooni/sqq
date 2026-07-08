@@ -70,7 +70,7 @@ from .io.summary import (
 from .io.trajectory import expand_inputs, read_frames, trajectory_frame_indices
 from .models import Cage, CagePatch, Frame, FrameResult, HydrateOrderResult
 from .parallel import (
-    effective_cpu_count,
+    physical_cpu_count,
     initialize_file_worker,
     initialize_trajectory_worker,
     limited_math_threads,
@@ -472,11 +472,15 @@ def stage_column_widths(rows: list[list[str]]) -> list[int]:
     ]
 
 
+ACTIVE_STAGE_ANSI = f"{chr(27)}[1;38;2;0;0;255m"
+ANSI_RESET = f"{chr(27)}[0m"
+
+
 def format_stage_label(label: str, width: int, *, active: bool, bold: bool) -> str:
-    """Format one stage cell, keeping ANSI bold from affecting visible width."""
+    """Format one stage cell, keeping ANSI highlight from affecting visible width."""
     padding = " " * max(width - len(label), 0)
     if active and bold:
-        return f"{chr(27)}[1m{label}{chr(27)}[0m{padding}"
+        return f"{ACTIVE_STAGE_ANSI}{label}{ANSI_RESET}{padding}"
     return label + padding
 
 
@@ -1202,10 +1206,59 @@ def remove_optional_vmd_output(result: FrameResult, frame_dir: Path) -> None:
 def worker_policy_text(config: dict[str, Any]) -> str:
     """Describe the active automatic or explicit worker policy."""
     value = config.get("parallel", {}).get("workers", "auto")
+    reserve_text = "reserve 1 physical core"
     if value in (None, "", "auto"):
         percent = int(round(mode_worker_fraction(config.get("mode", "50")) * 100))
-        return f"auto ({percent}% of available CPUs)"
-    return f"explicit ({value})"
+        return f"auto ({percent}% of physical cores, {reserve_text})"
+    try:
+        request_text = describe_worker_request(value)
+    except ValueError:
+        request_text = str(value)
+    return f"explicit ({request_text}, {reserve_text})"
+
+
+def describe_worker_request(value: Any) -> str:
+    """Render a user-facing worker request for terminal and workbook metadata."""
+    text = str(value).strip()
+    if text.endswith("%"):
+        fraction = parse_worker_fraction(text[:-1], value) / 100.0
+        return f"{format_worker_percent(fraction)} of physical cores"
+    number = parse_worker_number(text, value)
+    if number <= 1:
+        return f"{format_worker_percent(number)} of physical cores"
+    if not number.is_integer():
+        raise worker_value_error()
+    return f"{int(number)} workers"
+
+
+def format_worker_percent(fraction: float) -> str:
+    """Format a worker CPU fraction as a compact percentage string."""
+    percent = fraction * 100.0
+    return f"{percent:g}%"
+
+
+def parse_worker_fraction(text: str, original: Any) -> float:
+    """Parse a positive percentage number from a worker option."""
+    number = parse_worker_number(text, original)
+    if number <= 0:
+        raise worker_value_error()
+    return number
+
+
+def parse_worker_number(text: str, original: Any) -> float:
+    """Parse a positive worker option number."""
+    try:
+        number = float(text)
+    except (TypeError, ValueError) as exc:
+        raise worker_value_error() from exc
+    if number <= 0:
+        raise worker_value_error()
+    return number
+
+
+def worker_value_error() -> ValueError:
+    """Build the standard worker-option validation error."""
+    return ValueError("parallel.workers / --worker must be 'auto', a positive integer worker count, a fraction <= 1, or a percentage such as 50%.")
 
 
 def normalize_parallel_backend(value: Any) -> str:
@@ -1223,23 +1276,33 @@ def resolve_workers(
     cpu_total: int | None = None,
     backend: str = "process",
 ) -> int:
-    """Resolve file workers and cap them by inputs, affinity, and platform limits."""
+    """Resolve workers from physical cores, task count, and platform caps."""
+    physical_total = max(1, int(cpu_total if cpu_total is not None else physical_cpu_count()))
+    usable_workers = max(1, physical_total - 1)
     if value in (None, "", "auto"):
-        available_cpus = max(1, int(cpu_total if cpu_total is not None else effective_cpu_count()))
-        requested = max(1, int(available_cpus * mode_worker_fraction(mode)))
+        requested = max(1, int(physical_total * mode_worker_fraction(mode)))
     else:
-        try:
-            requested = int(value)
-        except (TypeError, ValueError) as exc:
-            raise ValueError("parallel.workers / --workers must be 'auto' or a positive integer.") from exc
-        if requested < 1:
-            raise ValueError("parallel.workers / --workers must be 'auto' or a positive integer.")
-    requested = min(requested, max(1, n_paths))
+        requested = resolve_explicit_worker_request(value, physical_total)
+    requested = min(requested, usable_workers, max(1, n_paths))
     if normalize_parallel_backend(backend) == "process":
         platform_cap = process_worker_cap()
         if platform_cap is not None:
             requested = min(requested, platform_cap)
-    return requested
+    return max(1, requested)
+
+
+def resolve_explicit_worker_request(value: Any, physical_total: int) -> int:
+    """Resolve -w/--worker: fractions/percentages or integer worker counts."""
+    text = str(value).strip()
+    if text.endswith("%"):
+        percent = parse_worker_fraction(text[:-1], value)
+        return max(1, int(physical_total * (percent / 100.0)))
+    number = parse_worker_number(text, value)
+    if number <= 1:
+        return max(1, int(physical_total * number))
+    if not number.is_integer():
+        raise worker_value_error()
+    return int(number)
 
 
 def validate_unique_output_names(paths: list[Path]) -> None:
@@ -1353,8 +1416,8 @@ def apply_cli_overrides(config: dict[str, Any], args: Namespace) -> None:
         config["graph"]["pair_id"] = args.pair_id
     if getattr(args, "parallel_backend", None):
         config["parallel"]["backend"] = args.parallel_backend
-    if args.workers is not None:
-        config["parallel"]["workers"] = args.workers
+    if getattr(args, "worker", None) is not None:
+        config["parallel"]["workers"] = args.worker
     if getattr(args, "output_layout", None):
         config["output"]["structure_layout"] = args.output_layout
     if getattr(args, "no_info", False):

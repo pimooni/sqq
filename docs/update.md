@@ -2,6 +2,43 @@
 
 This file records versioned update notes. New releases should be appended above older entries.
 
+## Version 0.2.5
+
+### Short Summary
+
+Version 0.2.5 updates runtime usability around worker selection, the `summary.xlsx` home sheet, and single-file stage visibility. The preferred CLI spelling is now `--worker` / `-w`, summary dashboard result rows now report per-frame `min / mean / max`, and interactive serial runs highlight the active stage with bold bright-blue text. Scientific analysis algorithms, per-frame result sheets, coordinates, molecule membership, and topology counts are unchanged from `0.2.4`.
+
+### Main Changes
+
+1. Worker option and physical-core policy
+   - Adds the preferred `--worker` / `-w` CLI option.
+   - `--worker` accepts `auto`, physical-core fractions such as `50%`, `0.5`, or `1`, and explicit positive integer worker counts such as `4`.
+   - Worker resolution uses detected physical cores when possible, reserves one physical core for the operating system, and remains capped by task count and platform limits. A 4-core/8-thread machine therefore resolves `-w 100%` or an overlarge worker request to at most 3 workers.
+   - The existing YAML key remains `parallel.workers`, and the old `--workers` CLI spelling is retained as a hidden compatibility alias for existing scripts.
+
+2. Summary dashboard home sheet
+   - The first `summary.xlsx` sheet now labels the Configuration version row as `SQQ version` and keeps the config path under `Config file`.
+   - The bottom dashboard block is renamed to `Analysis Results (min / mean / max)`.
+   - Except for `Frames total / ok / failed`, result rows such as water/guest molecules, ring counts, cage counts, hydrate clusters, and ice-like waters are reported as per-frame min/mean/max rather than cross-frame sums.
+   - This changes dashboard presentation only; one-row-per-frame sheets and scientific analysis values are unchanged.
+
+3. Single-file progress highlight
+   - Interactive serial progress keeps the compact three-row stage layout and now renders the active stage with ANSI bold plus bright blue (`RGB(0,0,255)`) instead of bold alone.
+   - Non-interactive logs and `tqdm` postfix output remain plain text.
+   - This changes terminal readability only and does not affect analysis or output files.
+
+4. Package version
+   - Updated `pyproject.toml` and `sqq.__version__` from `0.2.4` to `0.2.5`.
+   - Updated README, design documentation, and the English/Chinese design DOCX files.
+
+### Compatibility
+
+- Scientific analysis results do not change from `0.2.4`.
+- Prefer `--worker` / `-w`; existing `--workers` commands continue to run through the compatibility alias.
+- Effective worker counts may resolve lower than older runs because SQQ now reserves one physical core for the system.
+- The summary dashboard's result block now reports per-frame min/mean/max instead of cross-frame sums, so dashboard numbers may differ from older dashboards even though the underlying per-frame sheets are unchanged.
+- Interactive single-file terminal output now uses color for the active stage; non-interactive text output remains plain.
+
 ## Version 0.2.4
 
 ### Short Summary

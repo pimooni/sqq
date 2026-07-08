@@ -4,7 +4,10 @@ from __future__ import annotations
 
 import atexit
 import os
+import subprocess
+import sys
 from contextlib import contextmanager
+from functools import lru_cache
 from pathlib import Path
 from typing import Any, Iterator
 
@@ -166,6 +169,96 @@ def effective_cpu_count() -> int:
         except (OSError, NotImplementedError):
             pass
     return max(1, int(os.cpu_count() or 1))
+
+
+@lru_cache(maxsize=1)
+def physical_cpu_count() -> int:
+    """Return physical CPU cores available to this process when detectable."""
+    logical_available = effective_cpu_count()
+    detected = _detect_physical_cpu_count()
+    if detected is None:
+        return logical_available
+    return max(1, min(int(detected), logical_available))
+
+
+def _detect_physical_cpu_count() -> int | None:
+    """Best-effort physical-core detection without requiring optional packages."""
+    try:
+        import psutil  # type: ignore[import-not-found]
+
+        count = psutil.cpu_count(logical=False)
+        if count:
+            return int(count)
+    except Exception:
+        pass
+
+    if os.name == "nt":
+        return _detect_command_int([
+            "powershell",
+            "-NoProfile",
+            "-Command",
+            "(Get-CimInstance Win32_Processor | Measure-Object -Property NumberOfCores -Sum).Sum",
+        ])
+    if sys.platform == "darwin":
+        return _detect_command_int(["sysctl", "-n", "hw.physicalcpu"])
+    return _detect_linux_cpuinfo_physical_cores()
+
+
+def _detect_command_int(command: list[str]) -> int | None:
+    """Run one fixed platform command and parse a positive integer result."""
+    try:
+        completed = subprocess.run(command, capture_output=True, text=True, timeout=2, check=False)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    for token in completed.stdout.replace("=", " ").split():
+        try:
+            value = int(token)
+        except ValueError:
+            continue
+        if value > 0:
+            return value
+    return None
+
+
+def _detect_linux_cpuinfo_physical_cores() -> int | None:
+    """Parse /proc/cpuinfo physical/core ids on Linux-like systems."""
+    cpuinfo = Path("/proc/cpuinfo")
+    if not cpuinfo.exists():
+        return None
+    try:
+        blocks = cpuinfo.read_text(encoding="utf-8", errors="ignore").strip().split("\n\n")
+    except OSError:
+        return None
+
+    seen_cores: set[tuple[str, str]] = set()
+    physical_ids: set[str] = set()
+    cores_per_socket: list[int] = []
+    for block in blocks:
+        fields: dict[str, str] = {}
+        for line in block.splitlines():
+            if ":" not in line:
+                continue
+            key, value = line.split(":", 1)
+            fields[key.strip()] = value.strip()
+        physical_id = fields.get("physical id")
+        core_id = fields.get("core id")
+        if physical_id is not None and core_id is not None:
+            seen_cores.add((physical_id, core_id))
+        if physical_id is not None:
+            physical_ids.add(physical_id)
+        if "cpu cores" in fields:
+            try:
+                cores_per_socket.append(int(fields["cpu cores"]))
+            except ValueError:
+                pass
+
+    if seen_cores:
+        return len(seen_cores)
+    if physical_ids and cores_per_socket:
+        return len(physical_ids) * max(cores_per_socket)
+    if cores_per_socket:
+        return max(cores_per_socket)
+    return None
 
 
 def process_worker_cap() -> int | None:

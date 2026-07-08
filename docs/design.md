@@ -39,7 +39,7 @@ The mode preset controls graph mode, the shared ring-face search sizes, and the 
 
 An explicit `-b` / `--bond-mode {auto,hbond,oo,pairs}` overrides the graph mode from both the preset and `config.yaml`. `--pairs PAIRS.txt` implies pairs mode unless `-b pairs` is already given; it cannot be combined with another explicit bond mode.
 
-`parallel.workers: auto` calculates `floor(available_cpu_count * mode_fraction)`, with a minimum of one and a maximum equal to the number of independent files or selected trajectory frames. Available CPU detection prefers `os.process_cpu_count()`, then scheduler affinity, then `os.cpu_count()`. `--workers N` overrides the mode fraction but remains capped by task count and the Windows `ProcessPoolExecutor` limit. `parallel.backend` defaults to `process`; `thread` is retained for compatibility and `serial` forces one process.
+`parallel.workers: auto` calculates `floor(physical_core_count * mode_fraction)`, then reserves one physical core for the operating system and caps the result by the number of independent files or selected trajectory frames. Physical-core detection prefers optional `psutil`, then platform probes such as Windows CIM, macOS `sysctl`, or Linux `/proc/cpuinfo`; if physical cores cannot be detected, SQQ falls back to the CPU count visible to the process. `--worker N` / `-w N` overrides the mode fraction: values such as `50%`, `0.5`, or `1` are physical-core fractions, while values greater than one are explicit integer worker counts. The old `--workers` spelling is retained as a hidden compatibility alias. Worker resolution remains capped by task count and the Windows `ProcessPoolExecutor` limit. `parallel.backend` defaults to `process`; `thread` is retained for compatibility and `serial` forces one process.
 
 ### Process Execution Architecture
 
@@ -88,7 +88,7 @@ post-processing        filtering -> order -> ice -> output
 
 `cluster` is included only when `hydrate_cluster.enabled` is true, for example through `--hydrate-cluster on`. When hydrate cluster analysis is disabled, the stage is omitted rather than shown as `cluster:0`.
 
-The serial interactive panel renders the complete workflow and bolds the active stage. Stage columns are sized by the longest stage name in that column, so the display stays compact while `reading`, `graph`, and `filtering` remain aligned. The continuation marker `>` for a new row is placed before the aligned stage column. The timing row remains `stage / frame / total`.
+The serial interactive panel renders the complete workflow and highlights the active stage with ANSI bold plus bright blue (`RGB(0,0,255)`). Stage columns are sized by the longest stage name in that column, so the display stays compact while `reading`, `graph`, and `filtering` remain aligned. The continuation marker `>` for a new row is placed before the aligned stage column. The timing row remains `stage / frame / total`.
 
 ```text
 stage               : reading   > settings > selecting
@@ -106,7 +106,7 @@ stage               : reading   > settings > selecting
 stage / frame / total: 3.2 s / 18.7 s / 18.7 s
 ```
 
-Non-interactive serial output, such as redirected logs or a `tqdm` postfix, reports the short current stage label rather than ANSI bold text.
+Non-interactive serial output, such as redirected logs or a `tqdm` postfix, reports the short current stage label rather than ANSI highlighted text.
 
 Parallel GRO/XYZ and indexed trajectory runs use a main-process progress aggregator. Spawned workers never write terminal control sequences; they send `start` and stage-transition tuples through a multiprocessing queue. The main process applies those events, ignores late events from already-finished tasks, and shows completed/failed/active/queued counts, compact `stage:count` rows, total elapsed time, and up to six active-file rows. Additional active files are summarized so high-worker modes do not fill the terminal.
 
@@ -278,7 +278,7 @@ ring_centers: locally unwrapped O-centroid for each ring
 
 `edge_to_rings` is the primary topology filter. `ring_centers` are only used after topology filtering to order and limit candidates.
 
-Version 0.2.4 retains frame-local caches for symmetric ring-center distances, L2/L3 topology expansions, and patch geometry. These caches are discarded after the frame and therefore never mix topology or coordinates between trajectory frames.
+Version 0.2.5 retains frame-local caches for symmetric ring-center distances, L2/L3 topology expansions, and patch geometry. These caches are discarded after the frame and therefore never mix topology or coordinates between trajectory frames.
 
 Search order:
 
@@ -544,7 +544,7 @@ frame_name/
   ice/
 ```
 
-The global workbook is `summary.xlsx`. It contains run metadata, per-frame counts, connection and coordination diagnostics, report-scoped ring/cage tables, half_cage/quasi_cage tables, optional per-frame hydrate_cluster totals, order parameters, ice, `detail_index`, and config sheets. Multi-row detail tables are written as UTF-8-SIG CSV files in `summary_detail/`.
+The global workbook is `summary.xlsx`. Its first sheet is a dashboard: Configuration includes `SQQ version`, and `Analysis Results (min / mean / max)` reports per-frame min/mean/max values for result metrics while `Frames total / ok / failed` remains a run-level frame count. The workbook also contains per-frame counts, connection and coordination diagnostics, report-scoped ring/cage tables, half_cage/quasi_cage tables, optional per-frame hydrate_cluster totals, order parameters, ice, `detail_index`, and config sheets. Multi-row detail tables are written as UTF-8-SIG CSV files in `summary_detail/`.
 
 Each per-frame `*_info.md` report is optimized for inspection rather than plotting:
 
@@ -572,7 +572,7 @@ The global `summary.xlsx` workbook keeps plotting-oriented analysis sheets with 
 - Hydrate phase classification uses the final reported cage scope, so excluding required cage types or shared-face context with `--cage-size` can prevent the corresponding strict seed or domain from being recognized.
 - Boundary labels are per-frame topological evidence; transition-path kinetics, temporal domain tracking, and crystallographic orientation matching are not implemented.
 - Default `quasi_cage.search_policy = bounded` is not exhaustive for large outer-layer components. Opt-in `exact` enumerates connected subsets but remains subject to explicit candidate and state limits.
-- Automatic process workers parallelize independent GRO/XYZ files or selected frames of one indexed XTC/TRR trajectory. Topology search inside one individual frame remains single-process.
+- Automatic process workers parallelize independent GRO/XYZ files or selected frames of one indexed XTC/TRR trajectory. Worker counts are based on physical cores with one physical core reserved for the system; topology search inside one individual frame remains single-process.
 - CHILL-style ice classification is implemented, but separate atomistic Ih/Ic stacking assignment can be refined later.
 - MCG is meaningful only for guest residue names selected in `hydrate_order.mcg_guest_resnames`; other guest species are not silently treated as methane.
 - Published DHOP transition-state thresholds are model- and condition-dependent; SQQ reports the descriptor and does not assign a universal critical-nucleus threshold.

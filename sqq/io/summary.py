@@ -1586,7 +1586,8 @@ def summary_dashboard_table(data: pd.DataFrame, run_info: dict[str, Any], config
         ["run_config.yaml", run_info.get("run_config", "")],
         ["", ""],
         ["Configuration", ""],
-        ["Config", run_info.get("config_file", "<built-in defaults>")],
+        ["SQQ version", run_info.get("sqq_version", __version__)],
+        ["Config file", run_info.get("config_file", "<built-in defaults>")],
         ["Topology", run_info.get("topology", "<none>")],
         ["Mode", run_info.get("mode", "")],
         ["Graph mode", first_data_value(data, "connection_mode", run_info.get("graph_mode", ""))],
@@ -1614,23 +1615,23 @@ def summary_dashboard_table(data: pd.DataFrame, run_info: dict[str, Any], config
         ["Math threads per worker", run_info.get("math_threads", 1)],
         ["Workers", run_info.get("workers", "")],
         ["", ""],
-        ["Analysis Results", ""],
+        ["Analysis Results (min / mean / max)", ""],
         ["Frames total / ok / failed", f"{len(data)} / {frames_ok_count(data)} / {frames_failed_count(data)}"],
-        ["Water molecules", sum_numeric_column(data, "n_waters")],
-        ["Guest molecules", sum_numeric_column(data, "n_guests")],
-        ["Connections", sum_numeric_column(data, "connection_count")],
+        ["Water molecules", min_mean_max_column(data, "n_waters")],
+        ["Guest molecules", min_mean_max_column(data, "n_guests")],
+        ["Connections", min_mean_max_column(data, "connection_count")],
     ])
     for size in configured_ring_report_sizes(config):
-        rows.append([f"Ring{size}", sum_numeric_column(data, f"ring{size}")])
+        rows.append([f"Ring{size}", min_mean_max_column(data, f"ring{size}")])
     rows.extend([
-        ["Half cage", sum_numeric_column(data, "half_cage_total")],
-        ["Quasi cage", sum_numeric_column(data, "quasi_cage_total")],
-        ["Cage total", sum_numeric_column(data, "cage_total")],
-        ["Empty cage", sum_numeric_column(data, "cage_empty")],
-        ["Occupied cage", sum_numeric_column(data, "cage_occupied")],
-        ["Hydrate cluster", sum_numeric_column(data, "hydrate_cluster_count")],
-        ["Isolated cage", sum_numeric_column(data, "isolated_cage_count")],
-        ["Ice-like waters", sum_numeric_column(data, "ice_like_waters")],
+        ["Half cage", min_mean_max_column(data, "half_cage_total")],
+        ["Quasi cage", min_mean_max_column(data, "quasi_cage_total")],
+        ["Cage total", min_mean_max_column(data, "cage_total")],
+        ["Empty cage", min_mean_max_column(data, "cage_empty")],
+        ["Occupied cage", min_mean_max_column(data, "cage_occupied")],
+        ["Hydrate cluster", min_mean_max_column(data, "hydrate_cluster_count")],
+        ["Isolated cage", min_mean_max_column(data, "isolated_cage_count")],
+        ["Ice-like waters", min_mean_max_column(data, "ice_like_waters")],
     ])
     return pd.DataFrame(rows)
 
@@ -1660,6 +1661,30 @@ def sum_numeric_column(data: pd.DataFrame, column: str) -> int:
     if column not in data:
         return 0
     return int(pd.to_numeric(data[column], errors="coerce").fillna(0).sum())
+
+
+def min_mean_max_column(data: pd.DataFrame, column: str) -> str:
+    """Render per-frame min / mean / max statistics for a numeric summary column."""
+    if column not in data:
+        return "0 / 0.0 / 0"
+    values = pd.to_numeric(data[column], errors="coerce").dropna()
+    if values.empty:
+        return "0 / 0.0 / 0"
+    return " / ".join([
+        format_stat_value(values.min()),
+        format_stat_value(values.mean(), force_decimal=True),
+        format_stat_value(values.max()),
+    ])
+
+
+def format_stat_value(value: Any, *, force_decimal: bool = False) -> str:
+    """Format dashboard min/mean/max values compactly but readably."""
+    numeric = float(value)
+    if force_decimal and numeric.is_integer():
+        return f"{numeric:.1f}"
+    if numeric.is_integer():
+        return str(int(numeric))
+    return f"{numeric:.3f}".rstrip("0").rstrip(".")
 
 
 def molecule_totals(data: pd.DataFrame) -> dict[str, int]:
@@ -1733,7 +1758,7 @@ def format_summary_dashboard_sheet(worksheet) -> None:
             cell.font = Font(color="3B2A14", bold=True, size=18 if row == 1 else 11)
             cell.alignment = Alignment(horizontal="center", vertical="center")
 
-    section_labels = {"Basic Information", "Configuration", "Analysis Results"}
+    section_labels = {"Basic Information", "Configuration", "Analysis Results (min / mean / max)"}
     for row in worksheet.iter_rows():
         if row[0].row <= 2:
             continue
