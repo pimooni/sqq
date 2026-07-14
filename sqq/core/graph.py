@@ -97,14 +97,25 @@ def read_pair_edges(path: Path, atoms: list[Atom], waters: list[Water], pair_id:
 
 
 def water_id_map(atoms: list[Atom], waters: list[Water], pair_id: str) -> dict[int, int]:
-    """Map external pair ids to internal oxygen node indices."""
+    """Map unique external pair ids to internal oxygen node indices."""
     if pair_id == "resid":
-        return {water.resid: water.oxygen for water in waters}
-    if pair_id == "oxygen_index":
-        return {water.oxygen: water.oxygen for water in waters}
-    if pair_id == "atomid":
-        return {atoms[water.oxygen].atomid: water.oxygen for water in waters}
-    raise ValueError("graph.pair_id must be one of: resid, oxygen_index, atomid")
+        identifiers = ((water.resid, water.oxygen) for water in waters)
+    elif pair_id == "oxygen_index":
+        identifiers = ((water.oxygen, water.oxygen) for water in waters)
+    elif pair_id == "atomid":
+        identifiers = ((atoms[water.oxygen].atomid, water.oxygen) for water in waters)
+    else:
+        raise ValueError("graph.pair_id must be one of: resid, oxygen_index, atomid")
+
+    id_map: dict[int, int] = {}
+    for identifier, oxygen in identifiers:
+        if identifier in id_map and id_map[identifier] != oxygen:
+            raise ValueError(
+                f"graph.pair_id={pair_id!r} is not unique among selected waters; "
+                "use oxygen_index or atomid."
+            )
+        id_map[identifier] = oxygen
+    return id_map
 
 
 def iter_water_pairs(atoms: list[Atom], waters: list[Water], box: np.ndarray | None, cutoff: float):

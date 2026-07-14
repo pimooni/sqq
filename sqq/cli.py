@@ -6,6 +6,7 @@ import argparse
 import sys
 from pathlib import Path
 
+from . import __release_date__, __version__
 from .banner import HELP_BANNER
 from .config import write_default_config
 from .pipeline import analyze
@@ -21,13 +22,36 @@ Use `sqq analyze -h` for analysis options and examples.
 """.strip()
 
 
+VERSION_LINE = f"SQQ version: {__version__}   Release date: {__release_date__}"
+ROOT_HELP_HEADER = f"{HELP_BANNER}\n\n{VERSION_LINE}"
+
+
+class DescriptionFirstArgumentParser(argparse.ArgumentParser):
+    """Place the root description before argparse's usage line."""
+
+    def format_help(self) -> str:
+        formatter = self._get_formatter()
+        formatter.add_usage(self.usage, self._actions, self._mutually_exclusive_groups)
+        for action_group in self._action_groups:
+            formatter.start_section(action_group.title)
+            formatter.add_text(action_group.description)
+            formatter.add_arguments(action_group._group_actions)
+            formatter.end_section()
+        formatter.add_text(self.epilog)
+        body = formatter.format_help().lstrip()
+        if self.description:
+            return f"{self.description.rstrip()}\n{body}"
+        return body
+
+
 ANALYZE_EPILOG = """
 Examples:
   sqq analyze -i test.gro -o ./result_sqq
   sqq analyze -i ./gro --pattern "*.gro" -o ./result_sqq
   sqq analyze -i "./gro/*.gro" -o ./result_sqq
   sqq analyze -i traj.xtc --top topol.gro -c config.yaml -o ./result_sqq
-  sqq analyze -i ./gro -m 00 -b hbond -w 4 -o ./result_sqq
+  sqq analyze -i ./gro -m 00 -b hbond -w 4 --order-parameter f3,f4,q6 -o ./result_sqq
+  sqq analyze -i md.gro --no-output quasi-gro,cage-gro,xlsx -o ./result_sqq
   sqq analyze -i md.gro -s 4,5,6 --cage-size H -o ./result_sqq_h
   sqq analyze -i md.gro -s 4,5,6 --hydrate-cluster on -o ./result_sqq_cluster
 
@@ -36,7 +60,8 @@ Analysis modes:
   -m 50  Standard: auto graph, 5/6 search, 50% physical-core workers
   -m 99  Performance: O-O graph, 5/6 search, 90% physical-core workers
 
-Modes do not change quasi_cage.max_layers; its default remains 1.
+Modes do not change quasi_cage.max_layers or order.parameters.
+Their defaults remain 1 and f3,f4 respectively.
 -b/--bond-mode overrides the graph setting supplied by the selected mode.
 
 Output layout:
@@ -47,12 +72,13 @@ Output layout:
 
 def build_parser() -> argparse.ArgumentParser:
     """Create the two-command CLI: init and analyze."""
-    parser = argparse.ArgumentParser(
+    parser = DescriptionFirstArgumentParser(
         prog="sqq",
-        description=HELP_BANNER,
+        description=ROOT_HELP_HEADER,
         epilog=ROOT_EPILOG,
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
+    parser.add_argument("-v", "--version", action="version", version=VERSION_LINE)
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     init_parser = subparsers.add_parser("init", help="Write a default config.yaml file.")
@@ -67,6 +93,7 @@ def build_parser() -> argparse.ArgumentParser:
     analyze_parser.add_argument("-i", "--input", metavar="INPUT", required=True, help="Input file or directory (.gro/.xyz/.xtc/.trr).")
     analyze_parser.add_argument("--pattern", metavar="PATTERN", help='Input pattern when --input is a directory; default "*.gro".')
     analyze_parser.add_argument("--top", "--topology", metavar="TOPOLOGY.gro", dest="topology", help="Topology/structure file for .xtc/.trr input.")
+    analyze_parser.add_argument("--xyz-scale", metavar="SCALE", type=float, help="Multiply XYZ coordinates by SCALE to obtain nm; default 0.1 assumes angstrom input.")
     analyze_parser.add_argument("-c", "--config", metavar="CONFIG.yaml", help="YAML/JSON config file, e.g. config.yaml.")
     analyze_parser.add_argument("-o", "--output", metavar="RESULT_DIR", default="result_sqq", help="Output directory.")
     analyze_parser.add_argument(
@@ -94,13 +121,21 @@ def build_parser() -> argparse.ArgumentParser:
     analyze_parser.add_argument("--quasi-max-layer", metavar="N", type=int, help="Override quasi_cage.max_layers; default 1 reports L1 quasi_cage and standard half_cage only.")
     analyze_parser.add_argument("--quasi-search-policy", choices=("bounded", "exact"), help="Layer growth policy: bounded preserves the established search; exact enumerates connected layer subsets.")
     analyze_parser.add_argument("--ring-definition", choices=("chordless", "shortest_path"), help="Ring definition; default chordless preserves established output.")
-    analyze_parser.add_argument("--no-q", action="store_true", help="Disable Steinhardt Q_l order-parameter calculation.")
-    analyze_parser.add_argument("-q", "--q-degree", metavar="4,6,8,10,12", help="Comma-separated Q_l degree list to report; default 6,12.")
+    analyze_parser.add_argument(
+        "--order-parameter",
+        metavar="NAME[,NAME...]",
+        help=(
+            "Select order parameters: f3, f4, qN, mcg1, mcg3, dhop35, dhop30, "
+            "all, or none. Default: f3,f4."
+        ),
+    )
+    analyze_parser.add_argument("--no-q", action="store_true", help=argparse.SUPPRESS)
+    analyze_parser.add_argument("-q", "--q-degree", metavar="4,6,8,10,12", help=argparse.SUPPRESS)
     analyze_parser.add_argument("--q-neighbor-mode", choices=["graph", "cutoff", "nearest", "lammps"], help="Neighbor source for Q_l; default graph follows the active water network.")
     analyze_parser.add_argument("--q-cutoff", metavar="NM", type=float, help="Q_l neighbor cutoff in nm for cutoff/nearest/lammps modes; default 0.35.")
     analyze_parser.add_argument("--q-n-neighbor", metavar="N|NULL", help="Fixed Q_l neighbor count; lammps mode defaults to 12, NULL uses all cutoff neighbors.")
-    analyze_parser.add_argument("--mcg3", choices=("on", "off"), help="Enable or disable the optional MCG-3 hydrate order parameter; default off.")
-    analyze_parser.add_argument("--dhop30", choices=("on", "off"), help="Enable or disable the optional DHOP30 hydrate order parameter; default off.")
+    analyze_parser.add_argument("--mcg3", choices=("on", "off"), help=argparse.SUPPRESS)
+    analyze_parser.add_argument("--dhop30", choices=("on", "off"), help=argparse.SUPPRESS)
     analyze_parser.add_argument(
         "--cage-size",
         metavar="GROUP[,GROUP...]",
@@ -120,15 +155,24 @@ def build_parser() -> argparse.ArgumentParser:
     analyze_parser.add_argument("--workers", dest="worker", metavar="N|auto", help=argparse.SUPPRESS)
     analyze_parser.add_argument("--strict", action="store_true", help="Stop on the first failed frame.")
     analyze_parser.add_argument("--output-layout", choices=["grouped", "flat"], help="GRO layout: grouped uses ring/, half_cage/<type>/, quasi_cage/<type>/, cage/<type>/, and ice/; flat keeps same-folder files.")
-    analyze_parser.add_argument("--no-info", action="store_true", help="Disable per-frame *_info.md output.")
-    analyze_parser.add_argument("--no-gro", action="store_true", help="Disable GRO structure output.")
-    analyze_parser.add_argument("--no-ring-gro", action="store_true", help="Disable ring GRO files.")
-    analyze_parser.add_argument("--no-half-cage-gro", action="store_true", help="Disable half_cage GRO files.")
-    analyze_parser.add_argument("--no-quasi-cage-gro", action="store_true", help="Disable quasi_cage GRO files.")
-    analyze_parser.add_argument("--no-cage-gro", action="store_true", help="Disable cage GRO files.")
-    analyze_parser.add_argument("--no-ice-gro", action="store_true", help="Disable ice GRO files.")
-    analyze_parser.add_argument("--no-xlsx", action="store_true", help="Disable summary.xlsx output.")
-    analyze_parser.add_argument("--no-summary-detail", action="store_true", help="Disable summary_detail CSV output.")
+    analyze_parser.add_argument(
+        "--no-output",
+        metavar="TYPE[,TYPE...]",
+        help=(
+            "Disable output types: info, membership-tsv, order-tsv, vmd, gro, "
+            "ring-gro, half-gro, quasi-gro, cage-gro, ice-gro, xlsx, "
+            "summary-detail, all, or none. Default: none."
+        ),
+    )
+    analyze_parser.add_argument("--no-info", action="store_true", help=argparse.SUPPRESS)
+    analyze_parser.add_argument("--no-gro", action="store_true", help=argparse.SUPPRESS)
+    analyze_parser.add_argument("--no-ring-gro", action="store_true", help=argparse.SUPPRESS)
+    analyze_parser.add_argument("--no-half-cage-gro", action="store_true", help=argparse.SUPPRESS)
+    analyze_parser.add_argument("--no-quasi-cage-gro", action="store_true", help=argparse.SUPPRESS)
+    analyze_parser.add_argument("--no-cage-gro", action="store_true", help=argparse.SUPPRESS)
+    analyze_parser.add_argument("--no-ice-gro", action="store_true", help=argparse.SUPPRESS)
+    analyze_parser.add_argument("--no-xlsx", action="store_true", help=argparse.SUPPRESS)
+    analyze_parser.add_argument("--no-summary-detail", action="store_true", help=argparse.SUPPRESS)
     analyze_parser.add_argument("--cage-isomer-rows", choices=("nonzero", "all"), help="Rows written to summary_detail/cage_isomer.csv; default nonzero.")
     analyze_parser.add_argument("--write-order-tsv", action="store_true", help="Write per-water *_order_parameter.tsv files.")
     return parser

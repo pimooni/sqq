@@ -27,6 +27,25 @@ def unwrap_connected_nodes(frame: Frame, nodes: list[int], edges: list[tuple[int
             unwrapped[nb] = unwrapped[current] + delta
             stack.append(nb)
 
-    for node in nodes:
-        unwrapped.setdefault(node, frame.atoms[node].xyz)
+    missing = sorted(set(nodes) - set(unwrapped))
+    if missing:
+        raise ValueError(
+            "Cannot unwrap a disconnected topology object; "
+            f"unreachable oxygen nodes: {missing[:10]}"
+        )
     return unwrapped
+
+
+def pbc_aware_centroid(frame: Frame, atom_indices: tuple[int, ...] | list[int]) -> np.ndarray:
+    """Return a molecular centroid after unwrapping every atom near one anchor."""
+    if not atom_indices:
+        raise ValueError("Cannot compute a centroid for an empty atom selection.")
+    anchor = np.asarray(frame.atoms[atom_indices[0]].xyz, dtype=float)
+    points = [anchor]
+    for atom_index in atom_indices[1:]:
+        delta = minimum_image(
+            np.asarray(frame.atoms[atom_index].xyz, dtype=float) - anchor,
+            frame.box,
+        )
+        points.append(anchor + delta)
+    return np.mean(np.asarray(points, dtype=float), axis=0)

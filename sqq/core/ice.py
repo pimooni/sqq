@@ -25,12 +25,7 @@ def classify_ice_waters(
     min_six_rings: int = 2,
     require_four_coord_neighbors: bool = True,
 ) -> IceClasses:
-    """Classify waters into ice-I-like and interfacial ice classes.
-
-    This follows the CHILL idea used by Moore and Molinero: ice nuclei contain
-    both well ordered ice-I local environments and intermediate/interfacial ice.
-    SQQ applies this idea to the hydrogen-bond graph already used for rings.
-    """
+    """Classify graph-based ice-I-like and interfacial candidates."""
     water_oxygens = {water.oxygen for water in waters}
     if not enabled:
         return IceClasses(ice_like=(), ice_i=(), interfacial=(), liquid_like=tuple(sorted(water_oxygens)))

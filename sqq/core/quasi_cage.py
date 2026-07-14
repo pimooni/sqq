@@ -44,7 +44,7 @@ def find_cage_patches(
     topology = topology_index or build_ring_topology_index(frame, all_rings)
     ring_by_id = topology.ring_by_id
     ring_centers = topology.ring_centers
-    # Shared-edge lookup is the hard topology filter; centers only rank candidates.
+    # Shared edges filter; centers only rank candidates.
     edge_to_rings = topology.edge_to_rings()
     half_cages: list[CagePatch] = []
     quasi_cages: list[CagePatch] = []
@@ -62,7 +62,7 @@ def find_cage_patches(
     for base in all_rings:
         if base.size not in base_allowed:
             continue
-        # L1 candidates must share the corresponding base-ring edge.
+        # L1 candidates share a base-ring edge.
         candidate_lists = side_ring_candidate_lists(
             base,
             edge_to_rings,
@@ -83,7 +83,7 @@ def find_cage_patches(
                 continue
 
             l1_sequence = canonical_sequence([ring.size for ring in side_rings])
-            # Classify the closed L1 side wall first; standard forms become half_cage.
+            # Classify closed L1 walls before layered growth.
             add_classified_patch(
                 frame,
                 ring_by_id,
@@ -114,8 +114,7 @@ def find_cage_patches(
             else:
                 l2_sixes = []
             for l2_ring in l2_sixes:
-                # Only the standard 6r + 5^6 + 6^1 form may bypass the
-                # max_layers=1 strict-L1 quasi-cage default.
+                # Preserve the established 6r + 5^6 + 6^1 exception.
                 add_classified_patch(
                     frame,
                     ring_by_id,
@@ -130,7 +129,7 @@ def find_cage_patches(
                     geometry_cache=patch_geometry_cache,
                 )
 
-            # L2/L3 grow from exposed frontier edges and may remain dangling.
+            # L2/L3 grow from exposed frontier edges.
             add_layered_quasi_cages(
                 frame,
                 ring_by_id,

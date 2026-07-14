@@ -3,6 +3,7 @@ from __future__ import annotations
 """Deterministic cutoff-pair searches for orthorhombic coordinate sets."""
 
 from itertools import product
+from math import ceil
 
 import numpy as np
 
@@ -10,6 +11,70 @@ from .pbc import minimum_image
 
 
 NEIGHBOR_OFFSETS = tuple(product((-1, 0, 1), repeat=3))
+
+
+class PointSpatialIndex:
+    """Reusable deterministic cell index for repeated point-radius queries."""
+
+    def __init__(self, coordinates: np.ndarray, box: np.ndarray | None, cell_size: float):
+        self.coordinates = _coordinates(coordinates)
+        _validate_cutoff(cell_size)
+        self.periodic, self.lengths = _periodic_box(box)
+        self.cell_size = float(cell_size)
+        if self.periodic:
+            assert self.lengths is not None
+            shape_array = np.maximum(1, np.floor(self.lengths / self.cell_size).astype(int))
+            self.shape: tuple[int, int, int] | None = tuple(int(value) for value in shape_array)
+            self.cell_width = self.lengths / shape_array
+            self.origin = np.zeros(3, dtype=float)
+        else:
+            self.shape = None
+            self.cell_width = np.full(3, self.cell_size, dtype=float)
+            self.origin = np.min(self.coordinates, axis=0) if len(self.coordinates) else np.zeros(3, dtype=float)
+        self.cells: dict[tuple[int, int, int], list[int]] = {}
+        for index, coordinate in enumerate(self.coordinates):
+            self.cells.setdefault(self._key(coordinate), []).append(index)
+
+    def query(self, point: np.ndarray, cutoff: float) -> tuple[int, ...]:
+        """Return sorted coordinate indices within an exact PBC-aware cutoff."""
+        _validate_cutoff(cutoff)
+        if not len(self.coordinates):
+            return ()
+        key = self._key(point)
+        spans = np.maximum(1, np.asarray([ceil(cutoff / width) for width in self.cell_width], dtype=int))
+        candidate_keys: set[tuple[int, int, int]] = set()
+        for offset in product(*(range(-int(span), int(span) + 1) for span in spans)):
+            if self.periodic:
+                assert self.shape is not None
+                other = tuple((key[axis] + offset[axis]) % self.shape[axis] for axis in range(3))
+            else:
+                other = tuple(key[axis] + offset[axis] for axis in range(3))
+            candidate_keys.add(other)
+        candidates = sorted(index for other in candidate_keys for index in self.cells.get(other, ()))
+        if not candidates:
+            return ()
+        deltas = minimum_image(
+            self.coordinates[candidates] - np.asarray(point, dtype=float),
+            self.lengths if self.periodic else None,
+        )
+        distances2 = np.einsum("ij,ij->i", deltas, deltas)
+        cutoff2 = float(cutoff) ** 2
+        return tuple(
+            index
+            for index, distance2 in zip(candidates, distances2, strict=True)
+            if float(distance2) <= cutoff2
+        )
+
+    def _key(self, point: np.ndarray) -> tuple[int, int, int]:
+        value = np.asarray(point, dtype=float)
+        if self.periodic:
+            assert self.lengths is not None and self.shape is not None
+            scaled = np.floor(np.mod(value, self.lengths) / self.cell_width).astype(int)
+            shape = np.asarray(self.shape, dtype=int)
+            scaled = np.minimum(np.maximum(scaled, 0), shape - 1)
+        else:
+            scaled = np.floor((value - self.origin) / self.cell_width).astype(int)
+        return tuple(int(item) for item in scaled)
 
 
 def self_cutoff_pairs(
@@ -23,6 +88,9 @@ def self_cutoff_pairs(
     if len(coords) < 2:
         return []
     periodic, lengths = _periodic_box(box)
+    accelerated_pairs = _mda_capped_pairs(coords, coords, lengths if periodic else None, cutoff, self_pairs=True)
+    if accelerated_pairs is not None:
+        return _filter_self_pairs(coords, accelerated_pairs, lengths if periodic else None, cutoff)
     keys, shape = _cell_keys(coords, cutoff, periodic, lengths)
     cells: dict[tuple[int, int, int], list[int]] = {}
     for index, key in enumerate(keys):
@@ -58,6 +126,9 @@ def cross_cutoff_pairs(
     if not len(left) or not len(right):
         return []
     periodic, lengths = _periodic_box(box)
+    accelerated_pairs = _mda_capped_pairs(left, right, lengths if periodic else None, cutoff, self_pairs=False)
+    if accelerated_pairs is not None:
+        return _filter_cross_pairs(left, right, accelerated_pairs, lengths if periodic else None, cutoff)
     combined = np.vstack((left, right))
     keys, shape = _cell_keys(combined, cutoff, periodic, lengths)
     left_keys = keys[: len(left)]
@@ -74,6 +145,88 @@ def cross_cutoff_pairs(
                 if float(np.dot(delta, delta)) <= cutoff2:
                     pairs.append((i, j))
     return sorted(set(pairs))
+
+
+def _mda_capped_pairs(
+    left: np.ndarray,
+    right: np.ndarray,
+    lengths: np.ndarray | None,
+    cutoff: float,
+    *,
+    self_pairs: bool,
+) -> np.ndarray | None:
+    """Return MDAnalysis cutoff candidates, or ``None`` for the pure-Python fallback."""
+    # Use MDAnalysis only for large candidate searches.
+    if len(left) < 32 or len(right) < 32:
+        return None
+    try:
+        from MDAnalysis.lib.distances import capped_distance
+    except ImportError:
+        return None
+    box = None
+    if lengths is not None:
+        box = np.asarray([*lengths, 90.0, 90.0, 90.0], dtype=np.float32)
+    try:
+        pairs = capped_distance(
+            left,
+            right,
+            # Expand in float32 so boundary pairs reach the float64 recheck.
+            max_cutoff=float(np.nextafter(np.float32(cutoff), np.float32(np.inf))),
+            box=box,
+            return_distances=False,
+        )
+    except Exception:
+        # Keep the deterministic fallback available.
+        return None
+    pairs = np.asarray(pairs, dtype=int)
+    if pairs.size == 0:
+        return np.empty((0, 2), dtype=int)
+    if pairs.ndim != 2 or pairs.shape[1] != 2:
+        return None
+    if self_pairs:
+        pairs = pairs[pairs[:, 0] < pairs[:, 1]]
+    return pairs
+
+
+def _filter_self_pairs(
+    coordinates: np.ndarray,
+    candidates: np.ndarray,
+    box: np.ndarray | None,
+    cutoff: float,
+) -> list[tuple[int, int]]:
+    """Apply SQQ's exact inclusive cutoff after accelerated candidate search."""
+    if not len(candidates):
+        return []
+    deltas = minimum_image(coordinates[candidates[:, 1]] - coordinates[candidates[:, 0]], box)
+    distances2 = np.einsum("ij,ij->i", deltas, deltas)
+    cutoff2 = float(cutoff) ** 2
+    return sorted(
+        {
+            (int(i), int(j))
+            for (i, j), distance2 in zip(candidates, distances2, strict=True)
+            if float(distance2) <= cutoff2
+        }
+    )
+
+
+def _filter_cross_pairs(
+    left: np.ndarray,
+    right: np.ndarray,
+    candidates: np.ndarray,
+    box: np.ndarray | None,
+    cutoff: float,
+) -> list[tuple[int, int]]:
+    """Apply SQQ's exact inclusive cross-set cutoff after acceleration."""
+    if not len(candidates):
+        return []
+    deltas = minimum_image(right[candidates[:, 1]] - left[candidates[:, 0]], box)
+    distances2 = np.einsum("ij,ij->i", deltas, deltas)
+    cutoff2 = float(cutoff) ** 2
+    return sorted(
+        (int(i), int(j))
+        for (i, j), distance2 in zip(candidates, distances2, strict=True)
+        if float(distance2) <= cutoff2
+    )
 
 
 def _coordinates(values: np.ndarray) -> np.ndarray:

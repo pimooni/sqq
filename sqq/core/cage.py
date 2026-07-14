@@ -8,8 +8,9 @@ from itertools import combinations
 import numpy as np
 
 from ..models import Cage, CagePatch, Frame, Guest, Ring
-from .geometry import unwrap_connected_nodes
+from .geometry import pbc_aware_centroid, unwrap_connected_nodes
 from .pbc import distance, minimum_image
+from .spatial import PointSpatialIndex
 from .ring_topology import (
     RingFaceQuality,
     RingTopologyIndex,
@@ -20,6 +21,8 @@ from .ring_topology import (
 
 
 KNOWN_CAGE_TYPES = ["512", "51262", "51263", "51264", "51268", "435663"]
+FACE_COUNT_SIZES = (4, 5, 6)
+FACE_COUNT_INDEX = {size: index for index, size in enumerate(FACE_COUNT_SIZES)}
 
 TARGET_FACE_COUNTS = {
     "512": {4: 0, 5: 12, 6: 0},
@@ -68,8 +71,7 @@ def find_cages(
     if not enabled:
         return []
 
-    # Seven-member rings can be searched and reported, but cage closure is
-    # intentionally limited to the established 4/5/6 face model.
+    # Cage closure uses the established 4/5/6 face model.
     allowed_sizes = set(ring_sizes or [5, 6]) & {4, 5, 6}
     if not allowed_sizes:
         return []
@@ -92,7 +94,7 @@ def find_cages(
         for ring_id, center in topology.ring_centers.items()
         if ring_id in active_ring_ids
     }
-    # Cage growth is driven by shared boundary edges, not by scanning all faces.
+    # Grow cages from shared boundary edges.
     edge_to_ring_ids = {
         edge: {ring_id for ring_id in ring_ids if ring_id in active_ring_ids}
         for edge, ring_ids in topology.edge_to_ring_ids.items()
@@ -101,12 +103,22 @@ def find_cages(
     found: dict[frozenset[str], Cage] = {}
     seen_water_keys: set[tuple[str, tuple[int, ...]]] = set()
     type_counts: dict[str, int] = defaultdict(int)
+    guest_centers = tuple(guest_center(frame, guest) for guest in guests)
+    guest_center_index = (
+        PointSpatialIndex(
+            np.asarray(guest_centers, dtype=float),
+            frame.box,
+            cell_size=max(float(occupancy_radius_nm) + 0.25, 0.25),
+        )
+        if guest_centers
+        else None
+    )
 
     def add_candidate(face_ids: frozenset[str], cage_type: str) -> None:
         if face_ids in found:
             return
         face_rings = [ring_by_id[ring_id] for ring_id in sorted(face_ids)]
-        # A face-count match is not enough; the ring patch must be a closed shell.
+        # A matching face count still needs a closed shell.
         if not is_closed_polyhedron(face_rings):
             return
         unwrapped = cage_unwrapped_nodes(frame, face_rings)
@@ -145,6 +157,8 @@ def find_cages(
             unwrapped,
             occupancy_radius_nm,
             occupancy_mode,
+            guest_centers=guest_centers,
+            guest_center_index=guest_center_index,
         )
         found[face_ids] = Cage(
             object_id=f"{cage_type}_{type_counts[cage_type]:05d}",
@@ -158,7 +172,7 @@ def find_cages(
 
     mode = search_mode.lower().strip()
     if mode in {"expand", "hybrid"}:
-        # Older drafts used these names. In SQQ they are aliases for grow.
+        # Legacy names map to grow.
         mode = "grow"
 
     if mode == "grow":
@@ -216,7 +230,7 @@ def find_cages(
                     "generic grow results are still retained."
                 )
     elif mode in {"pair", "patch_pair"}:
-        # Compatibility/debug path only: two open-patch boundaries close into a shell.
+        # Compatibility/debug closure of two open patches.
         patch_face_sets = [frozenset(patch.rings) for patch in patches]
         for face_ids, cage_type in fast_pair_cage_candidates(patch_face_sets, ring_by_id, targets):
             add_candidate(face_ids, cage_type)
@@ -324,10 +338,11 @@ def grow_cage_candidates(
     max_boundary_candidates: int,
     status: dict[str, bool] | None = None,
 ):
-    """Yield closed shells using target masks and compact edge-degree bitsets."""
+    """Yield closed shells using integer masks and fixed 4/5/6 face counts."""
     ring_ids = sorted(ring_by_id)
     rank = {ring_id: index for index, ring_id in enumerate(ring_ids)}
     ring_bits = {ring_id: 1 << index for index, ring_id in enumerate(ring_ids)}
+    ring_sizes = {ring_id: ring.size for ring_id, ring in ring_by_id.items()}
     edge_ids = sorted(edge_to_ring_ids)
     edge_bits = {edge: 1 << index for index, edge in enumerate(edge_ids)}
     edge_by_bit = {1 << index: edge for index, edge in enumerate(edge_ids)}
@@ -341,6 +356,14 @@ def grow_cage_candidates(
     }
     ring_id_by_bit = {bit: ring_id for ring_id, bit in ring_bits.items()}
     target_names = tuple(targets)
+    target_face_counts = tuple(
+        tuple(targets[name].get(size, 0) for size in FACE_COUNT_SIZES)
+        for name in target_names
+    )
+    target_total_incidences = tuple(
+        sum(size * count for size, count in zip(FACE_COUNT_SIZES, counts, strict=True))
+        for counts in target_face_counts
+    )
     all_target_mask = (1 << len(target_names)) - 1
     target_count_masks = build_target_count_masks(target_names, targets)
     seed_index_by_anchor = build_seed_index_by_anchor(seed_face_sets)
@@ -354,18 +377,20 @@ def grow_cage_candidates(
         if edge_state is None:
             continue
         seed_once, seed_twice = edge_state
-        seed_counts = face_counts(seed_face_ids, ring_by_id)
-        compatible_targets = compatible_target_mask(
+        seed_counts = face_count_tuple(seed_face_ids, ring_sizes)
+        seed_incidence = sum(
+            size * count for size, count in zip(FACE_COUNT_SIZES, seed_counts, strict=True)
+        )
+        compatible_targets = compatible_target_mask_tuple(
             seed_counts,
             all_target_mask,
             target_count_masks,
         )
         compatible_targets = prune_target_mask_by_edge_budget(
             compatible_targets,
-            seed_counts,
+            seed_incidence,
             seed_once,
-            target_names,
-            targets,
+            target_total_incidences,
         )
         if not compatible_targets:
             continue
@@ -374,11 +399,21 @@ def grow_cage_candidates(
                 status["hit_total_limit"] = True
             return
 
-        stack = [(seed_face_ids, seed_mask, seed_once, seed_twice, seed_counts, compatible_targets)]
+        stack = [
+            (
+                seed_face_ids,
+                seed_mask,
+                seed_once,
+                seed_twice,
+                seed_counts,
+                seed_incidence,
+                compatible_targets,
+            )
+        ]
         local_states = 0
 
         while stack and local_states < max_states_per_seed and total_states < max_total_states:
-            face_ids, face_mask, once_mask, twice_mask, counts, compatible = stack.pop()
+            face_ids, face_mask, once_mask, twice_mask, counts, used_incidence, compatible = stack.pop()
             if face_mask in seen_states:
                 continue
             if len(seed_face_ids) > 1 and contains_earlier_seed(face_ids, seed_index, seed_index_by_anchor):
@@ -388,7 +423,7 @@ def grow_cage_candidates(
             total_states += 1
 
             if once_mask == 0:
-                cage_type = target_type_for_counts(counts, targets)
+                cage_type = target_type_for_count_tuple(counts, target_names, target_face_counts)
                 if cage_type is not None:
                     yield face_ids, cage_type
                 continue
@@ -404,8 +439,7 @@ def grow_cage_candidates(
                 edge_by_bit,
                 edge_ring_masks,
                 ring_id_by_bit,
-                ring_by_id,
-                ring_bits,
+                ring_sizes,
                 ring_edge_masks,
                 rank,
                 seed_rank,
@@ -415,26 +449,22 @@ def grow_cage_candidates(
                 status=status,
             )
             for next_id in reversed(next_ids):
-                ring = ring_by_id[next_id]
+                ring_size = ring_sizes[next_id]
                 ring_edge_mask = ring_edge_masks[next_id]
                 if ring_edge_mask & twice_mask:
                     continue
                 promoted = ring_edge_mask & once_mask
                 next_twice = twice_mask | promoted
                 next_once = (once_mask ^ ring_edge_mask) & ~next_twice
-                next_counts = dict(counts)
-                next_count = next_counts.get(ring.size, 0) + 1
-                next_counts[ring.size] = next_count
-                next_compatible = compatible & target_count_masks.get(
-                    (ring.size, next_count),
-                    0,
-                )
+                count_index = FACE_COUNT_INDEX[ring_size]
+                next_count = counts[count_index] + 1
+                next_counts = counts[:count_index] + (next_count,) + counts[count_index + 1 :]
+                next_compatible = compatible & target_count_masks.get((ring_size, next_count), 0)
                 next_compatible = prune_target_mask_by_edge_budget(
                     next_compatible,
-                    next_counts,
+                    used_incidence + ring_size,
                     next_once,
-                    target_names,
-                    targets,
+                    target_total_incidences,
                 )
                 if not next_compatible:
                     continue
@@ -445,6 +475,7 @@ def grow_cage_candidates(
                         next_once,
                         next_twice,
                         next_counts,
+                        used_incidence + ring_size,
                         next_compatible,
                     )
                 )
@@ -454,6 +485,40 @@ def grow_cage_candidates(
             if status is not None:
                 status["hit_total_limit"] = True
             return
+
+
+def face_count_tuple(face_ids: frozenset[str], ring_sizes: dict[str, int]) -> tuple[int, int, int]:
+    """Count 4/5/6 faces without allocating a per-state dictionary."""
+    counts = [0, 0, 0]
+    for ring_id in face_ids:
+        counts[FACE_COUNT_INDEX[ring_sizes[ring_id]]] += 1
+    return tuple(counts)
+
+
+def compatible_target_mask_tuple(
+    counts: tuple[int, int, int],
+    all_target_mask: int,
+    target_count_masks: dict[tuple[int, int], int],
+) -> int:
+    """Return target bits compatible with fixed 4/5/6 face counts."""
+    mask = all_target_mask
+    for size, count in zip(FACE_COUNT_SIZES, counts, strict=True):
+        mask &= target_count_masks.get((size, count), 0)
+        if not mask:
+            break
+    return mask
+
+
+def target_type_for_count_tuple(
+    counts: tuple[int, int, int],
+    target_names: tuple[str, ...],
+    target_face_counts: tuple[tuple[int, int, int], ...],
+) -> str | None:
+    """Resolve a closed fixed-size face-count state to a configured target."""
+    for name, target_counts in zip(target_names, target_face_counts, strict=True):
+        if counts == target_counts:
+            return name
+    return None
 
 
 def edge_state_for_faces(
@@ -515,10 +580,9 @@ def compatible_target_mask(
 
 def prune_target_mask_by_edge_budget(
     target_mask: int,
-    counts: dict[int, int],
+    used_incidence: int,
     once_mask: int,
-    target_names: tuple[str, ...],
-    targets: dict[str, dict[int, int]],
+    target_total_incidences: tuple[int, ...],
 ) -> int:
     """Remove targets whose remaining face incidences cannot close the boundary."""
     open_edges = once_mask.bit_count()
@@ -527,12 +591,7 @@ def prune_target_mask_by_edge_budget(
     while remaining:
         bit = remaining & -remaining
         remaining ^= bit
-        name = target_names[bit.bit_length() - 1]
-        target = targets[name]
-        remaining_incidence = sum(
-            (target.get(size, 0) - counts.get(size, 0)) * size
-            for size in target
-        )
+        remaining_incidence = target_total_incidences[bit.bit_length() - 1] - used_incidence
         if remaining_incidence < open_edges:
             continue
         if (remaining_incidence - open_edges) % 2:
@@ -546,14 +605,13 @@ def ordered_boundary_candidates_bitset(
     face_mask: int,
     once_mask: int,
     twice_mask: int,
-    counts: dict[int, int],
+    counts: tuple[int, int, int],
     compatible_targets: int,
     target_count_masks: dict[tuple[int, int], int],
     edge_by_bit: dict[int, tuple[int, int]],
     edge_ring_masks: dict[tuple[int, int], int],
     ring_id_by_bit: dict[int, str],
-    ring_by_id: dict[str, Ring],
-    ring_bits: dict[str, int],
+    ring_sizes: dict[str, int],
     ring_edge_masks: dict[str, int],
     rank: dict[str, int],
     seed_rank: int,
@@ -577,11 +635,11 @@ def ordered_boundary_candidates_bitset(
             ring_id = ring_id_by_bit[ring_bit]
             if rank[ring_id] < seed_rank:
                 continue
-            ring = ring_by_id[ring_id]
             if ring_edge_masks[ring_id] & twice_mask:
                 continue
-            next_count = counts.get(ring.size, 0) + 1
-            if not compatible_targets & target_count_masks.get((ring.size, next_count), 0):
+            ring_size = ring_sizes[ring_id]
+            next_count = counts[FACE_COUNT_INDEX[ring_size]] + 1
+            if not compatible_targets & target_count_masks.get((ring_size, next_count), 0):
                 continue
             candidates.append(ring_id)
         if not candidates:
@@ -596,6 +654,7 @@ def ordered_boundary_candidates_bitset(
         best.sort(key=lambda ring_id: (candidate_distance_to_patch(ring_id, face_ids, ring_centers, box), rank[ring_id]))
         return best[:max_boundary_candidates]
     return sorted(best, key=lambda ring_id: rank[ring_id])
+
 
 def grow_seed_face_sets(patches: list[CagePatch], ring_by_id: dict[str, Ring], seed_mode: str) -> list[frozenset[str]]:
     """Build cage-grow seeds from open cage patches, or rings for comparison."""
@@ -663,8 +722,7 @@ def ordered_boundary_candidates(
     for edge, edge_count in edge_counts.items():
         if edge_count != 1:
             continue
-        # First use exact shared-edge topology. Ring-center distance is only
-        # needed if the most constrained edge still has too many candidates.
+        # Use ring-center distance only to break shared-edge ties.
         candidates = candidate_ids_for_boundary_edge(
             edge,
             face_ids,
@@ -1102,23 +1160,50 @@ def assigned_guests(
     unwrapped_nodes: dict[int, np.ndarray],
     radius_nm: float,
     occupancy_mode: str,
+    *,
+    guest_centers: tuple[np.ndarray, ...] | None = None,
+    guest_center_index: PointSpatialIndex | None = None,
 ) -> tuple[str, ...]:
-    """Assign guest residues by point-in-polyhedron or center-distance mode."""
+    """Assign guests with one spatial candidate query and batched solid angles."""
     mode = occupancy_mode.lower().strip()
     if mode not in {"polyhedron", "center", "auto"}:
         raise ValueError(f"Unsupported cage.occupancy_mode: {occupancy_mode}")
+    if not guests:
+        return ()
 
-    assigned = []
     shell_radius = max(float(np.linalg.norm(pos - center)) for pos in unwrapped_nodes.values()) if unwrapped_nodes else radius_nm
     triangles = triangulate_cage_faces(rings, unwrapped_nodes, center) if mode in {"polyhedron", "auto"} else []
-    for guest in guests:
-        raw_center = guest_center(frame, guest)
-        local_center = center + minimum_image(raw_center - center, frame.box)
-        center_hit = distance(raw_center, center, frame.box) <= radius_nm
-        poly_hit = False
-        if triangles and float(np.linalg.norm(local_center - center)) <= shell_radius + 0.25:
-            poly_hit = point_in_polyhedron(local_center, triangles)
-        if (mode == "polyhedron" and poly_hit) or (mode == "center" and center_hit) or (mode == "auto" and (poly_hit or center_hit)):
+    resolved_centers = guest_centers or tuple(guest_center(frame, guest) for guest in guests)
+    candidate_radius = float(radius_nm) if mode == "center" else shell_radius + 0.25
+    if mode == "auto":
+        candidate_radius = max(candidate_radius, float(radius_nm))
+    candidate_indices = (
+        guest_center_index.query(center, candidate_radius)
+        if guest_center_index is not None
+        else tuple(range(len(guests)))
+    )
+    if not candidate_indices:
+        return ()
+
+    raw_centers = np.asarray([resolved_centers[index] for index in candidate_indices], dtype=float)
+    local_deltas = minimum_image(raw_centers - center, frame.box)
+    local_distances = np.linalg.norm(local_deltas, axis=1)
+    local_centers = center + local_deltas
+    center_hits = local_distances <= float(radius_nm)
+    poly_hits = np.zeros(len(candidate_indices), dtype=bool)
+    if triangles:
+        poly_mask = local_distances <= shell_radius + 0.25
+        if np.any(poly_mask):
+            poly_hits[poly_mask] = points_in_polyhedron(local_centers[poly_mask], triangles)
+
+    assigned: list[str] = []
+    for index, center_hit, poly_hit in zip(candidate_indices, center_hits, poly_hits, strict=True):
+        if (
+            (mode == "polyhedron" and bool(poly_hit))
+            or (mode == "center" and bool(center_hit))
+            or (mode == "auto" and (bool(poly_hit) or bool(center_hit)))
+        ):
+            guest = guests[index]
             assigned.append(f"{guest.resname}{guest.resid}")
     return tuple(assigned)
 
@@ -1155,13 +1240,50 @@ def point_in_polyhedron(point: np.ndarray, triangles: list[tuple[np.ndarray, np.
     return abs(solid_angle) > 2.0 * np.pi
 
 
+def points_in_polyhedron(points: np.ndarray, triangles: list[tuple[np.ndarray, np.ndarray, np.ndarray]]) -> np.ndarray:
+    """Vectorize solid-angle membership across candidate points.
+
+    Triangle accumulation stays in source order. Candidates numerically close to
+    the historical 2*pi decision boundary use the scalar implementation.
+    """
+    values = np.asarray(points, dtype=float)
+    if values.ndim != 2 or values.shape[1] != 3:
+        raise ValueError("points must have shape (N, 3)")
+    total = np.zeros(len(values), dtype=float)
+    for a, b, c in triangles:
+        av = a - values
+        bv = b - values
+        cv = c - values
+        la = np.linalg.norm(av, axis=1)
+        lb = np.linalg.norm(bv, axis=1)
+        lc = np.linalg.norm(cv, axis=1)
+        valid = np.minimum(np.minimum(la, lb), lc) > 1.0e-12
+        if not np.any(valid):
+            continue
+        numerator = np.einsum("ij,ij->i", av, np.cross(bv, cv))
+        denominator = (
+            la * lb * lc
+            + np.einsum("ij,ij->i", av, bv) * lc
+            + np.einsum("ij,ij->i", bv, cv) * la
+            + np.einsum("ij,ij->i", cv, av) * lb
+        )
+        angles = np.zeros(len(values), dtype=float)
+        angles[valid] = 2.0 * np.arctan2(numerator[valid], denominator[valid])
+        total += angles
+    hits = np.abs(total) > 2.0 * np.pi
+    uncertain = np.abs(np.abs(total) - 2.0 * np.pi) <= 1.0e-9
+    for index in np.flatnonzero(uncertain):
+        hits[index] = point_in_polyhedron(values[index], triangles)
+    return hits
+
+
 def triangle_solid_angle(a: np.ndarray, b: np.ndarray, c: np.ndarray) -> float:
     """Return the signed solid angle of a triangle at the origin."""
     la = float(np.linalg.norm(a))
     lb = float(np.linalg.norm(b))
     lc = float(np.linalg.norm(c))
     if min(la, lb, lc) <= 1e-12:
-        return 4.0 * np.pi
+        return 0.0
     numerator = float(np.dot(a, np.cross(b, c)))
     denominator = la * lb * lc + float(np.dot(a, b)) * lc + float(np.dot(b, c)) * la + float(np.dot(c, a)) * lb
     return 2.0 * float(np.arctan2(numerator, denominator))
@@ -1171,7 +1293,7 @@ def guest_center(frame: Frame, guest: Guest) -> np.ndarray:
     """Use the configured center atom when available, otherwise geometry center."""
     if guest.center_atom is not None:
         return frame.atoms[guest.center_atom].xyz
-    return np.mean([frame.atoms[idx].xyz for idx in guest.atoms], axis=0)
+    return pbc_aware_centroid(frame, guest.atoms)
 
 
 def cage_isomer_label(rings: list[Ring]) -> str | None:

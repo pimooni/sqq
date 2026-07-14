@@ -11,6 +11,7 @@ import numpy as np
 
 from ..models import Atom, F3F4Result, Frame, GraphResult, Water, WaterOrder
 from .pbc import minimum_image
+from .spatial import self_cutoff_pairs
 
 
 TETRAHEDRAL_COS2 = cos(radians(109.47)) ** 2
@@ -33,7 +34,9 @@ def compute_order_parameters(
     waters: list[Water],
     graph: GraphResult,
     *,
-    f3f4_enabled: bool = True,
+    f3f4_enabled: bool | None = None,
+    f3_enabled: bool | None = None,
+    f4_enabled: bool | None = None,
     q_enabled: bool = True,
     q_neighbor_mode: str = "graph",
     q_cutoff_nm: float = 0.35,
@@ -42,6 +45,9 @@ def compute_order_parameters(
     focus_resids: set[int] | None = None,
 ) -> F3F4Result:
     """Compute per-water F3/F4 and requested Steinhardt Q_l values."""
+    legacy_f3f4_enabled = True if f3f4_enabled is None else bool(f3f4_enabled)
+    resolved_f3_enabled = legacy_f3f4_enabled if f3_enabled is None else bool(f3_enabled)
+    resolved_f4_enabled = legacy_f3f4_enabled if f4_enabled is None else bool(f4_enabled)
     water_by_oxygen = {water.oxygen: water for water in waters}
     focus_resids = set(focus_resids or set())
     rows: list[WaterOrder] = []
@@ -49,16 +55,19 @@ def compute_order_parameters(
     f4_values: list[float] = []
     f3_focus_values: list[float] = []
     f4_focus_values: list[float] = []
-    q_degree_resolved = normalize_q_degree(q_degree)
-    if not q_enabled:
-        q_degree_resolved = ()
+    q_degree_resolved = normalize_q_degree(q_degree) if q_enabled else ()
     q_value_lists: dict[int, list[float]] = {degree: [] for degree in q_degree_resolved}
     q_focus_value_lists: dict[int, list[float]] = {degree: [] for degree in q_degree_resolved}
     q_mode = normalize_q_neighbor_mode(q_neighbor_mode)
     q_fixed_neighbor = resolve_q_neighbor_count(q_mode, q_n_neighbor)
     graph_vectors = (
         build_graph_neighbor_vector_cache(frame, waters, graph)
-        if f3f4_enabled or (q_degree_resolved and q_mode == "graph")
+        if resolved_f3_enabled or resolved_f4_enabled or (q_degree_resolved and q_mode == "graph")
+        else {}
+    )
+    hydrogen_vectors = (
+        build_hydrogen_vector_cache(frame, waters)
+        if resolved_f4_enabled
         else {}
     )
     q_candidates = (
@@ -82,8 +91,15 @@ def compute_order_parameters(
             neighbors,
             frame.box,
             neighbor_vectors=graph_vectors.get(water.oxygen),
-        ) if f3f4_enabled else None
-        f4 = f4_for_water(frame.atoms, water, [water_by_oxygen[idx] for idx in neighbors], frame.box) if f3f4_enabled else None
+        ) if resolved_f3_enabled else None
+        f4 = f4_for_water(
+            frame.atoms,
+            water,
+            [water_by_oxygen[idx] for idx in neighbors],
+            frame.box,
+            neighbor_vectors=graph_vectors.get(water.oxygen),
+            hydrogen_vectors=hydrogen_vectors,
+        ) if resolved_f4_enabled else None
         q_values, q_neighbors = q_values_from_candidates(
             q_candidates.get(water.oxygen, ()),
             n_neighbor=q_fixed_neighbor,
@@ -169,8 +185,16 @@ def f3_for_water(
     return mean_or_none(terms)
 
 
-def f4_for_water(atoms: list[Atom], water: Water, neighbors: list[Water], box: np.ndarray | None) -> float | None:
-    """F4: average cos(3*dihedral) after selecting the farthest H-H pair."""
+def f4_for_water(
+    atoms: list[Atom],
+    water: Water,
+    neighbors: list[Water],
+    box: np.ndarray | None,
+    *,
+    neighbor_vectors: dict[int, np.ndarray] | None = None,
+    hydrogen_vectors: dict[int, dict[int, np.ndarray]] | None = None,
+) -> float | None:
+    """F4 with reusable local O-H and O-O vectors when supplied."""
     if len(water.hydrogens) < 2:
         return None
     terms = []
@@ -178,9 +202,42 @@ def f4_for_water(atoms: list[Atom], water: Water, neighbors: list[Water], box: n
         if len(neighbor.hydrogens) < 2:
             continue
         h1, h2 = farthest_hydrogen_pair(atoms, water, neighbor, box)
-        angle = dihedral_h_o_o_h(atoms, h1, water.oxygen, neighbor.oxygen, h2, box)
+        oo_vector = None if neighbor_vectors is None else neighbor_vectors.get(neighbor.oxygen)
+        first_h_vector = None if hydrogen_vectors is None else hydrogen_vectors.get(water.oxygen, {}).get(h1)
+        second_h_vector = None if hydrogen_vectors is None else hydrogen_vectors.get(neighbor.oxygen, {}).get(h2)
+        if oo_vector is not None and first_h_vector is not None and second_h_vector is not None:
+            angle = dihedral_from_local_vectors(first_h_vector, oo_vector, second_h_vector)
+        else:
+            angle = dihedral_h_o_o_h(atoms, h1, water.oxygen, neighbor.oxygen, h2, box)
         terms.append(cos(3.0 * angle))
     return mean_or_none(terms)
+
+
+def build_hydrogen_vector_cache(frame: Frame, waters: list[Water]) -> dict[int, dict[int, np.ndarray]]:
+    """Cache each selected water's local O-H vectors for F4 dihedrals."""
+    return {
+        water.oxygen: {
+            hydrogen: minimum_image(frame.atoms[hydrogen].xyz - frame.atoms[water.oxygen].xyz, frame.box)
+            for hydrogen in water.hydrogens[:2]
+        }
+        for water in waters
+        if water.hydrogens
+    }
+
+
+def dihedral_from_local_vectors(
+    first_h_vector: np.ndarray,
+    oo_vector: np.ndarray,
+    second_h_vector: np.ndarray,
+) -> float:
+    """Evaluate H-O-O-H after reusing the three historical minimum-image vectors."""
+    origin = np.zeros(3, dtype=float)
+    return dihedral(
+        np.asarray(first_h_vector, dtype=float),
+        origin,
+        np.asarray(oo_vector, dtype=float),
+        np.asarray(oo_vector, dtype=float) + np.asarray(second_h_vector, dtype=float),
+    )
 
 
 def farthest_hydrogen_pair(atoms: list[Atom], water_a: Water, water_b: Water, box: np.ndarray | None) -> tuple[int, int]:
@@ -342,15 +399,26 @@ def build_q_candidate_cache(
                 if pair is not None:
                     candidates[oxygen].append(pair)
     else:
-        for left_index, left in enumerate(waters):
-            left_center = frame.atoms[left.oxygen].xyz
-            for right in waters[left_index + 1 :]:
-                vector = minimum_image(frame.atoms[right.oxygen].xyz - left_center, frame.box)
-                distance = float(np.linalg.norm(vector))
-                if distance <= 1e-12 or distance > cutoff_nm:
-                    continue
-                candidates[left.oxygen].append((distance, vector))
-                candidates[right.oxygen].append((distance, -vector))
+        coordinates = np.asarray(
+            [frame.atoms[water.oxygen].xyz for water in waters],
+            dtype=float,
+        )
+        for left_index, right_index in self_cutoff_pairs(
+            coordinates,
+            frame.box,
+            cutoff_nm,
+        ):
+            left = waters[left_index]
+            right = waters[right_index]
+            vector = minimum_image(
+                coordinates[right_index] - coordinates[left_index],
+                frame.box,
+            )
+            distance = float(np.linalg.norm(vector))
+            if distance <= 1e-12:
+                continue
+            candidates[left.oxygen].append((distance, vector))
+            candidates[right.oxygen].append((distance, -vector))
 
     for oxygen in candidates:
         candidates[oxygen].sort(key=lambda item: item[0])

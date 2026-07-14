@@ -3,12 +3,13 @@ from __future__ import annotations
 """Shared data models for one SQQ analysis run."""
 
 from dataclasses import dataclass, field
+from functools import cached_property
 from pathlib import Path
 
 import numpy as np
 
 
-# Atom, Frame, Water, and Guest describe parsed trajectory input.
+# Parsed trajectory input.
 @dataclass(frozen=True)
 class Atom:
     index: int
@@ -45,17 +46,17 @@ class Guest:
     center_atom: int | None = None
 
 
-# Ring, CagePatch, and Cage describe detected topology objects by oxygen-node ids.
+# Detected topology objects use oxygen-node ids.
 @dataclass(frozen=True)
 class Ring:
     object_id: str
     nodes: tuple[int, ...]
 
-    @property
+    @cached_property
     def size(self) -> int:
         return len(self.nodes)
 
-    @property
+    @cached_property
     def edges(self) -> frozenset[tuple[int, int]]:
         """Return undirected graph edges around the ring."""
         pairs = []
@@ -254,7 +255,7 @@ class HydrateOrderResult:
     dhop30: ClusterOrderValue | None = None
 
 
-# FrameResult carries both raw selections and derived topology for exporters.
+# Frame analysis result for exporters.
 @dataclass
 class GraphResult:
     mode: str

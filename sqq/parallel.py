@@ -16,6 +16,7 @@ from .io.trajectory import (
     close_mdanalysis_universe,
     frame_from_mdanalysis_universe,
     open_mdanalysis_universe,
+    trajectory_atom_metadata,
     read_frames,
 )
 
@@ -28,6 +29,7 @@ _WORKER_STRICT = False
 _WORKER_STAGE_QUEUE: Any = None
 _WORKER_TRAJECTORY_PATH: Path | None = None
 _WORKER_UNIVERSE: Any = None
+_WORKER_TRAJECTORY_METADATA: tuple[tuple[int, int, str, str, int], ...] | None = None
 
 
 def initialize_file_worker(
@@ -54,9 +56,10 @@ def initialize_trajectory_worker(
 ) -> None:
     """Open one private trajectory handle in every spawned worker."""
     initialize_file_worker(config, outdir, strict, stage_queue)
-    global _WORKER_TRAJECTORY_PATH, _WORKER_UNIVERSE
+    global _WORKER_TRAJECTORY_PATH, _WORKER_UNIVERSE, _WORKER_TRAJECTORY_METADATA
     _WORKER_TRAJECTORY_PATH = Path(trajectory_path)
     _WORKER_UNIVERSE = open_mdanalysis_universe(_WORKER_TRAJECTORY_PATH, Path(topology_path))
+    _WORKER_TRAJECTORY_METADATA = trajectory_atom_metadata(_WORKER_UNIVERSE)
     atexit.register(close_trajectory_worker)
 
 
@@ -74,7 +77,12 @@ def process_trajectory_frame_task(frame_index: int, raw_frame_index: int) -> tup
         _emit_stage("stage", frame_index, stage, perf_counter())
 
     try:
-        frame = frame_from_mdanalysis_universe(_WORKER_UNIVERSE, _WORKER_TRAJECTORY_PATH, raw_frame_index)
+        frame = frame_from_mdanalysis_universe(
+            _WORKER_UNIVERSE,
+            _WORKER_TRAJECTORY_PATH,
+            raw_frame_index,
+            atom_metadata=_WORKER_TRAJECTORY_METADATA,
+        )
         row = process_frame(
             frame_index,
             frame,
@@ -111,10 +119,11 @@ def process_trajectory_batch_task(
 
 def close_trajectory_worker() -> None:
     """Close the private MDAnalysis reader before a worker exits."""
-    global _WORKER_UNIVERSE
+    global _WORKER_UNIVERSE, _WORKER_TRAJECTORY_METADATA
     if _WORKER_UNIVERSE is not None:
         close_mdanalysis_universe(_WORKER_UNIVERSE)
         _WORKER_UNIVERSE = None
+    _WORKER_TRAJECTORY_METADATA = None
 
 
 def process_file_task(frame_index: int, path_text: str) -> tuple[int, dict[str, Any]]:
@@ -133,7 +142,16 @@ def process_file_task(frame_index: int, path_text: str) -> tuple[int, dict[str, 
         _emit_stage("stage", frame_index, stage, perf_counter())
 
     try:
-        frame = next(iter(read_frames([path])))
+        frame = next(
+            iter(
+                read_frames(
+                    [path],
+                    xyz_scale=float(
+                        _WORKER_CONFIG.get("input", {}).get("xyz_scale", 0.1)
+                    ),
+                )
+            )
+        )
         row = process_frame(
             frame_index,
             frame,

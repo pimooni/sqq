@@ -2,9 +2,32 @@
 
 **SQQ: Python Joint Toolkit for Water-Shell Topology Analysis.**
 
-Current release: **0.2.6**
+Current release: **0.2.7**
 
-SQQ builds a water network, reports coordination diagnostics, and finds rings, standard half-cages, quasi-cages, closed cages, reported-cage hydrate clusters, per-frame phase domains and boundaries, cage guest occupancy, F3/F4/Q_l order parameters, MCG/DHOP hydrate-nucleation order parameters, and ice-like waters. Detailed algorithms are documented in `docs/design.md`; version notes are documented in `docs/update.md`.
+SQQ builds a water network, reports coordination diagnostics, and finds rings, standard half-cages, quasi-cages, closed cages, topology-wide hydrate clusters, per-frame phase domains and boundaries, cage guest occupancy, F3/F4/Q_l order parameters, MCG/DHOP hydrate-nucleation order parameters, and ice-like waters. Detailed algorithms are documented in `docs/design.md`; version notes are documented in `docs/update.md`.
+
+## Changed in 0.2.7
+
+- Added one unified selector, `--order-parameter NAME[,NAME...]`, for `f3`, `f4`, `qN`, `mcg1`, `mcg3`, `dhop35`, and `dhop30`; `all` and `none` are also supported.
+- The new default is `--order-parameter f3,f4`. Q_l, MCG, and DHOP are now opt-in instead of default calculations.
+- Root `sqq` / `sqq -h` output now places `SQQ version: 0.2.7   Release date: Jul 15, 2026` immediately before `usage:`. `sqq -v` and `sqq --version` print only that version line; subcommand help keeps its existing layout.
+- GRO and trajectory readers now reject non-finite coordinates; GRO accepts exactly one frame and rejects extra non-empty records after the box line.
+- Water and guest selection groups contiguous residue blocks in source order, so wrapped or repeated five-digit GRO residue IDs do not merge distinct molecules.
+- Configuration loading now parses textual on/off values explicitly and rejects invalid modes, non-finite cutoffs, nonpositive limits, and fractional integer settings before analysis.
+- Selection is independent for F3 and F4, and the terminal, per-frame Markdown, per-water TSV, `summary.xlsx`, and `run_config.yaml` report only the selected parameters. With `none`, the workbook omits `order_parameter`.
+- The old selectors `--no-q`, `-q` / `--q-degree`, `--mcg3`, and `--dhop30` remain hidden compatibility options for 0.2.7 and emit a deprecation warning.
+- Replaced the individual public `--no-info`, `--no-*-gro`, `--no-xlsx`, and `--no-summary-detail` switches with `--no-output TYPE[,TYPE...]`; its default is `none`, so existing default outputs remain enabled.
+- Removed the redundant per-frame overview `frame` worksheet from `summary.xlsx`; dedicated analysis sheets retain the per-frame data.
+- Fixed zero/partial-zero box handling, PBC-unwrapped guest centroids for occupancy/MCG, truncated GRO acceptance, and degenerate solid-angle triangles. Triclinic GRO/trajectory boxes now fail fast instead of being treated as orthorhombic.
+- Non-strict serial read failures now become diagnostic rows; strict failures still write `run_config.yaml`. Failed inputs are recorded in `run.failures`, an optional `failures` workbook sheet, and `summary_detail/failures.csv`.
+- Added configurable `--xyz-scale` / `input.xyz_scale` (default `0.1`, angstrom to nm), removed repeated per-frame config normalization, skipped physical-core probing for one task, cached immutable ring topology properties, reused spatial Q_l cutoff pairs, and precomputed PBC-aware guest centers.
+- XYZ now rejects negative/malformed declared counts, truncated records, extra non-empty records (multi-frame XYZ), and non-finite coordinates before analysis. One XYZ file represents one frame.
+- Explicit `--worker` values are validated even for a single task or serial backend. Both process and compatibility-thread backends submit at most `3 * workers` pending tasks, while preserving the configured active worker count.
+- Trajectory readers reuse immutable MDAnalysis atom metadata across frames. The normal full orthorhombic `minimum_image()` path avoids temporary boolean-index arrays; MDAnalysis cutoff candidates accelerate large coordinate searches but every candidate is still rechecked with SQQ float64 PBC distances.
+- Exact quasi-cage isomer counts remain sparse in memory and are written only to `summary_detail/quasi_cage_isomer.csv`; compact quasi composition counts remain in Markdown/XLSX. Detail-CSV replacement is transactional as a group, and workbook sheets are preflight-checked against Excel row/column limits.
+- Summary output now records per-table dimensions and timing in `run.summary_write`, prints total summary-write seconds in the final terminal summary, writes XLSX/CSV/YAML through same-directory temporary files with atomic replacement, and uses lightweight Excel body formatting for sheets larger than 200,000 cells or 128 columns.
+- Additional result-equivalent hot paths use a reusable guest-center spatial index plus batched occupancy solid angles, fixed 4/5/6 cage-grow count tuples and incidence pruning, batched DHOP plane-normal comparisons, and cached F4 local geometry vectors.
+- Hydrate-cluster topology now always uses every detected cage in the search scope. `--cage-size` remains a reporting filter for cage tables/files and no longer changes cluster connectivity or phase classification.
 
 ## Changed in 0.2.6
 
@@ -44,9 +67,12 @@ Then use:
 
 ```bash
 sqq -h
+sqq --version
 sqq init -o config.yaml
 sqq analyze -i ./gro -c config.yaml -o ./result_sqq
 ```
+
+Root help prints the SQQ version and release date immediately before the usage line. Use `sqq -v` or `sqq --version` for the version line alone.
 
 During source-tree development without installation:
 
@@ -80,6 +106,12 @@ XTC/TRR trajectory with a topology file:
 sqq analyze -i traj.xtc --top topol.gro -c config.yaml -o ./result_sqq
 ```
 
+### Input Units and Boxes
+
+GRO and MDAnalysis trajectory coordinates are interpreted in nm. GRO accepts exactly one frame per file and rejects truncated atom blocks, missing or malformed box lines, extra non-empty records, and non-finite coordinates. Trajectory frames also require finite coordinates. XYZ coordinates are multiplied by `input.xyz_scale` / `--xyz-scale`; the default `0.1` assumes angstrom input, while `1.0` keeps nm values. SQQ accepts exactly one declared XYZ frame per file and rejects truncated, extra, malformed, or non-finite atom records. XYZ has no periodic box unless converted through another format.
+
+GRO atom counts and the mandatory box line are validated. A three-value positive box is orthorhombic; an all-zero box is treated as non-periodic. Nine-value GRO boxes with nonzero tilt terms and trajectory frames with non-90-degree angles are rejected because triclinic minimum-image calculations are not implemented. Molecules are formed from contiguous residue blocks in source order, preventing wrapped or repeated residue IDs from merging distinct molecules.
+
 ## Analysis Modes
 
 `-m` / `--mode` selects one of three base presets:
@@ -96,13 +128,13 @@ sqq analyze -i ./gro -m 50 -o ./result_standard
 sqq analyze -i ./gro -m 99 -o ./result_performance
 ```
 
-Modes do not change `quasi_cage.max_layers`; L1 remains the default in every mode. Use `--quasi-max-layer` explicitly for L2/L3. Automatic workers use the mode fraction of detected physical cores, reserve one physical core for the system, and are capped by the number of independent GRO/XYZ files or selected trajectory frames. Multiple standalone files use spawned processes by default; a single indexed XTC/TRR trajectory can also distribute frames across spawned workers. `--worker N` / `-w N` overrides the mode percentage; integer text such as `1` or `4` is a worker count, while decimal text such as `0.5` or `1.0` and percentages such as `50%` or `100%` are physical-core fractions. The old `--workers` spelling is retained as a compatibility alias.
+Modes do not change `quasi_cage.max_layers` or `order.parameters`; L1 and the `f3,f4` order-parameter selection remain the defaults in every mode. Use `--quasi-max-layer` explicitly for L2/L3 and `--order-parameter` for another descriptor set. Automatic workers use the mode fraction of detected physical cores, reserve one physical core for the system, and are capped by the number of independent GRO/XYZ files or selected trajectory frames. Multiple standalone files use spawned processes by default; a single indexed XTC/TRR trajectory can also distribute frames across spawned workers. `--worker N` / `-w N` overrides the mode percentage; integer text such as `1` or `4` is a worker count, while decimal text such as `0.5` or `1.0` and percentages such as `50%` or `100%` are physical-core fractions. The old `--workers` spelling is retained as a compatibility alias.
 
-Version 0.2.6 uses process-based parallelism for independent GRO/XYZ files and selected XTC/TRR frames, so CPU-bound ring, quasi-cage, and cage searches can run on multiple cores. The main process alone owns the terminal panel and final workbook; workers report stage events through a process queue, analyze one file or a small trajectory-frame batch, write frame directories, and return summary rows. At most `3 * workers` process tasks are kept in flight; this bounds Future and serialization overhead without reducing the worker count. `parallel.math_threads: 1` prevents nested BLAS/OpenMP oversubscription.
+Version 0.2.7 uses process-based parallelism for independent GRO/XYZ files and selected XTC/TRR frames, so CPU-bound ring, quasi-cage, and cage searches can run on multiple cores. The main process alone owns the terminal panel and final workbook; process workers report stage events through a process queue, analyze one file or a small trajectory-frame batch, write frame directories, and return summary rows. At most `3 * workers` process or compatibility-thread tasks are kept in flight; this bounds Future and serialization overhead without reducing the worker count. `parallel.math_threads: 1` prevents nested BLAS/OpenMP oversubscription.
 
 The default `chordless`/`bounded` path preserves the established scientific definitions while accelerating neighbor generation, incremental chord pruning, L1 forward checking, cached layer growth, integer-mask subset ownership, and cage target/edge state pruning. Cage DFS also applies exact remaining-edge incidence and parity conditions before expansion. MDAnalysis supplies orthorhombic cutoff candidates when available, but SQQ still rechecks every distance and hydrogen-bond angle with its established float64 logic. F3 and graph-mode Q_l share one graph-vector cache; all Q_l degrees share candidate lists and spherical-angle work. Optional `ring.definition: shortest_path` applies the Franzblau shortest-path criterion and reuses bounded-BFS distance maps. Optional `quasi_cage.search_policy: exact` preserves distinct frontiers and enumerates connected L2/L3 subsets; these opt-in modes can change or add results. Candidate and state truncation is reported through frame warnings.
 
-Optional scientific cage validation adds PBC-aware face planarity and edge-variation limits, manifold vertex-link checks, positive-volume validation, and volume-centroid cage centers. It remains disabled by default. Version 0.2.5 continues to use the existing orthorhombic box representation; non-orthogonal/triclinic boxes are outside this update.
+Optional scientific cage validation adds PBC-aware face planarity and edge-variation limits, manifold vertex-link checks, positive-volume validation, and volume-centroid cage centers. It remains disabled by default. SQQ uses an orthorhombic box representation and now rejects non-orthogonal/triclinic input explicitly.
 
 The current release uses the same compact three-row stage model for serial and parallel progress: file preparation (`reading`, `settings`, `selecting`), core topology search (`graph`, `ring`, `half/quasi`, `cage`, and optional `cluster`), and post-processing (`filtering`, `order`, `ice`, `output`). In interactive single-file runs, the active stage is highlighted with bold bright-blue ANSI text. The `cluster` stage appears only when hydrate-cluster analysis is enabled. Parallel runs also show aggregate stage counts and up to six active files with per-stage and per-file timings.
 
@@ -126,7 +158,7 @@ Explicitly report every detected cage composition in the selected search scope:
 sqq analyze -i md.gro -s 4,5,6 --cage-size all -o ./result_sqq_all_cages
 ```
 
-Analyze connected reported-cage hydrate clusters:
+Analyze connected hydrate clusters from all detected cages:
 
 ```bash
 sqq analyze -i md.gro -s 4,5,6 --hydrate-cluster on -o ./result_sqq_cluster
@@ -151,23 +183,27 @@ Opt into stricter scientific cage validation:
 sqq analyze -i md.gro --cage-scientific-validation on -o ./result_sqq_scientific
 ```
 
-Use LAMMPS-style Q_l degree list and neighbors:
+Select F3/F4 plus a LAMMPS-style Q_l degree list and neighbors:
 
 ```bash
-sqq analyze -i md.gro -q 4,6,8,10,12 --q-neighbor-mode lammps --q-cutoff 0.35 --q-n-neighbor 12
+sqq analyze -i md.gro --order-parameter f3,f4,q4,q6,q8,q10,q12 --q-neighbor-mode lammps --q-cutoff 0.35 --q-n-neighbor 12
 ```
-Enable the optional MCG-3 and DHOP30 variants in addition to default MCG-1 and DHOP35:
+Select all F3/F4 and hydrate-nucleation descriptors:
 
 ```bash
-sqq analyze -i md.gro --mcg3 on --dhop30 on -o ./result_sqq_order
+sqq analyze -i md.gro --order-parameter f3,f4,mcg1,mcg3,dhop35,dhop30 -o ./result_sqq_order
 ```
 
-Disable per-frame info or structure GRO output:
+`--order-parameter` replaces the complete selection rather than adding to the default. Use `all` for `f3,f4,q6,q12,mcg1,mcg3,dhop35,dhop30`, or `none` to skip all order-parameter calculations.
+
+Disable selected output categories with one option:
 
 ```bash
-sqq analyze -i md.gro --no-info -o ./result_sqq_no_info
-sqq analyze -i md.gro --no-gro -o ./result_sqq_report
+sqq analyze -i md.gro --no-output info,quasi-gro,cage-gro,xlsx -o ./result_sqq_report
+sqq analyze -i md.gro --no-output all -o ./result_sqq_config_only
 ```
+
+`--no-output` defaults to `none`. The mandatory `run_config.yaml` remains even with `all`.
 
 Parallelize independent GRO/XYZ files with spawned processes (the default backend):
 
@@ -187,6 +223,11 @@ Use `--parallel-backend serial` for an exact one-process comparison. `thread` is
 
 ```yaml
 mode: "50"
+
+input:
+  pattern: "*.gro"
+  xtc_stride: 1
+  xyz_scale: 0.1
 
 graph:
   bond_mode: auto
@@ -226,32 +267,29 @@ hydrate_cluster:
   min_cage: 2
 
 hydrate_order:
-  mcg1_enabled: true
-  mcg3_enabled: false
   mcg_guest_resnames: [CH4, MET]
   mcg_guest_cutoff_nm: 0.90
   mcg_water_cutoff_nm: 0.60
   mcg_cone_half_angle_deg: 45.0
   mcg_min_waters: 5
-  dhop35_enabled: true
-  dhop30_enabled: false
   dhop_neighbor_cutoff_nm: 0.35
   dhop_planar_counts: [11, 12]
   dhop_min_qualified_neighbors: 3
 
 order:
-  f3f4_enabled: true
-  q_enabled: true
-  q_degree: [6, 12]
+  parameters: [f3, f4]
   q_neighbor_mode: graph
   q_cutoff_nm: 0.35
   q_n_neighbor: null
 
 output:
-  write_info: true
-  write_gro: true
+  disabled_outputs: []
+  write_tsv: false
   write_order_tsv: false
-  write_xlsx_summary: true
+  write_vmd: false
+  summary_detail_dir: summary_detail
+  cage_isomer_rows: nonzero
+  write_empty_files: false
   structure_layout: grouped
 
 parallel:
@@ -278,7 +316,7 @@ Process submission uses a bounded rolling queue of at most `3 * workers` tasks. 
 
 The parent preserves input/frame order in `summary.xlsx`. Different standalone files must have unique case-insensitive stems because each stem is the output frame-directory name. Process runs set `OMP_NUM_THREADS`, `OPENBLAS_NUM_THREADS`, `MKL_NUM_THREADS`, `VECLIB_MAXIMUM_THREADS`, `NUMEXPR_NUM_THREADS`, and `BLIS_NUM_THREADS` to `parallel.math_threads` while workers are spawned, then restore the parent environment.
 
-The scheduling and search-cache refinements themselves do not change existing scientific definitions or values. Before the new hydrate descriptors were enabled, they reduced the local `1200ns.gro` serial run from about 26.6 s to 18.2 s. The current default run, including MCG-1 and DHOP35, completed in about 21.6 s on the same host; every overlapping pre-existing analysis column matched the earlier workbook, while `order_parameter` gained the new columns. Performance depends on data, configuration, CPU, memory, and storage.
+The scheduling and search-cache refinements themselves do not change existing scientific definitions or values. Before the new hydrate descriptors were enabled, they reduced the local `1200ns.gro` serial run from about 26.6 s to 18.2 s. A 0.2.3 benchmark that also selected MCG-1 and DHOP35 completed in about 21.6 s on the same host; every overlapping pre-existing analysis column matched the earlier workbook. Performance depends on data, configuration, CPU, memory, and storage.
 
 ## Search and Report Scope
 
@@ -322,29 +360,31 @@ One frame-local ring topology index stores `ring_by_id`, ring centers, `edge_to_
 
 `cage.scientific_validation: false` is the default. When enabled with `--cage-scientific-validation on`, every accepted cage must additionally satisfy the configured PBC-aware face-planarity RMS and edge-length coefficient-of-variation limits, an edge-connected face shell, a single cyclic face link around every vertex, and a positive minimum triangulated volume. Accepted cages then use the volume centroid instead of the mean cage-water position. Enabling it can therefore remove distorted cages and can change guest occupancy or geometry-resolved hydrate-cluster edges. Raw ring and half/quasi searches, order parameters, and ice classification are unchanged; ownership-filtered free-ring and free-patch outputs can increase when a rejected cage no longer consumes them.
 
+Guest occupancy uses the configured center atom when available. Otherwise, guest atoms are PBC-unwrapped around one molecular anchor before calculating the centroid; the same helper is used by MCG. This correction can intentionally change occupancy counts relative to 0.2.6 or early 0.2.7 results for multi-atom guests crossing a periodic boundary.
+
 ## Hydrate Cluster
 
-`--hydrate-cluster on` analyzes the final reported cage set after `--cage-size` filtering. Cages become graph nodes and are connected through complete shared ring faces. When several detected cages reference the same face, ring-plane geometry keeps at most one cage on each physical side.
+`--hydrate-cluster on` analyzes every detected cage in the selected search scope. Cages become graph nodes and are connected through complete shared ring faces. When several detected cages reference the same face, ring-plane geometry keeps at most one cage on each physical side. `--cage-size` filters user-facing cage tables and files only; it does not remove cages from cluster connectivity or phase evidence.
 
 The hierarchy follows the HTR+ idea of classifying hydrate type, domains, and boundaries on a cage-connection graph ([DOI 10.1088/1361-648X/ad52df](https://doi.org/10.1088/1361-648X/ad52df)). SQQ implements this independently with labelled shared-face fingerprints, strict local seeds, mutually compatible expansion, and exclusive per-frame domains.
 
 `--cluster-min-cage N` sets the minimum connected-component size; the default is `2`. Smaller components are counted as isolated cages.
 
-Within each reported cluster, SQQ builds labelled first-shell fingerprints from neighboring cage types and shared-face sizes. Strict local sI/sII/sH seeds initialize phase evidence. The sH templates cover `5^12`, `4^3 5^6 6^3`, and `5^12 6^8` cages; the earlier two-anchor sH composite is retained as supplemental high-confidence evidence. All three phases expand through mutually compatible face-labelled edges when a candidate has at least two accepted phase contacts. Cages claimed exclusively by one phase form deterministic per-frame domains. Remaining cages are reported as single-phase boundaries, interphase boundaries, ambiguous, or unclassified.
+Within each cluster, SQQ builds labelled first-shell fingerprints from neighboring cage types and shared-face sizes. Strict local sI/sII/sH seeds initialize phase evidence. The sH templates cover `5^12`, `4^3 5^6 6^3`, and `5^12 6^8` cages; the earlier two-anchor sH composite is retained as supplemental high-confidence evidence. All three phases expand through mutually compatible face-labelled edges when a candidate has at least two accepted phase contacts. Cages claimed exclusively by one phase form deterministic per-frame domains. Remaining cages are reported as single-phase boundaries, interphase boundaries, ambiguous, or unclassified.
 
-The analysis is off by default and does not alter ring, patch, cage, occupancy, order-parameter, or ice results. Classification follows the final `--cage-size` scope and is per-frame; temporal grain tracking and crystallographic orientation matching are not implemented.
+The analysis is off by default and does not alter ring, patch, cage, occupancy, order-parameter, or ice results. Classification is per-frame and independent of the cage reporting filter; temporal grain tracking and crystallographic orientation matching are not implemented.
 
 `--cluster-detail on` adds optional one-row-per-cluster `summary_detail/hydrate_cluster_detail.csv`. The workbook keeps the per-frame `hydrate_cluster` sheet, while one-row-per-domain details move to `summary_detail/hydrate_domain.csv`; public motif output is not generated. Hydrate clusters do not produce separate GRO files.
 
 ## Hydrate Nucleation Order Parameters
 
-Version 0.2.5 computes MCG-1 and DHOP35 by default. These descriptors are independent of the optional reported-cage `hydrate_cluster` classifier: MCG works on selected methane-like guest centers and surrounding waters, while DHOP works on a dedicated O-O neighbor graph. They do not change graph, ring, patch, cage, occupancy, F3/F4/Q_l, hydrate-cluster, or ice results.
+MCG-1 and DHOP35 were introduced as defaults in 0.2.5. Since 0.2.7, every MCG/DHOP variant is selected explicitly through `--order-parameter`; the package default is only `f3,f4`. These descriptors are independent of the optional cage-topology `hydrate_cluster` classifier: MCG works on selected methane-like guest centers and surrounding waters, while DHOP works on a dedicated O-O neighbor graph. They do not change graph, ring, patch, cage, occupancy, F3/F4/Q_l, hydrate-cluster, or ice results.
 
 MCG follows the mutually coordinated guest definition. Guest pairs within `0.90 nm` are connected when at least five waters lie within `0.60 nm` of both guests and inside both 45-degree opposing cones. The threshold is **at least five**, not exactly five. MCG-1 keeps guest nodes with at least one qualifying MCG edge; optional MCG-3 applies a one-pass degree-at-least-three filter to the same qualifying graph. Connected components are measured only through qualifying MCG edges. The default guest residue names are `CH4` and `MET`; change `hydrate_order.mcg_guest_resnames` for another methane naming convention. If no configured guest type is present, MCG is reported as `N/A`, not zero.
 
 DHOP builds its own orthorhombic-PBC oxygen graph with `hydrate_order.dhop_neighbor_cutoff_nm: 0.35`. This 0.35 nm default follows the all-atom TIP4P/Ice implementation used by Li et al.; use `0.325` in YAML when reproducing the original mW-water definition. For each central O-O bond, SQQ counts neighboring plane-normal pairs within 35 degrees (or 30 degrees for DHOP30), selects waters with counts 11 or 12, requires at least three similarly qualified neighbors, includes their first oxygen shell, and reports the largest connected water cluster. `DHOP35` and `DHOP30` name the angular thresholds, not the O-O cutoff. No transition-state value such as DHOP35=57 is hard-coded; such values are system- and condition-dependent.
 
-Use `--mcg3 on` and `--dhop30 on` to add the optional variants. The primary metrics can be disabled only through YAML (`mcg1_enabled` or `dhop35_enabled`). All cutoff searches use deterministic cell lists and exact float64 minimum-image rechecks; there are no fixed neighbor-array limits.
+Select any combination with names such as `--order-parameter mcg1,mcg3,dhop35,dhop30`. Selection is separate from the numerical `hydrate_order` cutoff settings. All cutoff searches use deterministic cell lists and exact float64 minimum-image rechecks; there are no fixed neighbor-array limits.
 
 References: Barnes et al., MCG ([DOI 10.1063/1.4871898](https://doi.org/10.1063/1.4871898)); Knott et al., MCG nucleation coordinate ([DOI 10.1021/jp507959q](https://doi.org/10.1021/jp507959q)); DeFever and Sarupria, DHOP ([DOI 10.1063/1.4996132](https://doi.org/10.1063/1.4996132)); Li et al., all-atom DHOP nucleation pathway ([DOI 10.1073/pnas.2011755117](https://doi.org/10.1073/pnas.2011755117)).
 
@@ -363,11 +403,12 @@ References: Barnes et al., MCG ([DOI 10.1063/1.4871898](https://doi.org/10.1063/
 | `--max-cage-face N` | Positive integer; default `20` | Limit generated cage search compositions |
 | `--cage-fast-closure VALUE` | `on`, `off`; default `on` | Enable indexed two-to-four half-cage closure after generic grow |
 | `--cage-scientific-validation VALUE` | `on`, `off`; default `off` | Enable strict face/manifold/volume validation and volume centroids |
-| `--hydrate-cluster VALUE` | `on`, `off`; default `off` | Enable reported-cage hydrate_cluster analysis |
+| `--hydrate-cluster VALUE` | `on`, `off`; default `off` | Enable all-detected-cage hydrate_cluster analysis |
 | `--cluster-min-cage N` | Positive integer; default `2` | Minimum connected cage count required for one hydrate_cluster |
 | `--cluster-detail VALUE` | `on`, `off`; default `off` | Add one-row-per-cluster `summary_detail/hydrate_cluster_detail.csv` |
 | `--pattern PATTERN` | Glob; default `*.gro` | Select files when `--input` is a directory |
 | `--top, --topology FILE.gro` | GRO topology file | Supply topology/structure data for XTC/TRR input |
+| `--xyz-scale SCALE` | Positive float; default `0.1` | Multiply XYZ coordinates by this value to obtain nm; use `1.0` for XYZ already in nm |
 | `--recursive` | Flag; default off | Search input directories recursively |
 | `--quasi-size SIZES` | `auto` or a comma-separated subset of searched `4,5,6,7` | Override quasi-cage base and side size lists together |
 | `--quasi-base-size SIZES` | `auto` or a comma-separated subset of searched `4,5,6,7` | Override quasi-cage base-ring size list |
@@ -375,28 +416,17 @@ References: Barnes et al., MCG ([DOI 10.1063/1.4871898](https://doi.org/10.1063/
 | `--quasi-max-layer N` | Positive integer; default `1` | Report quasi-cage layers up to N |
 | `--quasi-search-policy POLICY` | `bounded`, `exact`; default `bounded` | Preserve bounded growth or enumerate connected outer-layer subsets |
 | `--ring-definition DEFINITION` | `chordless`, `shortest_path`; default `chordless` | Select the detected ring definition |
-| `--no-q` | Flag; default off | Disable Steinhardt Q_l order-parameter calculation |
-| `-q, --q-degree L1,L2` | Comma-separated non-negative integers; default `6,12` | Select Q_l degree list to report, e.g. `4,6,8,10,12` |
+| `--order-parameter NAMES` | `f3`, `f4`, `qN`, `mcg1`, `mcg3`, `dhop35`, `dhop30`, `all`, or `none`; comma-separated | Select the complete descriptor set; default `f3,f4`. `all` expands to `f3,f4,q6,q12,mcg1,mcg3,dhop35,dhop30` |
 | `--q-neighbor-mode MODE` | `graph`, `cutoff`, `nearest`, `lammps`; default `graph` | Select the neighbor source used by Q_l |
 | `--q-cutoff NM` | Positive float in nm; default `0.35` | Q_l neighbor cutoff for cutoff/nearest/lammps modes |
 | `--q-n-neighbor N` | Positive integer or `NULL`; default `NULL`, or `12` in lammps mode | Fixed Q_l neighbor count |
-| `--mcg3 VALUE` | `on`, `off`; default `off` | Add optional MCG-3 calculation; MCG-1 remains enabled by default |
-| `--dhop30 VALUE` | `on`, `off`; default `off` | Add optional DHOP30 calculation; DHOP35 remains enabled by default |
 | `--pairs FILE` | Text pair-map file | Supply explicit water-network edges and enable pairs mode |
 | `--pair-id KIND` | `resid`, `oxygen_index`, `atomid`; default `resid` | Select the identifier type used in the pair file |
 | `--parallel-backend BACKEND` | `process`, `thread`, `serial`; default `process` | Select independent-file/frame execution backend |
 | `--worker, -w N` | `auto`, a fraction (`50%`, `0.5`, `1.0`), or a positive integer (`1`, `4`) | Override the mode-based worker count; one physical core is reserved. Integer `1` means one worker, while `1.0` / `100%` means all physical cores before clamping. `--workers` remains a hidden compatibility alias |
 | `--strict` | Flag; default off | Stop on the first failed frame |
 | `--output-layout LAYOUT` | `grouped`, `flat`; default `grouped` | Select the per-frame structure-file layout |
-| `--no-info` | Flag | Disable per-frame `*_info.md` files |
-| `--no-gro` | Flag | Disable all structure GRO files |
-| `--no-ring-gro` | Flag | Disable ring GRO files |
-| `--no-half-cage-gro` | Flag | Disable half-cage GRO files |
-| `--no-quasi-cage-gro` | Flag | Disable quasi-cage GRO files |
-| `--no-cage-gro` | Flag | Disable cage GRO files |
-| `--no-ice-gro` | Flag | Disable ice GRO files |
-| `--no-xlsx` | Flag | Disable `summary.xlsx` |
-| `--no-summary-detail` | Flag | Disable `summary_detail/*.csv` detail tables |
+| `--no-output TYPES` | Comma-separated `info`, `membership-tsv`, `order-tsv`, `vmd`, `gro`, `ring-gro`, `half-gro`, `quasi-gro`, `cage-gro`, `ice-gro`, `xlsx`, `summary-detail`, `all`, or `none`; default `none` | Disable the complete selected output set. `gro` covers every GRO subtype; `all` keeps only mandatory `run_config.yaml` |
 | `--cage-isomer-rows MODE` | `nonzero`, `all`; default `nonzero` | Choose whether `summary_detail/cage_isomer.csv` keeps only observed isomer rows or the full zero-filled matrix |
 | `--write-order-tsv` | Flag; default off | Write per-water `*_order_parameter.tsv` files |
 
@@ -413,14 +443,31 @@ sqq analyze -i md.gro -b pairs --pairs pairs.txt
 
 Available values are `auto`, `hbond`, `oo`, and `pairs`. `--pairs PAIRS.txt` used alone remains shorthand for pairs mode. Combining `--pairs` with `-b auto`, `-b hbond`, or `-b oo` is rejected. Pairs mode requires either `--pairs` or `graph.pair_file` in `config.yaml`.
 
+### Output Selection
+
+`--no-output TYPE[,TYPE...]` replaces the complete configured disabled-output list. The default is `none`, equivalent to `output.disabled_outputs: []`.
+
+Default-on outputs are per-frame info Markdown, all five GRO categories, `summary.xlsx`, and `summary_detail/*.csv`. `membership-tsv`, `order-tsv`, and `vmd` are default-off positive outputs; `--write-order-tsv` enables the order TSV unless `order-tsv` is listed in `--no-output`. `run_config.yaml` is mandatory and is always rewritten.
+
+`gro` disables all GRO categories. `all` disables every optional output and must be used alone; `none` disables nothing and must also be used alone. Accepted aliases are `info-md`, `half-cage-gro`, `quasi-cage-gro`, and `detail-csv`. Explicit CLI selection has precedence:
+
+```text
+--no-output > output.disabled_outputs > default none
+```
+
+The old individual `--no-info`, `--no-gro`, `--no-ring-gro`, `--no-half-cage-gro`, `--no-quasi-cage-gro`, `--no-cage-gro`, `--no-ice-gro`, `--no-xlsx`, and `--no-summary-detail` spellings remain hidden compatibility options for 0.2.7. When no unified option is present they are translated into `disabled_outputs`; otherwise they are ignored with a warning.
+
+When an existing output directory is reused, SQQ removes known stale files for disabled categories while preserving unrelated user files. If all per-frame outputs are disabled and no unrelated file remains, the empty frame directory is removed.
+
 ## Output Structure
 
-SQQ writes one folder per frame, a global workbook, and CSV detail tables:
+With the default `--no-output none`, SQQ writes one folder per frame, a global workbook, and CSV detail tables:
 
 ```text
 result_sqq/
   summary.xlsx
   summary_detail/
+    failures.csv                       # only when frames fail
     cage_occupancy.csv
     cage_isomer.csv
     quasi_cage_isomer.csv
@@ -448,6 +495,10 @@ result_sqq/
     test1_order_parameter.tsv   # only with --write-order-tsv
 ```
 
+Items named by `--no-output` are omitted from this layout. `--no-output all` leaves only `run_config.yaml` and does not create empty per-frame directories.
+
+Without `--strict`, standalone serial/process/thread read failures become failed summary rows and analysis continues where the reader remains usable. Failed inputs appear in `summary.xlsx/failures` and `summary_detail/failures.csv` when those outputs are enabled, and always in the mandatory `run_config.yaml` `run.failures` list. With `--strict`, SQQ re-raises the error after updating `run_config.yaml` to `status: failed`.
+
 GRO structure folders, filenames, and title lines use portable ASCII structure labels since version 0.2.4, for example `5^126^2` and `qc_5r_5^36^2_56566`. Markdown/Excel scientific labels retain their readable superscript notation. This avoids Windows GBK/legacy-reader failures caused by Unicode superscript or subscript characters in generated GRO paths and titles.
 
 Each per-frame `*_info.md` report is arranged for inspection. `Frame Information` begins with the SQQ version, report-generation date and local timezone, absolute source path, frame name, and trajectory time. The report shows requested/effective `graph_mode`, the effective `bond_mode`, only reported ring sizes, final free-ring counts, the active network degree distribution, groups half-cage and quasi-cage isomers below composition totals, and keeps cage composition totals plus cage isomers in one vertical `Cage` table. When enabled, the same report adds `Hydrate Cluster`, hierarchy, detail, domain, and boundary sections. Internal `hc_` and `qc_` prefixes are omitted from report labels.
@@ -459,7 +510,9 @@ When quasi-cage or cage isomers are present, the same report adds description ta
 
 `Cage Occupancy` remains a separate table because it describes guest assignment rather than cage topology. It expands exact guest compositions across dynamic columns in source guest order.
 
-`summary.xlsx` remains plotting-oriented. Its first sheet is a dashboard: Configuration includes `SQQ version` and requested/effective `Graph mode` such as `auto -> hbond`, and `Analysis Results (min / mean / max)` reports per-frame min/mean/max values while `Frames total / ok / failed` stays a run-level count. The analysis sheets keep one input file or trajectory frame per row, including `frame`, connection diagnostics, `ring`, `half_cage`, compact composition-level `quasi_cage`, `cage`, optional per-frame `hydrate_cluster`, `order_parameter`, `ice`, `detail_index`, and `config`. Multi-row and isomer detail tables are written as UTF-8-SIG CSV files in `summary_detail/`: `cage_occupancy.csv`, `cage_isomer.csv`, `quasi_cage_isomer.csv`, `hydrate_domain.csv`, and, with `--cluster-detail on`, `hydrate_cluster_detail.csv`. The `quasi_cage` workbook sheet aggregates exact quasi-cage isomers into composition-level columns such as `5r_5²6³`, while `quasi_cage_isomer.csv` keeps nonzero exact isomer rows with `quasi_cage_type`, `isomer`, and `count`. `cage_isomer.csv` defaults to observed nonzero isomer rows plus per-frame totals; use `--cage-isomer-rows all` to restore the full zero-filled matrix. The `order_parameter` sheet contains `F3_mean`, `F3_count`, `F4_mean`, `F4_count`, one mean/count pair for each requested Q_l degree, and the default `MCG-1` and `DHOP35` largest-cluster columns. `MCG-3` and `DHOP30` columns appear only when their switches are enabled. By default the Q_l columns are `q6_mean`, `q6_count`, `q12_mean`, and `q12_count`. Each per-frame report places a separate `Hydrate Nucleation Order Parameters` table immediately after the F3/F4/Q_l table.
+`summary.xlsx` remains plotting-oriented when `xlsx` is enabled. Its first sheet is a dashboard: Configuration includes `SQQ version`, requested/effective `Graph mode` such as `auto -> hbond`, normalized `Order parameters`, and normalized `Disabled outputs`; `Analysis Results (min / mean / max)` reports per-frame min/mean/max values while `Frames total / ok / failed` stays a run-level count. Failed inputs add a compact `failures` sheet without restoring the removed redundant `frame` sheet. The remaining analysis sheets keep one input file or trajectory frame per row, including connection diagnostics, `ring`, `half_cage`, compact composition-level `quasi_cage`, `cage`, optional per-frame `hydrate_cluster`, optional `order_parameter`, `ice`, `detail_index`, and `config`. Multi-row and isomer detail tables are written as UTF-8-SIG CSV files in `summary_detail/` when `summary-detail` is enabled: optional `failures.csv`, `cage_occupancy.csv`, `cage_isomer.csv`, `quasi_cage_isomer.csv`, `hydrate_domain.csv`, and, with `--cluster-detail on`, `hydrate_cluster_detail.csv`. The `quasi_cage` workbook sheet aggregates exact quasi-cage isomers into composition-level columns such as `5r_5²6³`, while `quasi_cage_isomer.csv` keeps nonzero exact isomer rows with `quasi_cage_type`, `isomer`, and `count`. `cage_isomer.csv` defaults to observed nonzero isomer rows plus per-frame totals; use `--cage-isomer-rows all` to restore the full zero-filled matrix. The `order_parameter` sheet contains only the selected F3, F4, Q_l, MCG, and DHOP columns; `--order-parameter none` omits the sheet. Focus mean/count columns are written only when `order.focus_waters` is non-empty. Per-frame reports follow the same selection, and `--write-order-tsv` writes only selected per-water F3/F4/Q_l values because MCG/DHOP are frame-level descriptors.
+
+Summary construction records rows, columns, cells, bytes, CSV/XLSX write time, formatting time, and final-save time in `run_config.yaml -> run.summary_write`; the terminal prints its total seconds. XLSX, detail CSV, and `run_config.yaml` are written to same-directory temporary files and atomically replaced on success. Data sheets above 200,000 cells or 128 columns keep header styling, filter, freeze pane, and fixed column widths but skip costly body-cell formatting; scientific values and table schemas are unchanged.
 
 Output ownership is:
 

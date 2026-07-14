@@ -2,6 +2,115 @@
 
 This file records versioned update notes. New releases should be appended above older entries.
 
+## Version 0.2.7
+
+### Short Summary
+
+Version 0.2.7 unifies order-parameter selection under `--order-parameter NAME[,NAME...]` and output suppression under `--no-output TYPE[,TYPE...]`. The default descriptor set is now F3/F4 only, while the default disabled-output set is `none`. The release also fixes PBC/input/configuration validation, repeated residue-ID handling, guest occupancy centroids, serial failure handling, hydrate-cluster report-scope coupling, summary-write robustness, and several equivalent hot paths. Ring, cage, and order-parameter definitions are unchanged; corrected guest centroids and cluster scope can intentionally change their corresponding outputs.
+
+### Main Changes
+
+1. Unified order-parameter selector
+   - Added `--order-parameter` with comma-separated names `f3`, `f4`, `qN`, `mcg1`, `mcg3`, `dhop35`, and `dhop30`.
+   - Added `all`, which expands to `f3,f4,q6,q12,mcg1,mcg3,dhop35,dhop30`.
+   - Added `none`, which skips all order-parameter calculations and omits the `order_parameter` workbook sheet.
+   - Names are case-normalized, deduplicated, and stored in deterministic order.
+   - The explicit CLI selector overrides `order.parameters`; the built-in default is now `[f3, f4]`.
+
+2. Independent calculation and dynamic output
+   - F3 and F4 now have independent calculation switches instead of one shared `f3f4_enabled` switch.
+   - Each `qN` name directly selects that non-negative Q_l degree; Q_l neighbor mode, cutoff, and fixed-neighbor settings remain separate controls.
+   - MCG/DHOP numerical settings remain under `hydrate_order`, while selection belongs only to `order.parameters`.
+   - The terminal header/final summary, dashboard, per-frame Markdown, and `run_config.yaml` report the normalized selection.
+   - `summary.xlsx/order_parameter` contains only selected columns. Selected but inapplicable MCG values remain `N/A`.
+   - Focus mean/count columns are omitted unless `order.focus_waters` contains at least one requested water residue.
+   - `--write-order-tsv` writes only selected per-water F3/F4/Q_l columns. MCG/DHOP remain frame-level descriptors, so a hydrate-only selection does not create an empty TSV.
+
+3. Compatibility migration
+   - Hidden compatibility options `--no-q`, `-q` / `--q-degree`, `--mcg3`, and `--dhop30` remain accepted in 0.2.7 and emit a deprecation warning.
+   - When `--order-parameter` is supplied together with a legacy selector, the unified selector wins.
+   - Legacy YAML enable keys are translated when `order.parameters` is absent, allowing older generated configuration files to retain their requested descriptor set.
+   - New default configuration files use `order.parameters` and no longer emit the old enable booleans.
+
+4. Workbook cleanup
+   - Removed the redundant one-row-per-frame overview sheet named `frame`.
+   - Dedicated connection, ring, half-cage, quasi-cage, cage, hydrate-cluster, order-parameter, and ice sheets continue to carry their per-frame data.
+   - The dashboard, detail CSV files, `detail_index`, and config sheet are unchanged by this removal.
+
+5. Unified output suppression
+   - Added `--no-output` with comma-separated names `info`, `membership-tsv`, `order-tsv`, `vmd`, `gro`, `ring-gro`, `half-gro`, `quasi-gro`, `cage-gro`, `ice-gro`, `xlsx`, and `summary-detail`.
+   - The default is `none`, which preserves the established default files. `all` disables every optional output but always retains `run_config.yaml`.
+   - Added `output.disabled_outputs: []` as the canonical YAML setting. Explicit `--no-output` replaces the configured list.
+   - `gro` supersedes all GRO subtypes. Aliases normalize to canonical names, and repeated names are removed deterministically.
+   - Individual `--no-info`, `--no-*-gro`, `--no-xlsx`, and `--no-summary-detail` options remain hidden compatibility aliases for one release and emit a warning.
+   - `order-tsv` suppression overrides `--write-order-tsv`; disabling `summary-detail` suppresses optional cluster detail CSVs.
+   - Reused output directories remove only known stale files for disabled categories. Empty per-frame directories are removed when every per-frame output is disabled.
+   - Terminal, dashboard, and `run_config.yaml` report the normalized disabled-output set.
+
+6. Correctness, reliability, and equivalent performance fixes
+   - Fixed `minimum_image()` for zero or partially nonpositive box axes; invalid axes are treated as non-periodic instead of producing NaN.
+   - GRO now validates its declared atom count, finite coordinates, mandatory 3/9-value box line, and single-frame structure. Extra non-empty records after the box are rejected. All-zero boxes become non-periodic; triclinic tilt terms are rejected.
+   - XTC/TRR frames with non-finite coordinates or non-90-degree angles are rejected explicitly. Invalid trajectory time is recorded as unavailable. XYZ coordinate scaling is configurable through `input.xyz_scale` / `--xyz-scale` with default `0.1`.
+   - Occupancy and MCG now share one PBC-aware guest centroid. Guest centers are precomputed once per frame, eliminating repeated cage×guest centroid calculation.
+   - Degenerate solid-angle triangles contribute zero, and disconnected topology objects fail explicitly instead of mixing wrapped and unwrapped coordinates.
+   - Non-strict standalone serial read errors become failed rows and processing continues. Strict analysis and summary failures update mandatory `run_config.yaml` to `status: failed`.
+   - Failed rows are available through `run.failures`, an optional `failures` workbook sheet, and `summary_detail/failures.csv`.
+   - Configuration is normalized once before thread dispatch; queued sibling tasks are cancelled on strict thread failure, and parent-side trajectory progress no longer depends only on queue timing.
+   - Legacy selector keys are removed after migration, unrelated empty output directories are preserved, and hydrate-only order TSV requests emit a warning.
+   - Single-task runs skip physical-core probing, immutable ring size/edge properties are cached, and non-graph Q_l modes reuse deterministic cell-list cutoff pairs.
+   - Explicit worker values are now validated even when a run has only one task or uses the serial backend; automatic single-task resolution still avoids probing physical cores.
+   - XYZ now validates a nonnegative declared count, exactly that many finite coordinate records, and no extra nonempty records. Multi-frame XYZ must be split before analysis.
+   - The common full-orthorhombic `minimum_image()` path is vectorized without boolean advanced-index temporaries. Large cutoff searches can use MDAnalysis compiled candidates, followed by the established exact float64 PBC recheck; fallback cell-list behavior is retained.
+   - MDAnalysis trajectory readers cache immutable atom metadata per Universe. Thread scheduling now uses the same bounded `3 * workers` in-flight window as process scheduling.
+   - Occupancy now uses one reusable PBC-aware guest-center cell index per frame, exact distance rechecks, batched solid-angle evaluation, and a scalar fallback at the membership boundary. Guest order and non-exclusive overlapping-cage semantics are retained.
+   - Cage-grow DFS keeps face counts as a fixed `(n4, n5, n6)` tuple and precomputes target face incidences; target masks, candidate order, closure checks, and pruning semantics are unchanged.
+   - DHOP compares valid plane-normal matrices in batches per central O-O bond, with scalar rechecks near 30/35-degree thresholds. F4 reuses cached O-H and graph O-O minimum-image vectors for its dihedral geometry.
+   - Water and guest selection now groups contiguous residue blocks in source order, preventing wrapped/repeated five-digit GRO residue IDs from merging distinct molecules. Whitespace GRO fallback parsing also preserves digit-containing residue names such as `TIP3`.
+   - Configuration normalization now parses textual booleans explicitly and rejects unsupported modes, non-finite or nonpositive cutoffs/scales, and boolean/fractional/nonpositive integer settings before dispatch.
+   - `input.xtc_stride` is validated as a positive integer instead of silently changing zero to one.
+   - Hydrate-cluster topology and its detail/domain lookups now use all detected cages. `cage.report_types` / `--cage-size` remains a reporting filter and no longer changes connectivity or phase evidence.
+
+7. Summary-write observability and robust output
+   - `write_summary()` now records per-table rows, columns, cells, bytes, CSV/XLSX write time, workbook-format time, final-save time, and total time under `run.summary_write` in mandatory `run_config.yaml`.
+   - The final terminal Run Summary adds `Summary write (s)`.
+   - `summary.xlsx`, each detail CSV, and `run_config.yaml` are written through same-directory temporary files and atomically replaced only after a successful write. Existing final files remain intact if a new write fails before replacement.
+   - Exact quasi-cage isomers are retained as sparse per-frame records until `quasi_cage_isomer.csv` is written; they no longer create a DataFrame column per observed isomer. Composition-level quasi counts and all scientific count values are unchanged.
+   - Related detail CSV replacements/removals now commit as one recoverable bundle. Each workbook table is preflight-checked against Excel's 1,048,576-row and 16,384-column limits, so an actionable SQQ error replaces a late pandas traceback for unexpected oversized compact sheets.
+   - Data sheets above 200,000 cells or 128 columns retain header style, filter, freeze pane, and fixed widths but skip per-body-cell style/auto-width work. Small sheets retain the established full formatting. No result value or table schema is changed.
+
+
+8. Verification
+   - Added and passed 75 focused local 0.2.7 tests plus five unittest subtests covering the unified selectors, root version flags, PBC, guest centroid, GRO/trajectory/XYZ validation, residue grouping, configuration normalization, hydrate-cluster report-scope independence, strict/non-strict failures, failure artifacts, output cleanup, performance equivalence, and end-to-end CLI paths.
+   - The existing four Q_l reference tests and eight cage report-scope tests also pass.
+   - A strict real-GRO smoke run with `--order-parameter all` completed with one input and zero failed frames; the workbook contained every selected descriptor and no `frame` sheet.
+   - A strict real-GRO run with `--no-output quasi-gro,cage-gro,xlsx` completed with zero failures; info, ring/half/ice GRO, detail CSVs, and `run_config.yaml` remained, while the disabled outputs and their empty directories were absent.
+   - The same input was analyzed with an isolated PyPI 0.2.6 baseline. The hbond, ring, half_cage, quasi_cage, cage, and ice sheets matched exactly, and every common F3/F4/Q6/Q12/MCG/DHOP output value matched.
+   - After the PBC guest-centroid fix, the real-GRO hbond, ring, half_cage, quasi_cage, cage, order_parameter, and ice sheets still match the pre-fix run exactly. Occupied cages intentionally changed from 251 to 275, and spurious multi-guest compositions disappeared for this boundary-crossing sample.
+   - The same all-parameter real run fell from about 27.0 s to 20.8 s despite also writing detail output, primarily from precomputed guest centers and skipped single-task CPU probing.
+   - Two-file spawned-process and compatibility-thread smoke runs both completed with `frames_total=2`, `frames_ok=2`, `frames_failed=0`, and final `status=completed`.
+   - Python compilation and `git diff --check` pass. Both DOCX files reopen through `python-docx` and pass ZIP/OOXML integrity and required-text checks.
+   - Added and passed seven focused performance/output tests covering PBC spatial-index equivalence, scalar versus batched occupancy membership, scalar versus batched DHOP counts, cached versus scalar F4, fixed-count cage pruning, lightweight worksheet formatting, and summary timing/temporary-file cleanup.
+   - A real all-parameter `1to2_small_100ns.gro` run matched the pre-optimization hbond, ring, half_cage, quasi_cage, cage, order_parameter, and ice sheets exactly. Its `run.summary_write` reported all output stages separately.
+
+9. Package version and documentation
+   - Updated `pyproject.toml` and `sqq.__version__` from `0.2.6` to `0.2.7`.
+   - Updated README, developer design documentation, and the English/Chinese design DOCX files for the unified selector and workbook layout.
+   - Root `sqq` / `sqq -h` output now places `SQQ version: 0.2.7   Release date: Jul 15, 2026` immediately before `usage:`. Added `sqq -v` and `sqq --version`; each prints only that version line and exits successfully. `analyze` and `init` help retain their prior layout.
+
+### Compatibility
+
+- The 0.2.7 default output intentionally differs from 0.2.6: Q6/Q12, MCG-1, and DHOP35 are no longer calculated unless selected.
+- To reproduce the former default descriptor set, use `--order-parameter f3,f4,q6,q12,mcg1,dhop35`.
+- Descriptor formulas and cage/ring detection are unchanged. PBC-aware occupancy is intentionally corrected for multi-atom guests crossing a box boundary; wrapped/repeated residue IDs now produce separate source-order molecules.
+- Hydrate-cluster classification can change when `--cage-size` previously hid cages required by the topology. Cage report tables/files remain filtered exactly as requested.
+- The new occupancy, cage-grow, DHOP, and F4 implementations are result-equivalent optimizations; `run.summary_write`, terminal timing, write robustness, and large-sheet cosmetics do not change scientific values.
+- Triclinic input that was previously approximated is now rejected; convert it to orthorhombic form before analysis.
+- Plotting scripts that required the removed `frame` sheet should read the dedicated analysis sheets instead.
+- Invalid single-frame GRO/XYZ, non-finite coordinates, unsupported configuration modes, and invalid numeric settings now fail early instead of being accepted or coerced.
+- New commands should use `--order-parameter`; legacy selection options are scheduled for removal after the compatibility period.
+- New output control should use `--no-output`; old individual `--no-*` switches remain hidden for the compatibility period.
+- `--no-output all` intentionally retains mandatory `run_config.yaml`.
+
 ## Version 0.2.6
 
 ### Short Summary

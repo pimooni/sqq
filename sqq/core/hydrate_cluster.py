@@ -18,8 +18,7 @@ PHASE_TYPES = ("sI", "sII", "sH")
 PHASE_ORDER = {name: index for index, name in enumerate(PHASE_TYPES)}
 RING_ID_PATTERN = re.compile(r"^ring(\d+)_")
 
-# Keys are (neighbour cage type, shared face size). These ideal first-shell
-# fingerprints are used both for strict seeds and cheap growth-front filtering.
+# Ideal first-shell fingerprints keyed by neighbor type and face size.
 PHASE_TEMPLATES: dict[str, dict[str, Counter[tuple[str, int]]]] = {
     "sI": {
         "512": Counter({("51262", 5): 12}),
@@ -179,8 +178,7 @@ def analyze_hydrate_clusters(
         seed_members_by_cluster[cluster.object_id] = seed_members
         phase_edges_by_cluster[cluster.object_id] = phase_edges
 
-    # Evidence is collected independently for each phase. No phase can claim a
-    # cage merely because it happened to run first.
+    # Evaluate each phase independently before resolving overlaps.
     claims: dict[int, set[str]] = defaultdict(set)
     for cluster in clusters:
         for phase, indexes in accepted_by_cluster[cluster.object_id].items():

@@ -7,13 +7,22 @@ import numpy as np
 
 def minimum_image(delta: np.ndarray, box: np.ndarray | None) -> np.ndarray:
     """Apply the minimum-image convention for an orthorhombic box."""
+    result = np.asarray(delta, dtype=float).copy()
     if box is None:
-        return delta
+        return result
     if len(box) < 3:
-        return delta
+        return result
     ortho = np.asarray(box[:3], dtype=float)
-    safe = np.where(ortho > 0, ortho, np.inf)
-    return delta - safe * np.round(delta / safe)
+    periodic = np.isfinite(ortho) & (ortho > 0)
+    if np.all(periodic):
+        # Fast path for a valid orthorhombic box.
+        result -= ortho * np.round(result / ortho)
+    elif np.any(periodic):
+        # Keep valid axes periodic for incomplete boxes.
+        result[..., periodic] -= ortho[periodic] * np.round(
+            result[..., periodic] / ortho[periodic]
+        )
+    return result
 
 
 def distance(a: np.ndarray, b: np.ndarray, box: np.ndarray | None) -> float:

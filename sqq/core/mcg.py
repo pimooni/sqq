@@ -7,6 +7,7 @@ from typing import Any
 
 import numpy as np
 
+from .geometry import pbc_aware_centroid
 from .pbc import minimum_image
 from .spatial import cross_cutoff_pairs, self_cutoff_pairs
 from ..models import ClusterOrderValue, Frame, Guest, Water
@@ -76,14 +77,7 @@ def compute_mcg_order(
 def _guest_center(frame: Frame, guest: Guest) -> np.ndarray:
     if guest.center_atom is not None:
         return np.asarray(frame.atoms[guest.center_atom].xyz, dtype=float)
-    if not guest.atoms:
-        raise ValueError(f"Guest resid {guest.resid} has no atoms.")
-    anchor = np.asarray(frame.atoms[guest.atoms[0]].xyz, dtype=float)
-    points = [anchor]
-    for atom_index in guest.atoms[1:]:
-        delta = minimum_image(np.asarray(frame.atoms[atom_index].xyz, dtype=float) - anchor, frame.box)
-        points.append(anchor + delta)
-    return np.mean(np.asarray(points), axis=0)
+    return pbc_aware_centroid(frame, guest.atoms)
 
 
 def _cluster_value(

@@ -34,7 +34,17 @@ except ImportError:  # pragma: no cover - exercised in minimal source-tree runs.
 
 from . import __version__
 from .banner import SQQ_BANNER
-from .config import load_config, mode_label, mode_worker_fraction
+from .config import (
+    disabled_output_display,
+    load_config,
+    mode_label,
+    mode_worker_fraction,
+    normalize_disabled_outputs,
+    normalize_order_parameters,
+    order_parameter_display,
+    output_enabled,
+    q_degrees_from_order_parameters,
+)
 from .core.cage import (
     CAGE_REPORT_GROUPS,
     TARGET_FACE_COUNTS,
@@ -42,7 +52,12 @@ from .core.cage import (
     find_cages,
     parse_cage_face_label,
 )
-from .core.f3f4 import compute_order_parameters, normalize_q_degree
+from .core.f3f4 import (
+    compute_order_parameters,
+    normalize_q_degree,
+    normalize_q_neighbor_mode,
+    resolve_q_neighbor_count,
+)
 from .core.dhop import compute_dhop_order
 from .core.mcg import compute_mcg_order
 from .core.graph import build_water_graph
@@ -67,6 +82,7 @@ from .io.summary import (
     write_order_parameter,
     write_frame_info,
     write_membership,
+    write_run_config,
     write_summary,
     write_vmd_script,
 )
@@ -100,7 +116,7 @@ def analyze(args: Namespace) -> None:
     apply_cli_overrides(config, args)
     normalize_analysis_scopes(config)
 
-    # Directory input follows a one-file-per-frame workflow.
+    # Directory inputs use one file per frame.
     input_path = Path(args.input)
     pattern = args.pattern or config["input"]["pattern"]
     recursive = bool(args.recursive or config["input"]["recursive"])
@@ -114,8 +130,8 @@ def analyze(args: Namespace) -> None:
     trajectory_parallelizable = can_parallelize_trajectory(paths, topology)
     parallel_backend = normalize_parallel_backend(config.get("parallel", {}).get("backend", "process"))
     trajectory_indexes: list[int] = []
+    validate_unique_output_names(paths)
     if coordinate_parallelizable:
-        validate_unique_output_names(paths)
         work_items = len(paths)
     elif trajectory_parallelizable:
         trajectory_indexes = trajectory_frame_indices(
@@ -129,49 +145,88 @@ def analyze(args: Namespace) -> None:
     parallelizable = coordinate_parallelizable or (
         trajectory_parallelizable and parallel_backend == "process"
     )
+    requested_workers = resolve_workers(
+        config["parallel"].get("workers"),
+        work_items,
+        mode=config.get("mode", "50"),
+        backend=parallel_backend,
+    )
     workers = (
-        resolve_workers(
-            config["parallel"].get("workers"),
-            work_items,
-            mode=config.get("mode", "50"),
-            backend=parallel_backend,
-        )
-        if parallelizable and parallel_backend != "serial"
+        requested_workers
+        if parallelizable and work_items > 1 and parallel_backend != "serial"
         else 1
     )
     active_backend = parallel_backend if workers > 1 and parallelizable else "serial"
     print_run_header(args, config, input_path, outdir, paths, topology, workers, active_backend, run_started_at)
-    if workers > 1 and coordinate_parallelizable:
-        rows = analyze_paths_parallel(
-            paths,
-            outdir,
+    initial_run_info = build_run_info(
+        args,
+        config,
+        input_path,
+        outdir,
+        paths,
+        topology,
+        workers,
+        active_backend,
+        0.0,
+        run_started_at,
+        run_started_at,
+        [],
+    )
+    initial_run_info["status"] = "running"
+    initial_run_info["error"] = ""
+    write_run_config(outdir, config, initial_run_info)
+    try:
+        if workers > 1 and coordinate_parallelizable:
+            rows = analyze_paths_parallel(
+                paths,
+                outdir,
+                config,
+                workers=workers,
+                backend=parallel_backend,
+                strict=bool(args.strict),
+                total_started_at=started_at,
+            )
+        elif workers > 1 and trajectory_parallelizable:
+            rows = analyze_trajectory_processes(
+                paths[0],
+                topology,
+                trajectory_indexes,
+                outdir,
+                config,
+                workers=workers,
+                strict=bool(args.strict),
+                total_started_at=started_at,
+            )
+        else:
+            rows = analyze_paths_serial(
+                paths,
+                outdir,
+                config,
+                topology=topology,
+                strict=bool(args.strict),
+                total_started_at=started_at,
+                total_frames=work_items if trajectory_parallelizable else None,
+            )
+    except Exception as exc:
+        failed_at = datetime.now().astimezone()
+        failed_run_info = build_run_info(
+            args,
             config,
-            workers=workers,
-            backend=parallel_backend,
-            strict=bool(args.strict),
-            total_started_at=started_at,
-        )
-    elif workers > 1 and trajectory_parallelizable:
-        rows = analyze_trajectory_processes(
-            paths[0],
+            input_path,
+            outdir,
+            paths,
             topology,
-            trajectory_indexes,
-            outdir,
-            config,
-            workers=workers,
-            strict=bool(args.strict),
-            total_started_at=started_at,
+            workers,
+            active_backend,
+            perf_counter() - started_at,
+            run_started_at,
+            failed_at,
+            [],
         )
-    else:
-        rows = analyze_paths_serial(
-            paths,
-            outdir,
-            config,
-            topology=topology,
-            strict=bool(args.strict),
-            total_started_at=started_at,
-            total_frames=work_items if trajectory_parallelizable else None,
-        )
+        failed_run_info["status"] = "failed"
+        failed_run_info["error"] = str(exc)
+        write_run_config(outdir, config, failed_run_info)
+        raise
 
     elapsed_seconds = perf_counter() - started_at
     run_finished_at = datetime.now().astimezone()
@@ -189,8 +244,24 @@ def analyze(args: Namespace) -> None:
         run_finished_at,
         rows,
     )
+    run_info["status"] = "completed"
+    run_info["error"] = ""
+    try:
+        run_info["summary_write"] = write_summary(
+            rows,
+            outdir,
+            config,
+            write_xlsx=output_enabled(config, "xlsx"),
+            run_info=run_info,
+        )
+        # Rewrite once final write timing is known.
+        write_run_config(outdir, config, run_info)
+    except Exception as exc:
+        run_info["status"] = "failed"
+        run_info["error"] = str(exc)
+        write_run_config(outdir, config, run_info)
+        raise
     print_run_summary(run_info)
-    write_summary(rows, outdir, config, write_xlsx=config["output"]["write_xlsx_summary"], run_info=run_info)
     print(f"Wrote SQQ results: {outdir}")
 
 
@@ -211,6 +282,23 @@ def build_run_info(
     """Collect run-level metadata for terminal, run_config, and summary workbook."""
     requested_graph_mode = config["graph"]["bond_mode"]
     effective_graph_modes = row_effective_graph_modes(rows or [])
+    selected_order_parameters = normalize_order_parameters(
+        config.get("order", {}).get("parameters")
+    )
+    q_degrees = q_degrees_from_order_parameters(selected_order_parameters)
+    disabled_outputs = normalize_disabled_outputs(
+        config.get("output", {}).get("disabled_outputs")
+    )
+    result_rows = rows or []
+    failures = [
+        {
+            "frame": str(row.get("frame", "")),
+            "source": str(row.get("source", "")),
+            "error": str(row.get("error", "")),
+        }
+        for row in result_rows
+        if str(row.get("status", "")).lower() == "failed"
+    ]
     info: dict[str, Any] = {
         "working_dir": str(Path.cwd()),
         "input": str(input_path),
@@ -227,6 +315,13 @@ def build_run_info(
         "worker_policy": worker_policy_text(config),
         "topology": str(topology) if topology else "<none>",
         "matched_files": len(paths),
+        "frames_total": len(result_rows),
+        "frames_ok": sum(
+            str(row.get("status", "")).lower() == "ok"
+            for row in result_rows
+        ),
+        "frames_failed": len(failures),
+        "failures": failures,
         "elapsed_seconds": round(elapsed_seconds, 3),
         "graph_mode": requested_graph_mode,
         "effective_graph_modes": ", ".join(ordered_unique_graph_modes(effective_graph_modes)),
@@ -242,21 +337,41 @@ def build_run_info(
         "hydrate_cluster": on_off_text(config.get("hydrate_cluster", {}).get("enabled", False)),
         "cluster_min_cage": config.get("hydrate_cluster", {}).get("min_cage", 2),
         "cluster_detail": on_off_text(config.get("hydrate_cluster", {}).get("detail", False)),
+        "order_parameters": order_parameter_display(selected_order_parameters),
         "hydrate_order": hydrate_order_config_text(config),
-        "mcg3": on_off_text(config.get("hydrate_order", {}).get("mcg3_enabled", False)),
-        "dhop30": on_off_text(config.get("hydrate_order", {}).get("dhop30_enabled", False)),
+        "mcg3": on_off_text("mcg3" in selected_order_parameters),
+        "dhop30": on_off_text("dhop30" in selected_order_parameters),
         "dhop_neighbor_cutoff_nm": config.get("hydrate_order", {}).get("dhop_neighbor_cutoff_nm", 0.35),
-        "q_enabled": config["order"].get("q_enabled", True),
-        "q_degree": config["order"].get("q_degree", [6, 12]),
+        "q_enabled": bool(q_degrees),
+        "q_degree": list(q_degrees),
         "q_neighbor_mode": config["order"].get("q_neighbor_mode", "graph"),
         "q_cutoff_nm": config["order"].get("q_cutoff_nm", 0.35),
         "q_n_neighbor": config["order"].get("q_n_neighbor", None),
+        "disabled_outputs": disabled_output_display(disabled_outputs),
         "output_layout": config["output"].get("structure_layout", "grouped"),
         "workers": workers,
         "parallel_backend": parallel_backend,
         "math_threads": int(config.get("parallel", {}).get("math_threads", 1)),
-        "summary_xlsx": str((outdir / "summary.xlsx").resolve()),
-        "summary_detail": str((outdir / str(config.get("output", {}).get("summary_detail_dir", "summary_detail"))).resolve()),
+        "summary_xlsx": (
+            str((outdir / "summary.xlsx").resolve())
+            if output_enabled(config, "xlsx")
+            else "<disabled>"
+        ),
+        "summary_detail": (
+            str(
+                (
+                    outdir
+                    / str(
+                        config.get("output", {}).get(
+                            "summary_detail_dir",
+                            "summary_detail",
+                        )
+                    )
+                ).resolve()
+            )
+            if output_enabled(config, "summary-detail")
+            else "<disabled>"
+        ),
         "run_config": str((outdir / "run_config.yaml").resolve()),
     }
     if paths:
@@ -306,8 +421,13 @@ def print_run_header(
     print_terminal_field("Hydrate cluster", on_off_text(config.get("hydrate_cluster", {}).get("enabled", False)))
     print_terminal_field("Cluster min cage", config.get("hydrate_cluster", {}).get("min_cage", 2))
     print_terminal_field("Cluster detail", on_off_text(config.get("hydrate_cluster", {}).get("detail", False)))
-    print_terminal_field("Hydrate order", hydrate_order_config_text(config))
-    print_terminal_field("Q_l", q_config_text(config))
+    print_terminal_field("Order parameters", order_parameter_config_text(config))
+    if q_degrees_from_order_parameters(config.get("order", {}).get("parameters")):
+        print_terminal_field("Q_l settings", q_config_text(config))
+    print_terminal_field(
+        "Disabled outputs",
+        disabled_output_display(config.get("output", {}).get("disabled_outputs")),
+    )
     print_terminal_field("Output layout", config["output"].get("structure_layout", "grouped"))
     print_terminal_field("Worker policy", worker_policy_text(config))
     print_terminal_field("Parallel backend", parallel_backend)
@@ -332,9 +452,14 @@ def print_run_summary(run_info: dict[str, Any]) -> None:
     print_terminal_field("Duration (s)", run_info.get("elapsed_seconds", ""))
     print_terminal_field("SQQ version", run_info.get("sqq_version", __version__))
     print_terminal_field("Graph mode", run_info.get("graph_mode_display", run_info.get("graph_mode", "")))
+    print_terminal_field("Order parameters", run_info.get("order_parameters", ""))
+    print_terminal_field("Disabled outputs", run_info.get("disabled_outputs", "none"))
     print_terminal_field("Worker policy", run_info.get("worker_policy", ""))
     print_terminal_field("Parallel backend", run_info.get("parallel_backend", "serial"))
     print_terminal_field("Workers", run_info.get("workers", ""))
+    summary_write = run_info.get("summary_write", {})
+    if isinstance(summary_write, dict) and "total_seconds" in summary_write:
+        print_terminal_field("Summary write (s)", summary_write.get("total_seconds", ""))
     print("")
 
 
@@ -357,28 +482,30 @@ def bond_mode_display_name(value: Any) -> str:
 
 
 def hydrate_order_config_text(config: dict[str, Any]) -> str:
-    """Render active MCG/DHOP settings for run metadata and the terminal header."""
-    order = config.get("hydrate_order", {})
-    active = []
-    for key, label, default in (
-        ("mcg1_enabled", "MCG-1", True),
-        ("dhop35_enabled", "DHOP35", True),
-        ("mcg3_enabled", "MCG-3", False),
-        ("dhop30_enabled", "DHOP30", False),
-    ):
-        if bool(order.get(key, default)):
-            active.append(label)
-    return ",".join(active) if active else "disabled"
+    """Render the selected MCG/DHOP subset for compatibility metadata."""
+    parameters = normalize_order_parameters(config.get("order", {}).get("parameters"))
+    active = [
+        name
+        for name in parameters
+        if name in {"mcg1", "mcg3", "dhop35", "dhop30"}
+    ]
+    return ", ".join(active) if active else "disabled"
+
+
+def order_parameter_config_text(config: dict[str, Any]) -> str:
+    """Render the unified order-parameter selection."""
+    return order_parameter_display(config.get("order", {}).get("parameters"))
 
 
 def q_config_text(config: dict[str, Any]) -> str:
     """Render Steinhardt Q_l settings for the run header."""
     order = config.get("order", {})
-    if not bool(order.get("q_enabled", True)):
+    degrees = q_degrees_from_order_parameters(order.get("parameters"))
+    if not degrees:
         return "disabled"
     n_neighbors = order.get("q_n_neighbor", None)
     n_text = "NULL" if n_neighbors in (None, "", "null", "NULL") else str(n_neighbors)
-    degree = ",".join(str(item) for item in normalize_q_degree(order.get("q_degree", [6, 12])))
+    degree = ",".join(str(item) for item in degrees)
     return f"degree={degree}; mode={order.get('q_neighbor_mode', 'graph')}; cutoff={order.get('q_cutoff_nm', 0.35)} nm; n={n_text}"
 
 
@@ -541,7 +668,8 @@ class RunProgressDisplay:
         self._interactive = bool(getattr(sys.stdout, "isatty", lambda: False)())
         self._progress = None if self._interactive else tqdm(total=total, desc="Files", unit="file")
         self._thread: Thread | None = None
-        self._render()
+        self._last_render_at = float("-inf")
+        self._render(force=True)
         if self._interactive:
             self._thread = Thread(target=self._tick, daemon=True)
             self._thread.start()
@@ -574,7 +702,7 @@ class RunProgressDisplay:
                 self.failed += 1
             if self._progress is not None:
                 self._progress.update(1)
-            self._render_locked()
+            self._render_locked(force=True)
 
     def close(self) -> None:
         """Stop background refresh and close any progress backend."""
@@ -582,19 +710,23 @@ class RunProgressDisplay:
         if self._thread is not None:
             self._thread.join(timeout=0.2)
         with self._lock:
-            self._render_locked()
+            self._render_locked(force=True)
         if self._progress is not None:
             self._progress.close()
 
     def _tick(self) -> None:
         while not self._stop_event.wait(1.0):
-            self._render()
+            self._render(force=True)
 
-    def _render(self) -> None:
+    def _render(self, *, force: bool = False) -> None:
         with self._lock:
-            self._render_locked()
+            self._render_locked(force=force)
 
-    def _render_locked(self) -> None:
+    def _render_locked(self, *, force: bool = False) -> None:
+        now = perf_counter()
+        if not force and now - self._last_render_at < PROGRESS_RENDER_INTERVAL_SECONDS:
+            return
+        self._last_render_at = now
         if self._interactive:
             lines = self._panel_lines()
             if self._rendered_lines:
@@ -681,6 +813,7 @@ class RunProgressDisplay:
 PARALLEL_FILE_PREVIEW_LIMIT = 6
 PARALLEL_FILE_COLUMN_WIDTH = 25
 PARALLEL_ACTIVE_STAGE_WIDTH = 30
+PROGRESS_RENDER_INTERVAL_SECONDS = 0.10
 
 
 class ParallelRunProgressDisplay:
@@ -701,7 +834,8 @@ class ParallelRunProgressDisplay:
         self._interactive = bool(getattr(sys.stdout, "isatty", lambda: False)())
         self._progress = None if self._interactive else tqdm(total=total, desc="Files", unit="file")
         self._thread: Thread | None = None
-        self._render()
+        self._last_render_at = float("-inf")
+        self._render(force=True)
         if self._interactive:
             self._thread = Thread(target=self._tick, daemon=True)
             self._thread.start()
@@ -718,7 +852,7 @@ class ParallelRunProgressDisplay:
                 "file_started_at": now,
                 "stage_started_at": now,
             }
-            self._render_locked()
+            self._render_locked(force=True)
         return lambda stage: self.update_stage(frame_index, stage)
 
     def update_stage(self, frame_index: int, stage: str, started_at: float | None = None) -> None:
@@ -746,7 +880,7 @@ class ParallelRunProgressDisplay:
                 self.failed += 1
             if self._progress is not None:
                 self._progress.update(1)
-            self._render_locked()
+            self._render_locked(force=True)
 
     def close(self) -> None:
         """Stop background refresh and close the progress backend."""
@@ -754,19 +888,23 @@ class ParallelRunProgressDisplay:
         if self._thread is not None:
             self._thread.join(timeout=0.2)
         with self._lock:
-            self._render_locked()
+            self._render_locked(force=True)
         if self._progress is not None:
             self._progress.close()
 
     def _tick(self) -> None:
         while not self._stop_event.wait(1.0):
-            self._render()
+            self._render(force=True)
 
-    def _render(self) -> None:
+    def _render(self, *, force: bool = False) -> None:
         with self._lock:
-            self._render_locked()
+            self._render_locked(force=force)
 
-    def _render_locked(self) -> None:
+    def _render_locked(self, *, force: bool = False) -> None:
+        now = perf_counter()
+        if not force and now - self._last_render_at < PROGRESS_RENDER_INTERVAL_SECONDS:
+            return
+        self._last_render_at = now
         if self._interactive:
             lines = self._panel_lines()
             if self._rendered_lines:
@@ -881,18 +1019,84 @@ def analyze_paths_serial(
 ) -> list[dict[str, Any]]:
     """Analyze frames in input order."""
     rows: list[dict[str, Any]] = []
-    frames = read_frames(paths, topology=topology, xtc_stride=int(config["input"].get("xtc_stride", 1)))
     progress = RunProgressDisplay(
         total=int(total_frames if total_frames is not None else len(paths)),
         total_started_at=total_started_at,
         include_cluster_stage=bool(config.get("hydrate_cluster", {}).get("enabled", False)),
     )
     try:
-        for frame_index, frame in enumerate(frames):
+        standalone_paths = (
+            topology is None
+            and bool(paths)
+            and all(path.suffix.lower() in PARALLEL_SUFFIXES for path in paths)
+        )
+        if standalone_paths:
+            for frame_index, path in enumerate(paths):
+                callback = progress.start_frame(frame_index, path.stem)
+                try:
+                    frame = next(
+                        iter(
+                            read_frames(
+                                [path],
+                                xyz_scale=float(
+                                    config["input"].get("xyz_scale", 0.1)
+                                ),
+                            )
+                        )
+                    )
+                except Exception as exc:
+                    if strict:
+                        raise
+                    row = failed_row(path.stem, str(path), str(exc))
+                else:
+                    row = process_frame(
+                        frame_index,
+                        frame,
+                        config,
+                        outdir,
+                        strict=strict,
+                        stage_callback=callback,
+                    )
+                rows.append(row)
+                progress.complete_frame(row.get("status") == "ok")
+            return rows
+
+        frames = iter(
+            read_frames(
+                paths,
+                topology=topology,
+                xyz_scale=float(config["input"].get("xyz_scale", 0.1)),
+                xtc_stride=int(config["input"].get("xtc_stride", 1)),
+            )
+        )
+        frame_index = 0
+        while True:
+            try:
+                frame = next(frames)
+            except StopIteration:
+                break
+            except Exception as exc:
+                if strict:
+                    raise
+                source = paths[0] if paths else Path("")
+                frame_name = f"{source.stem}_frame{frame_index:06d}"
+                progress.start_frame(frame_index, frame_name)
+                row = failed_row(frame_name, str(source), str(exc))
+                rows.append(row)
+                progress.complete_frame(False)
+                break
             callback = progress.start_frame(frame_index, frame.name)
-            row = process_frame(frame_index, frame, config, outdir, strict=strict, stage_callback=callback)
+            row = process_frame(
+                frame_index,
+                frame,
+                config,
+                outdir,
+                strict=strict,
+                stage_callback=callback,
+            )
             rows.append(row)
             progress.complete_frame(row.get("status") == "ok")
+            frame_index += 1
     finally:
         progress.close()
     return rows
@@ -934,19 +1138,42 @@ def analyze_paths_threaded(
     )
     try:
         with ThreadPoolExecutor(max_workers=workers) as executor:
-            futures = {
-                executor.submit(process_single_file_path, frame_index, path, config, outdir, strict, progress): frame_index
-                for frame_index, path in enumerate(paths)
-            }
-            for future in as_completed(futures):
-                expected_index = futures[future]
-                try:
-                    frame_index, row = future.result()
-                except Exception:
-                    progress.complete_file(expected_index, False)
-                    raise
-                rows_by_index[frame_index] = row
-                progress.complete_file(frame_index, row.get("status") == "ok")
+            task_iterator = iter(enumerate(paths))
+            futures: dict[Any, int] = {}
+            max_in_flight = process_in_flight_limit(workers)
+
+            def fill_queue() -> None:
+                while len(futures) < max_in_flight:
+                    try:
+                        frame_index, path = next(task_iterator)
+                    except StopIteration:
+                        return
+                    future = executor.submit(
+                        process_single_file_path,
+                        frame_index,
+                        path,
+                        config,
+                        outdir,
+                        strict,
+                        progress,
+                    )
+                    futures[future] = frame_index
+
+            fill_queue()
+            while futures:
+                done, _ = wait(set(futures), return_when=FIRST_COMPLETED)
+                for future in done:
+                    expected_index = futures.pop(future)
+                    try:
+                        frame_index, row = future.result()
+                    except Exception:
+                        progress.complete_file(expected_index, False)
+                        for sibling in futures:
+                            sibling.cancel()
+                        raise
+                    rows_by_index[frame_index] = row
+                    progress.complete_file(frame_index, row.get("status") == "ok")
+                fill_queue()
     finally:
         progress.close()
     return [rows_by_index[index] for index in sorted(rows_by_index)]
@@ -1076,6 +1303,10 @@ def analyze_trajectory_processes(
                             raise
                         for frame_index, row in results:
                             rows_by_index[frame_index] = row
+                            progress.complete_file(
+                                frame_index,
+                                row.get("status") == "ok",
+                            )
                     fill_queue()
                 drain_process_stage_events(stage_queue, progress)
     finally:
@@ -1131,7 +1362,14 @@ def process_single_file_path(
     """Read and analyze one standalone coordinate file."""
     callback = progress.start_file(frame_index, path.name) if progress is not None else None
     try:
-        frame = next(iter(read_frames([path])))
+        frame = next(
+            iter(
+                read_frames(
+                    [path],
+                    xyz_scale=float(config["input"].get("xyz_scale", 0.1)),
+                )
+            )
+        )
     except Exception as exc:
         if strict:
             raise
@@ -1158,7 +1396,12 @@ def process_frame(
     if frame.time_ps is None:
         frame.time_ps = config["input"]["first_file_time_ps"] + frame_index * config["input"]["frame_time_step_ps"]
     try:
-        result = analyze_frame(frame, config, stage_callback=stage_callback)
+        result = analyze_frame(
+            frame,
+            config,
+            stage_callback=stage_callback,
+            normalize_config=False,
+        )
         frame_dir = outdir / frame.name
         frame_dir.mkdir(parents=True, exist_ok=True)
         report_stage(stage_callback, "writing outputs")
@@ -1179,44 +1422,94 @@ def report_stage(callback: Callable[[str], None] | None, stage: str) -> None:
 
 def write_frame_outputs(result: FrameResult, frame_dir: Path, config: dict[str, Any]) -> None:
     """Write all configured per-frame output files."""
-    if config["output"].get("write_info", True):
+    output = config.get("output", {})
+    order_parameters = config.get("order", {}).get("parameters", ["f3", "f4"])
+    if output_enabled(config, "info"):
         write_frame_info(
             result,
             frame_dir,
             ring_sizes=list(result.ring_report_sizes),
             requested_bond_mode=config["graph"]["bond_mode"],
+            order_parameters=order_parameters,
         )
     else:
         remove_optional_info_output(result, frame_dir)
-    if config["output"]["write_tsv"]:
+
+    write_legacy_tsv = bool(output.get("write_tsv", False))
+    write_order_tsv = bool(output.get("write_order_tsv", False))
+    if write_legacy_tsv and output_enabled(config, "membership-tsv"):
         write_membership(result, frame_dir)
-        write_order_parameter(result, frame_dir)
     else:
-        remove_optional_tsv_outputs(result, frame_dir, remove_membership=True, remove_order=not config["output"].get("write_order_tsv", False))
-    if config["output"].get("write_order_tsv", False) and not config["output"].get("write_tsv", False):
-        write_order_parameter(result, frame_dir)
-    if config["output"]["write_vmd"]:
+        remove_optional_tsv_outputs(
+            result,
+            frame_dir,
+            remove_membership=True,
+            remove_order=False,
+        )
+    if (write_legacy_tsv or write_order_tsv) and output_enabled(config, "order-tsv"):
+        write_order_parameter(result, frame_dir, order_parameters=order_parameters)
+    else:
+        remove_optional_tsv_outputs(
+            result,
+            frame_dir,
+            remove_membership=False,
+            remove_order=True,
+        )
+
+    if bool(output.get("write_vmd", False)) and output_enabled(config, "vmd"):
         write_vmd_script(result, frame_dir)
     else:
         remove_optional_vmd_output(result, frame_dir)
-    if config["output"]["write_gro"]:
-        layout = str(config["output"].get("structure_layout", "grouped"))
-        if config["output"].get("write_ring_gro", True):
-            write_ring_gro_files(
-                result,
-                frame_dir,
-                write_empty=config["output"]["write_empty_files"],
-                layout=layout,
-                sizes=set(result.ring_report_sizes),
-            )
-        if config["output"].get("write_half_cage_gro", True):
-            write_half_cage_gro_files(result, frame_dir, write_empty=config["output"]["write_empty_files"], layout=layout)
-        if config["output"].get("write_quasi_cage_gro", True):
-            write_quasi_cage_gro_files(result, frame_dir, write_empty=config["output"]["write_empty_files"], layout=layout)
-        if config["output"].get("write_cage_gro", True):
-            write_cage_gro_files(result, frame_dir, write_empty=config["output"]["write_empty_files"], layout=layout)
-        if config["output"].get("write_ice_gro", True):
-            write_ice_gro_file(result, frame_dir, write_empty=config["output"]["write_empty_files"], layout=layout)
+
+    layout = str(output.get("structure_layout", "grouped"))
+    write_empty = bool(output.get("write_empty_files", False))
+    if output_enabled(config, "ring-gro"):
+        write_ring_gro_files(
+            result,
+            frame_dir,
+            write_empty=write_empty,
+            layout=layout,
+            sizes=set(result.ring_report_sizes),
+        )
+    else:
+        remove_generated_gro_outputs(result, frame_dir, "ring-gro", layout)
+    if output_enabled(config, "half-gro"):
+        write_half_cage_gro_files(
+            result,
+            frame_dir,
+            write_empty=write_empty,
+            layout=layout,
+        )
+    else:
+        remove_generated_gro_outputs(result, frame_dir, "half-gro", layout)
+    if output_enabled(config, "quasi-gro"):
+        write_quasi_cage_gro_files(
+            result,
+            frame_dir,
+            write_empty=write_empty,
+            layout=layout,
+        )
+    else:
+        remove_generated_gro_outputs(result, frame_dir, "quasi-gro", layout)
+    if output_enabled(config, "cage-gro"):
+        write_cage_gro_files(
+            result,
+            frame_dir,
+            write_empty=write_empty,
+            layout=layout,
+        )
+    else:
+        remove_generated_gro_outputs(result, frame_dir, "cage-gro", layout)
+    if output_enabled(config, "ice-gro"):
+        write_ice_gro_file(
+            result,
+            frame_dir,
+            write_empty=write_empty,
+            layout=layout,
+        )
+    else:
+        remove_generated_gro_outputs(result, frame_dir, "ice-gro", layout)
+    remove_frame_directory_if_empty(frame_dir)
 
 
 def remove_optional_info_output(result: FrameResult, frame_dir: Path) -> None:
@@ -1239,6 +1532,62 @@ def remove_optional_tsv_outputs(result: FrameResult, frame_dir: Path, *, remove_
 def remove_optional_vmd_output(result: FrameResult, frame_dir: Path) -> None:
     """Remove stale optional VMD helper scripts when disabled."""
     (frame_dir / f"{result.frame.name}_view.vmd.tcl").unlink(missing_ok=True)
+
+
+def remove_generated_gro_outputs(
+    result: FrameResult,
+    frame_dir: Path,
+    output_type: str,
+    layout: str,
+) -> None:
+    """Remove only known SQQ-generated GRO files for one disabled category."""
+    grouped_directories = {
+        "ring-gro": "ring",
+        "half-gro": "half_cage",
+        "quasi-gro": "quasi_cage",
+        "cage-gro": "cage",
+        "ice-gro": "ice",
+    }
+    flat_patterns = {
+        "ring-gro": f"{result.frame.name}_ring_*.gro",
+        "half-gro": f"{result.frame.name}_hc_*.gro",
+        "quasi-gro": f"{result.frame.name}_qc_*.gro",
+        "cage-gro": f"{result.frame.name}_cage_*.gro",
+        "ice-gro": f"{result.frame.name}_ice*.gro",
+    }
+    if layout not in {"grouped", "flat"}:
+        raise ValueError("output.structure_layout must be 'grouped' or 'flat'.")
+    root = frame_dir / grouped_directories[output_type]
+    if root.exists():
+        generated_parents: set[Path] = set()
+        for path in root.rglob("*.gro"):
+            if path.name.startswith(f"{result.frame.name}_"):
+                parent = path.parent
+                while parent == root or root in parent.parents:
+                    generated_parents.add(parent)
+                    if parent == root:
+                        break
+                    parent = parent.parent
+                path.unlink(missing_ok=True)
+        for directory in sorted(
+            generated_parents,
+            key=lambda path: len(path.parts),
+            reverse=True,
+        ):
+            try:
+                directory.rmdir()
+            except OSError:
+                pass
+    for path in frame_dir.glob(flat_patterns[output_type]):
+        path.unlink(missing_ok=True)
+
+
+def remove_frame_directory_if_empty(frame_dir: Path) -> None:
+    """Remove only the frame directory itself, preserving unrelated subdirectories."""
+    try:
+        frame_dir.rmdir()
+    except OSError:
+        pass
 
 
 def worker_policy_text(config: dict[str, Any]) -> str:
@@ -1334,14 +1683,23 @@ def resolve_workers(
     backend: str = "process",
 ) -> int:
     """Resolve workers from physical cores, task count, and platform caps."""
-    physical_total = max(1, int(cpu_total if cpu_total is not None else physical_cpu_count()))
-    usable_workers = max(1, physical_total - 1)
+    resolved_backend = normalize_parallel_backend(backend)
+    single_or_serial = max(0, int(n_paths)) <= 1 or resolved_backend == "serial"
     if is_auto_worker_request(value):
+        if single_or_serial:
+            return 1
+        physical_total = max(1, int(cpu_total if cpu_total is not None else physical_cpu_count()))
         requested = max(1, int(physical_total * mode_worker_fraction(mode)))
     else:
+        # Validate before the single-task short-circuit.
+        classify_worker_request(value)
+        if single_or_serial:
+            return 1
+        physical_total = max(1, int(cpu_total if cpu_total is not None else physical_cpu_count()))
         requested = resolve_explicit_worker_request(value, physical_total)
+    usable_workers = max(1, physical_total - 1)
     requested = min(requested, usable_workers, max(1, n_paths))
-    if normalize_parallel_backend(backend) == "process":
+    if resolved_backend == "process":
         platform_cap = process_worker_cap()
         if platform_cap is not None:
             requested = min(requested, platform_cap)
@@ -1390,6 +1748,10 @@ def apply_cli_overrides(config: dict[str, Any], args: Namespace) -> None:
         config["input"]["pattern"] = args.pattern
     if args.recursive:
         config["input"]["recursive"] = True
+    if getattr(args, "xyz_scale", None) is not None:
+        if not math.isfinite(args.xyz_scale) or args.xyz_scale <= 0:
+            raise ValueError("--xyz-scale must be positive and finite.")
+        config["input"]["xyz_scale"] = args.xyz_scale
     if getattr(args, "size", None):
         config["ring"]["sizes"] = args.size
         config["quasi_cage"]["base_sizes"] = args.size
@@ -1411,10 +1773,44 @@ def apply_cli_overrides(config: dict[str, Any], args: Namespace) -> None:
         config["quasi_cage"]["search_policy"] = args.quasi_search_policy
     if getattr(args, "ring_definition", None):
         config["ring"]["definition"] = args.ring_definition
-    if getattr(args, "no_q", False):
-        config["order"]["q_enabled"] = False
-    if getattr(args, "q_degree", None):
-        config["order"]["q_degree"] = args.q_degree
+    unified_order = getattr(args, "order_parameter", None)
+    legacy_order_options = any(
+        (
+            getattr(args, "no_q", False),
+            getattr(args, "q_degree", None),
+            getattr(args, "mcg3", None),
+            getattr(args, "dhop30", None),
+        )
+    )
+    if unified_order is not None:
+        config["order"]["parameters"] = list(normalize_order_parameters(unified_order))
+        if legacy_order_options:
+            warn_legacy_order_cli(ignored=True)
+    elif legacy_order_options:
+        warn_legacy_order_cli(ignored=False)
+        selected = set(
+            normalize_order_parameters(
+                config.get("order", {}).get("parameters", ["f3", "f4"])
+            )
+        )
+        if getattr(args, "no_q", False):
+            selected = {name for name in selected if not name.startswith("q")}
+        elif getattr(args, "q_degree", None):
+            selected = {name for name in selected if not name.startswith("q")}
+            selected.update(f"q{degree}" for degree in normalize_q_degree(args.q_degree))
+        if getattr(args, "mcg3", None):
+            if parse_on_off(args.mcg3, "--mcg3"):
+                selected.add("mcg3")
+            else:
+                selected.discard("mcg3")
+        if getattr(args, "dhop30", None):
+            if parse_on_off(args.dhop30, "--dhop30"):
+                selected.add("dhop30")
+            else:
+                selected.discard("dhop30")
+        config["order"]["parameters"] = list(
+            normalize_order_parameters(selected)
+        )
     if getattr(args, "q_neighbor_mode", None):
         config["order"]["q_neighbor_mode"] = args.q_neighbor_mode
     if getattr(args, "q_cutoff", None) is not None:
@@ -1430,10 +1826,6 @@ def apply_cli_overrides(config: dict[str, Any], args: Namespace) -> None:
             if count < 1:
                 raise ValueError("--q-n-neighbor must be at least 1 or NULL.")
             config["order"]["q_n_neighbor"] = count
-    if getattr(args, "mcg3", None):
-        config["hydrate_order"]["mcg3_enabled"] = parse_on_off(args.mcg3, "--mcg3")
-    if getattr(args, "dhop30", None):
-        config["hydrate_order"]["dhop30_enabled"] = parse_on_off(args.dhop30, "--dhop30")
     if getattr(args, "cage_size", None):
         config["cage"]["report_types"] = args.cage_size
     if getattr(args, "max_cage_face", None) is not None:
@@ -1473,104 +1865,229 @@ def apply_cli_overrides(config: dict[str, Any], args: Namespace) -> None:
         config["parallel"]["workers"] = args.worker
     if getattr(args, "output_layout", None):
         config["output"]["structure_layout"] = args.output_layout
-    if getattr(args, "no_info", False):
-        config["output"]["write_info"] = False
-    if args.no_gro:
-        config["output"]["write_gro"] = False
-    if getattr(args, "no_ring_gro", False):
-        config["output"]["write_ring_gro"] = False
-    if getattr(args, "no_half_cage_gro", False):
-        config["output"]["write_half_cage_gro"] = False
-    if getattr(args, "no_quasi_cage_gro", False):
-        config["output"]["write_quasi_cage_gro"] = False
-    if getattr(args, "no_cage_gro", False):
-        config["output"]["write_cage_gro"] = False
-    if getattr(args, "no_ice_gro", False):
-        config["output"]["write_ice_gro"] = False
-    if args.no_xlsx:
-        config["output"]["write_xlsx_summary"] = False
-    if getattr(args, "no_summary_detail", False):
-        config["output"]["write_summary_detail_csv"] = False
+    unified_no_output = getattr(args, "no_output", None)
+    legacy_output_options = {
+        "info": getattr(args, "no_info", False),
+        "gro": getattr(args, "no_gro", False),
+        "ring-gro": getattr(args, "no_ring_gro", False),
+        "half-gro": getattr(args, "no_half_cage_gro", False),
+        "quasi-gro": getattr(args, "no_quasi_cage_gro", False),
+        "cage-gro": getattr(args, "no_cage_gro", False),
+        "ice-gro": getattr(args, "no_ice_gro", False),
+        "xlsx": getattr(args, "no_xlsx", False),
+        "summary-detail": getattr(args, "no_summary_detail", False),
+    }
+    has_legacy_output_options = any(legacy_output_options.values())
+    if unified_no_output is not None:
+        config["output"]["disabled_outputs"] = list(
+            normalize_disabled_outputs(unified_no_output)
+        )
+        if has_legacy_output_options:
+            warn_legacy_output_cli(ignored=True)
+    elif has_legacy_output_options:
+        warn_legacy_output_cli(ignored=False)
+        disabled_outputs = set(
+            normalize_disabled_outputs(
+                config.get("output", {}).get("disabled_outputs")
+            )
+        )
+        disabled_outputs.update(
+            name
+            for name, disabled in legacy_output_options.items()
+            if disabled
+        )
+        config["output"]["disabled_outputs"] = list(
+            normalize_disabled_outputs(disabled_outputs)
+        )
     if getattr(args, "cage_isomer_rows", None):
         config["output"]["cage_isomer_rows"] = args.cage_isomer_rows
     if getattr(args, "write_order_tsv", False):
         config["output"]["write_order_tsv"] = True
 
 
+def warn_legacy_order_cli(*, ignored: bool) -> None:
+    """Print one visible compatibility warning for pre-0.2.7 selector options."""
+    suffix = " They were ignored because --order-parameter was also supplied." if ignored else ""
+    print(
+        "Warning: --no-q, -q/--q-degree, --mcg3, and --dhop30 are deprecated; "
+        f"use --order-parameter instead.{suffix}",
+        file=sys.stderr,
+    )
+
+
+def warn_legacy_output_cli(*, ignored: bool) -> None:
+    """Print one visible warning for pre-unification output switches."""
+    suffix = " They were ignored because --no-output was also supplied." if ignored else ""
+    print(
+        "Warning: individual --no-info/--no-*-gro/--no-xlsx/"
+        f"--no-summary-detail options are deprecated; use --no-output instead.{suffix}",
+        file=sys.stderr,
+    )
+
+
 def normalize_analysis_scopes(config: dict[str, Any]) -> None:
     """Normalize search and report scopes before frames are analyzed."""
-    search_sizes = resolve_size_list(config["ring"].get("sizes", []), fallback=[], key="ring.sizes")
+    input_config = config.setdefault("input", {})
+    input_config["recursive"] = parse_on_off(input_config.get("recursive", False), "input.recursive")
+    input_config["xyz_scale"] = finite_float(
+        input_config.get("xyz_scale", 0.1),
+        "input.xyz_scale / --xyz-scale",
+        positive=True,
+    )
+    input_config["first_file_time_ps"] = finite_float(
+        input_config.get("first_file_time_ps", 0.0),
+        "input.first_file_time_ps",
+    )
+    input_config["frame_time_step_ps"] = finite_float(
+        input_config.get("frame_time_step_ps", 100.0),
+        "input.frame_time_step_ps",
+    )
+    input_config["xtc_stride"] = positive_integer(
+        input_config.get("xtc_stride", 1),
+        "input.xtc_stride",
+    )
+
+    graph = config.setdefault("graph", {})
+    graph_mode = str(graph.get("bond_mode", "auto")).strip().lower()
+    if graph_mode not in {"auto", "hbond", "oo", "pairs"}:
+        raise ValueError("graph.bond_mode must be auto, hbond, oo, or pairs.")
+    graph["bond_mode"] = graph_mode
+    graph["oo_cutoff_nm"] = finite_float(graph.get("oo_cutoff_nm", 0.35), "graph.oo_cutoff_nm", positive=True)
+    graph["hbond_distance_nm"] = finite_float(graph.get("hbond_distance_nm", 0.35), "graph.hbond_distance_nm", positive=True)
+    graph["hbond_angle_deg"] = finite_float(graph.get("hbond_angle_deg", 30.0), "graph.hbond_angle_deg")
+    if not 0 <= graph["hbond_angle_deg"] <= 180:
+        raise ValueError("graph.hbond_angle_deg must be between 0 and 180 degrees.")
+    pair_id = str(graph.get("pair_id", "resid")).strip().lower()
+    if pair_id not in {"resid", "oxygen_index", "atomid"}:
+        raise ValueError("graph.pair_id must be resid, oxygen_index, or atomid.")
+    graph["pair_id"] = pair_id
+
+    pbc = config.setdefault("pbc", {})
+    box_mode = str(pbc.get("box_mode", "orthorhombic")).strip().lower()
+    if box_mode != "orthorhombic":
+        raise ValueError("pbc.box_mode must be orthorhombic.")
+    pbc["box_mode"] = box_mode
+
+    water = config.setdefault("water", {})
+    water["resnames"] = string_list(water.get("resnames", []), "water.resnames")
+    water["oxygen_names"] = string_list(water.get("oxygen_names", []), "water.oxygen_names", allow_empty=True)
+    water["hydrogen_names"] = string_list(water.get("hydrogen_names", []), "water.hydrogen_names", allow_empty=True)
+    guest = config.setdefault("guest", {})
+    guest["resnames"] = string_list(guest.get("resnames", []), "guest.resnames", allow_empty=True)
+    center_atoms = guest.get("center_atoms", {})
+    if not isinstance(center_atoms, dict):
+        raise ValueError("guest.center_atoms must be a residue-to-atom-list mapping.")
+    guest["center_atoms"] = {
+        str(resname).strip(): string_list(atom_names, f"guest.center_atoms.{resname}", allow_empty=True)
+        for resname, atom_names in center_atoms.items()
+        if str(resname).strip()
+    }
+
+    ring = config.setdefault("ring", {})
+    ring["chordless"] = parse_on_off(ring.get("chordless", True), "ring.chordless")
+    search_sizes = resolve_size_list(ring.get("sizes", []), fallback=[], key="ring.sizes")
     unsupported = set(search_sizes) - {4, 5, 6, 7}
     if unsupported:
         raise ValueError(f"ring.sizes / --size supports only 4, 5, 6, and 7; got {sorted(unsupported)}")
     ring_report_sizes = resolve_size_list(
-        config["ring"].get("report_sizes", "auto"),
+        ring.get("report_sizes", "auto"),
         fallback=search_sizes,
         key="ring.report_sizes",
     )
     if not set(ring_report_sizes) <= set(search_sizes):
         raise ValueError("ring.report_sizes / --ring-size must be a subset of ring.sizes / --size.")
 
-    max_faces = int(config["cage"].get("max_faces", 20))
-    if max_faces < 1:
-        raise ValueError("cage.max_faces / --max-cage-face must be at least 1.")
+    ring_definition = str(ring.get("definition", "chordless")).strip().lower()
+    if ring_definition not in {"chordless", "shortest_path"}:
+        raise ValueError("ring.definition / --ring-definition must be chordless or shortest_path.")
+    ring["definition"] = ring_definition
+
+    quasi = config.setdefault("quasi_cage", {})
+    quasi["enabled"] = parse_on_off(quasi.get("enabled", True), "quasi_cage.enabled")
+    raw_quasi_base_sizes = quasi.get("base_sizes", "auto")
+    raw_quasi_side_sizes = quasi.get("side_sizes", "auto")
+    quasi_base_sizes = resolve_size_list(raw_quasi_base_sizes, fallback=search_sizes, key="quasi_cage.base_sizes")
+    quasi_side_sizes = resolve_size_list(raw_quasi_side_sizes, fallback=search_sizes, key="quasi_cage.side_sizes")
+    if not set(quasi_base_sizes) <= set(search_sizes):
+        raise ValueError("quasi_cage.base_sizes must be a subset of ring.sizes / --size.")
+    if not set(quasi_side_sizes) <= set(search_sizes):
+        raise ValueError("quasi_cage.side_sizes must be a subset of ring.sizes / --size.")
+    quasi["base_sizes"] = "auto" if str(raw_quasi_base_sizes).strip().lower() == "auto" else quasi_base_sizes
+    quasi["side_sizes"] = "auto" if str(raw_quasi_side_sizes).strip().lower() == "auto" else quasi_side_sizes
+    quasi_policy = str(quasi.get("search_policy", "bounded")).strip().lower()
+    if quasi_policy not in {"bounded", "exact"}:
+        raise ValueError("quasi_cage.search_policy / --quasi-search-policy must be bounded or exact.")
+    quasi["search_policy"] = quasi_policy
+    for key, default in (
+        ("max_combinations_per_base", 50000),
+        ("max_layers", 1),
+        ("max_rings_per_layer", 6),
+        ("max_layer_states_per_seed", 200),
+        ("max_candidates_per_edge", 4),
+        ("max_layer_candidates", 24),
+    ):
+        quasi[key] = positive_integer(quasi.get(key, default), f"quasi_cage.{key}")
+
+    cage = config.setdefault("cage", {})
+    max_faces = positive_integer(cage.get("max_faces", 20), "cage.max_faces / --max-cage-face")
     report_types = resolve_cage_report_types(
-        config["cage"].get("report_types", []),
+        cage.get("report_types", []),
         search_sizes,
         max_faces,
     )
-    config["ring"]["sizes"] = search_sizes
-    config["ring"]["report_sizes"] = ring_report_sizes
-    config["cage"]["report_types"] = "all" if report_types is None else list(report_types)
-    config["cage"]["max_faces"] = max_faces
-    cage = config.setdefault("cage", {})
+    ring["sizes"] = search_sizes
+    ring["report_sizes"] = ring_report_sizes
+    cage["report_types"] = "all" if report_types is None else list(report_types)
+    cage["max_faces"] = max_faces
+    cage["enabled"] = parse_on_off(cage.get("enabled", True), "cage.enabled")
+    search_mode = str(cage.get("search_mode", "grow")).strip().lower()
+    if search_mode in {"expand", "hybrid"}:
+        search_mode = "grow"
+    if search_mode not in {"grow", "pair", "patch_pair"}:
+        raise ValueError("cage.search_mode must be grow, pair, or patch_pair.")
+    cage["search_mode"] = search_mode
+    seed_mode = str(cage.get("seed_mode", "ring")).strip().lower()
+    if seed_mode not in {"ring", "patch"}:
+        raise ValueError("cage.seed_mode must be ring or patch.")
+    cage["seed_mode"] = seed_mode
+    occupancy_mode = str(cage.get("occupancy_mode", "polyhedron")).strip().lower()
+    if occupancy_mode not in {"polyhedron", "center", "auto"}:
+        raise ValueError("cage.occupancy_mode must be polyhedron, center, or auto.")
+    cage["occupancy_mode"] = occupancy_mode
+    cage["occupancy_radius_nm"] = finite_float(cage.get("occupancy_radius_nm", 0.5), "cage.occupancy_radius_nm", positive=True)
+    for key, default in (
+        ("max_states_per_seed", 20000),
+        ("max_total_states", 5000000),
+        ("max_boundary_candidates", 8),
+    ):
+        cage[key] = positive_integer(cage.get(key, default), f"cage.{key}")
     cage["fast_closure"] = parse_on_off(cage.get("fast_closure", True), "cage.fast_closure")
-    fast_states = int(cage.get("fast_closure_max_states", 20000))
-    if fast_states < 1:
-        raise ValueError("cage.fast_closure_max_states must be at least 1.")
-    cage["fast_closure_max_states"] = fast_states
+    cage["fast_closure_max_states"] = positive_integer(cage.get("fast_closure_max_states", 20000), "cage.fast_closure_max_states")
     cage["scientific_validation"] = parse_on_off(
         cage.get("scientific_validation", False),
         "cage.scientific_validation",
     )
-    planarity = float(cage.get("max_face_planarity_rms_nm", 0.06))
-    edge_cv = float(cage.get("max_face_edge_cv", 0.35))
-    min_volume = float(cage.get("min_cage_volume_nm3", 1.0e-6))
-    if planarity < 0:
-        raise ValueError("cage.max_face_planarity_rms_nm must be non-negative.")
-    if edge_cv < 0:
-        raise ValueError("cage.max_face_edge_cv must be non-negative.")
-    if min_volume <= 0:
-        raise ValueError("cage.min_cage_volume_nm3 must be positive.")
-    cage["max_face_planarity_rms_nm"] = planarity
-    cage["max_face_edge_cv"] = edge_cv
-    cage["min_cage_volume_nm3"] = min_volume
+    cage["max_face_planarity_rms_nm"] = finite_float(cage.get("max_face_planarity_rms_nm", 0.06), "cage.max_face_planarity_rms_nm", nonnegative=True)
+    cage["max_face_edge_cv"] = finite_float(cage.get("max_face_edge_cv", 0.35), "cage.max_face_edge_cv", nonnegative=True)
+    cage["min_cage_volume_nm3"] = finite_float(cage.get("min_cage_volume_nm3", 1.0e-6), "cage.min_cage_volume_nm3", positive=True)
     hydrate_cluster = config.setdefault("hydrate_cluster", {})
     hydrate_cluster["enabled"] = parse_on_off(hydrate_cluster.get("enabled", False), "hydrate_cluster.enabled")
-    min_cage = int(hydrate_cluster.get("min_cage", 2))
-    if min_cage < 1:
-        raise ValueError("hydrate_cluster.min_cage / --cluster-min-cage must be at least 1.")
-    hydrate_cluster["min_cage"] = min_cage
+    hydrate_cluster["min_cage"] = positive_integer(hydrate_cluster.get("min_cage", 2), "hydrate_cluster.min_cage / --cluster-min-cage")
     hydrate_cluster["detail"] = parse_on_off(hydrate_cluster.get("detail", False), "hydrate_cluster.detail")
-    ring_definition = str(config.get("ring", {}).get("definition", "chordless")).strip().lower()
-    if ring_definition not in {"chordless", "shortest_path"}:
-        raise ValueError("ring.definition / --ring-definition must be chordless or shortest_path.")
-    config["ring"]["definition"] = ring_definition
-    quasi_policy = str(config.get("quasi_cage", {}).get("search_policy", "bounded")).strip().lower()
-    if quasi_policy not in {"bounded", "exact"}:
-        raise ValueError("quasi_cage.search_policy / --quasi-search-policy must be bounded or exact.")
-    config["quasi_cage"]["search_policy"] = quasi_policy
     parallel = config.setdefault("parallel", {})
     parallel["backend"] = normalize_parallel_backend(parallel.get("backend", "process"))
-    math_threads = int(parallel.get("math_threads", 1))
-    if math_threads < 1:
-        raise ValueError("parallel.math_threads must be at least 1.")
-    parallel["math_threads"] = math_threads
+    parallel["math_threads"] = positive_integer(parallel.get("math_threads", 1), "parallel.math_threads")
     output = config.setdefault("output", {})
-    output["write_summary_detail_csv"] = parse_on_off(
-        output.get("write_summary_detail_csv", True),
-        "output.write_summary_detail_csv",
+    output["disabled_outputs"] = list(
+        normalize_disabled_outputs(output.get("disabled_outputs", []))
     )
+    for key, default in (
+        ("write_tsv", False),
+        ("write_order_tsv", False),
+        ("write_vmd", False),
+        ("write_empty_files", False),
+    ):
+        output[key] = parse_on_off(output.get(key, default), f"output.{key}")
     detail_dir = str(output.get("summary_detail_dir", "summary_detail")).strip() or "summary_detail"
     detail_path = Path(detail_dir)
     if detail_path.is_absolute() or ".." in detail_path.parts:
@@ -1580,46 +2097,92 @@ def normalize_analysis_scopes(config: dict[str, Any]) -> None:
     if cage_isomer_rows not in {"nonzero", "all"}:
         raise ValueError("output.cage_isomer_rows / --cage-isomer-rows must be nonzero or all.")
     output["cage_isomer_rows"] = cage_isomer_rows
+    structure_layout = str(output.get("structure_layout", "grouped")).strip().lower()
+    if structure_layout not in {"grouped", "flat"}:
+        raise ValueError("output.structure_layout must be grouped or flat.")
+    output["structure_layout"] = structure_layout
     guest_center_mode = str(config.get("guest", {}).get("center_mode", "center_atom")).strip().lower()
     if guest_center_mode not in {"center_atom", "centroid", "auto"}:
         raise ValueError("guest.center_mode must be center_atom, centroid, or auto.")
     config["guest"]["center_mode"] = guest_center_mode
-    config["order"]["q_degree"] = list(normalize_q_degree(config.get("order", {}).get("q_degree", [6, 12])))
-    hydrate_order = config.setdefault("hydrate_order", {})
-    for key, default in (
-        ("mcg1_enabled", True),
-        ("mcg3_enabled", False),
-        ("dhop35_enabled", True),
-        ("dhop30_enabled", False),
+    order = config.setdefault("order", {})
+    order["parameters"] = list(
+        normalize_order_parameters(order.get("parameters", ["f3", "f4"]))
+    )
+    q_neighbor_mode = normalize_q_neighbor_mode(str(order.get("q_neighbor_mode", "graph")))
+    order["q_neighbor_mode"] = q_neighbor_mode
+    order["q_cutoff_nm"] = finite_float(order.get("q_cutoff_nm", 0.35), "order.q_cutoff_nm", positive=True)
+    order["q_n_neighbor"] = resolve_q_neighbor_count(q_neighbor_mode, order.get("q_n_neighbor"))
+    focus_value = order.get("focus_waters", [])
+    if isinstance(focus_value, str):
+        focus_items = [item.strip() for item in focus_value.split(",") if item.strip()]
+    else:
+        try:
+            focus_items = list(focus_value)
+        except TypeError as exc:
+            raise ValueError("order.focus_waters must be a list of residue ids.") from exc
+    try:
+        order["focus_waters"] = sorted({int(item) for item in focus_items})
+    except (TypeError, ValueError) as exc:
+        raise ValueError("order.focus_waters must contain integer residue ids.") from exc
+    per_water_order = any(
+        name in {"f3", "f4"} or name.startswith("q")
+        for name in order["parameters"]
+    )
+    if (
+        output.get("write_order_tsv", False)
+        and output_enabled(config, "order-tsv")
+        and not per_water_order
     ):
-        hydrate_order[key] = parse_on_off(hydrate_order.get(key, default), f"hydrate_order.{key}")
+        print(
+            "Warning: --write-order-tsv has no per-water F3/F4/Q_l selection; "
+            "no order-parameter TSV will be written.",
+            file=sys.stderr,
+        )
+    hydrate_order = config.setdefault("hydrate_order", {})
     positive_values = (
         ("mcg_guest_cutoff_nm", 0.90),
         ("mcg_water_cutoff_nm", 0.60),
         ("dhop_neighbor_cutoff_nm", 0.35),
     )
     for key, default in positive_values:
-        value = float(hydrate_order.get(key, default))
-        if value <= 0:
-            raise ValueError(f"hydrate_order.{key} must be positive.")
-        hydrate_order[key] = value
-    cone_angle = float(hydrate_order.get("mcg_cone_half_angle_deg", 45.0))
+        hydrate_order[key] = finite_float(hydrate_order.get(key, default), f"hydrate_order.{key}", positive=True)
+    cone_angle = finite_float(hydrate_order.get("mcg_cone_half_angle_deg", 45.0), "hydrate_order.mcg_cone_half_angle_deg")
     if not 0 < cone_angle < 90:
         raise ValueError("hydrate_order.mcg_cone_half_angle_deg must be between 0 and 90.")
     hydrate_order["mcg_cone_half_angle_deg"] = cone_angle
     for key, default in (("mcg_min_waters", 5), ("dhop_min_qualified_neighbors", 3)):
-        value = int(hydrate_order.get(key, default))
-        if value < 1:
-            raise ValueError(f"hydrate_order.{key} must be at least 1.")
-        hydrate_order[key] = value
-    planar_counts = sorted({int(value) for value in hydrate_order.get("dhop_planar_counts", [11, 12])})
-    if not planar_counts or planar_counts[0] < 0:
+        hydrate_order[key] = positive_integer(hydrate_order.get(key, default), f"hydrate_order.{key}")
+    planar_counts: set[int] = set()
+    try:
+        raw_planar_value = hydrate_order.get("dhop_planar_counts", [11, 12])
+        raw_planar_counts = (
+            raw_planar_value.split(",") if isinstance(raw_planar_value, str) else list(raw_planar_value)
+        )
+    except TypeError as exc:
+        raise ValueError("hydrate_order.dhop_planar_counts must contain non-negative integers.") from exc
+    for raw_value in raw_planar_counts:
+        try:
+            numeric = float(raw_value)
+            count = int(numeric)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("hydrate_order.dhop_planar_counts must contain non-negative integers.") from exc
+        if not math.isfinite(numeric) or numeric != count or count < 0:
+            raise ValueError("hydrate_order.dhop_planar_counts must contain non-negative integers.")
+        planar_counts.add(count)
+    if not planar_counts:
         raise ValueError("hydrate_order.dhop_planar_counts must contain non-negative integers.")
-    hydrate_order["dhop_planar_counts"] = planar_counts
-    guest_names = [str(value).strip() for value in hydrate_order.get("mcg_guest_resnames", ["CH4", "MET"]) if str(value).strip()]
-    if not guest_names:
-        raise ValueError("hydrate_order.mcg_guest_resnames must contain at least one residue name.")
-    hydrate_order["mcg_guest_resnames"] = guest_names
+    hydrate_order["dhop_planar_counts"] = sorted(planar_counts)
+    hydrate_order["mcg_guest_resnames"] = string_list(hydrate_order.get("mcg_guest_resnames", ["CH4", "MET"]), "hydrate_order.mcg_guest_resnames")
+
+    ice = config.setdefault("ice", {})
+    ice["enabled"] = parse_on_off(ice.get("enabled", True), "ice.enabled")
+    ice_method = str(ice.get("method", "chill")).strip().lower()
+    if ice_method != "chill":
+        raise ValueError("ice.method must be chill.")
+    ice["method"] = ice_method
+    ice["min_six_rings"] = positive_integer(ice.get("min_six_rings", 2), "ice.min_six_rings")
+    ice["require_four_coord_neighbors"] = parse_on_off(ice.get("require_four_coord_neighbors", True), "ice.require_four_coord_neighbors")
 
 
 def parse_on_off(value: Any, key: str) -> bool:
@@ -1632,6 +2195,58 @@ def parse_on_off(value: Any, key: str) -> bool:
     if text in {"off", "false", "no", "0", "", "none"}:
         return False
     raise ValueError(f"{key} must be on/off or true/false.")
+
+
+def finite_float(
+    value: Any,
+    key: str,
+    *,
+    positive: bool = False,
+    nonnegative: bool = False,
+) -> float:
+    """Normalize one finite floating-point configuration value."""
+    try:
+        number = float(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{key} must be a finite number.") from exc
+    if not math.isfinite(number):
+        raise ValueError(f"{key} must be finite.")
+    if positive and number <= 0:
+        raise ValueError(f"{key} must be positive.")
+    if nonnegative and number < 0:
+        raise ValueError(f"{key} must be non-negative.")
+    return number
+
+
+def positive_integer(value: Any, key: str) -> int:
+    """Normalize one strictly positive integer configuration value."""
+    if isinstance(value, bool):
+        raise ValueError(f"{key} must be a positive integer.")
+    try:
+        numeric = float(value)
+        number = int(numeric)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{key} must be a positive integer.") from exc
+    if not math.isfinite(numeric) or numeric != number or number < 1:
+        raise ValueError(f"{key} must be a positive integer.")
+    return number
+
+
+def string_list(value: Any, key: str, *, allow_empty: bool = False) -> list[str]:
+    """Normalize a comma-separated string or sequence of names."""
+    if value is None:
+        items = []
+    elif isinstance(value, str):
+        items = value.split(",")
+    else:
+        try:
+            items = list(value)
+        except TypeError as exc:
+            raise ValueError(f"{key} must be a list or comma-separated string.") from exc
+    names = [str(item).strip() for item in items if str(item).strip()]
+    if not names and not allow_empty:
+        raise ValueError(f"{key} must contain at least one name.")
+    return names
 
 
 def resolve_cage_report_types(
@@ -1692,10 +2307,13 @@ def analyze_frame(
     frame: Frame,
     config: dict[str, Any],
     stage_callback: Callable[[str], None] | None = None,
+    *,
+    normalize_config: bool = True,
 ) -> FrameResult:
     """Analyze one frame and return all topology objects for export."""
     report_stage(stage_callback, "resolving settings")
-    normalize_analysis_scopes(config)
+    if normalize_config:
+        normalize_analysis_scopes(config)
     ring_sizes = resolve_size_list(config["ring"]["sizes"], fallback=[], key="ring.sizes")
     ring_report_sizes = resolve_size_list(config["ring"].get("report_sizes", "auto"), fallback=ring_sizes, key="ring.report_sizes")
     quasi_base_sizes = resolve_size_list(config["quasi_cage"].get("base_sizes", "auto"), fallback=ring_sizes, key="quasi_cage.base_sizes")
@@ -1719,7 +2337,7 @@ def analyze_frame(
         center_atoms=config["guest"].get("center_atoms", {}),
         center_mode=str(config["guest"].get("center_mode", "center_atom")),
     )
-    # All structure classifiers consume the same water graph.
+    # All structure classifiers use this graph.
     report_stage(stage_callback, "building water graph")
     graph = build_water_graph(
         frame.atoms,
@@ -1798,7 +2416,7 @@ def analyze_frame(
         rings_by_id = ring_topology.ring_by_id
         ring_sizes_by_id = {ring_id: ring.size for ring_id, ring in rings_by_id.items()}
         hydrate_clusters, hydrate_motifs, hydrate_domains, isolated_cage_ids = analyze_hydrate_clusters(
-            cages,
+            all_cages,
             min_cage=int(config.get("hydrate_cluster", {}).get("min_cage", 2)),
             ring_sizes=ring_sizes_by_id,
             frame=frame,
@@ -1812,27 +2430,52 @@ def analyze_frame(
     half_cages = filter_free_patches(half_cages, all_cages, higher_priority_patches=quasi_cages)
     focus_resids = {int(item) for item in config["order"].get("focus_waters", [])}
     report_stage(stage_callback, "computing order parameters")
-    f3f4 = compute_order_parameters(
-        frame,
-        waters,
-        graph,
-        f3f4_enabled=bool(config["order"].get("f3f4_enabled", True)),
-        q_enabled=bool(config["order"].get("q_enabled", True)),
-        q_neighbor_mode=str(config["order"].get("q_neighbor_mode", "graph")),
-        q_cutoff_nm=float(config["order"].get("q_cutoff_nm", 0.35)),
-        q_n_neighbor=config["order"].get("q_n_neighbor", None),
-        q_degree=config["order"].get("q_degree", [6, 12]),
-        focus_resids=focus_resids,
+    order_parameters = normalize_order_parameters(
+        config.get("order", {}).get("parameters", ["f3", "f4"])
     )
-    hydrate_order_config = config.get("hydrate_order", {})
-    mcg1, mcg3 = compute_mcg_order(frame, waters, guests, hydrate_order_config)
-    dhop35, dhop30 = compute_dhop_order(frame, waters, hydrate_order_config)
-    hydrate_order = HydrateOrderResult(
-        mcg1=mcg1,
-        dhop35=dhop35,
-        mcg3=mcg3,
-        dhop30=dhop30,
-    )
+    selected_order_parameters = set(order_parameters)
+    q_degrees = q_degrees_from_order_parameters(order_parameters)
+    if selected_order_parameters & {"f3", "f4"} or q_degrees:
+        f3f4 = compute_order_parameters(
+            frame,
+            waters,
+            graph,
+            f3_enabled="f3" in selected_order_parameters,
+            f4_enabled="f4" in selected_order_parameters,
+            q_enabled=bool(q_degrees),
+            q_neighbor_mode=str(config["order"].get("q_neighbor_mode", "graph")),
+            q_cutoff_nm=float(config["order"].get("q_cutoff_nm", 0.35)),
+            q_n_neighbor=config["order"].get("q_n_neighbor", None),
+            q_degree=q_degrees,
+            focus_resids=focus_resids,
+        )
+    else:
+        f3f4 = None
+
+    hydrate_parameters = selected_order_parameters & {
+        "mcg1",
+        "mcg3",
+        "dhop35",
+        "dhop30",
+    }
+    if hydrate_parameters:
+        hydrate_order_config = {
+            **config.get("hydrate_order", {}),
+            "mcg1_enabled": "mcg1" in hydrate_parameters,
+            "mcg3_enabled": "mcg3" in hydrate_parameters,
+            "dhop35_enabled": "dhop35" in hydrate_parameters,
+            "dhop30_enabled": "dhop30" in hydrate_parameters,
+        }
+        mcg1, mcg3 = compute_mcg_order(frame, waters, guests, hydrate_order_config)
+        dhop35, dhop30 = compute_dhop_order(frame, waters, hydrate_order_config)
+        hydrate_order = HydrateOrderResult(
+            mcg1=mcg1,
+            dhop35=dhop35,
+            mcg3=mcg3,
+            dhop30=dhop30,
+        )
+    else:
+        hydrate_order = None
     report_stage(stage_callback, "classifying ice")
     ice_classes = classify_ice_waters(
         graph,
@@ -1842,7 +2485,7 @@ def analyze_frame(
         min_six_rings=int(config["ice"].get("min_six_rings", 2)),
         require_four_coord_neighbors=bool(config["ice"].get("require_four_coord_neighbors", True)),
     )
-    if not half_cages and not quasi_cages:
+    if bool(config["quasi_cage"].get("enabled", False)) and not half_cages and not quasi_cages:
         warnings.append("No half_cage or quasi_cage was found with the current layered patch criteria.")
     return FrameResult(
         frame=frame,

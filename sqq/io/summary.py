@@ -5,8 +5,11 @@ from __future__ import annotations
 from collections import Counter, defaultdict
 from copy import deepcopy
 from datetime import datetime
+import os
 from pathlib import Path
 import re
+import tempfile
+from time import perf_counter
 from typing import Any
 import unicodedata
 
@@ -16,11 +19,24 @@ from openpyxl.utils import get_column_letter
 
 from .. import __version__
 from ..banner import SQQ_BANNER
-from ..config import dump_config
+from ..config import (
+    disabled_output_display,
+    dump_config,
+    normalize_order_parameters,
+    order_parameter_display,
+    output_enabled,
+    q_degrees_from_order_parameters,
+)
 from ..core.cage import KNOWN_CAGE_TYPES, parse_cage_face_label
 from ..display import graph_mode_display
 from ..models import CagePatch, FrameResult
 from .occupancy import guest_composition_label, guest_lookup as build_guest_lookup, guest_resname_order as guest_resname_order_from_guests
+
+
+# Avoid per-cell formatting for very large sheets.
+FULL_TABLE_FORMAT_MAX_CELLS = 200_000
+FULL_TABLE_FORMAT_MAX_COLUMNS = 128
+LIGHTWEIGHT_TABLE_COLUMN_WIDTH = 16
 
 
 # Column order is stable so downstream plotting scripts can rely on it.
@@ -137,6 +153,7 @@ SUMMARY_COLUMNS = [
 ]
 
 SUMMARY_DETAIL_TABLE_NAMES = (
+    "failures",
     "cage_occupancy",
     "cage_isomer",
     "quasi_cage_isomer",
@@ -148,6 +165,9 @@ TREE_MIDDLE = "\u251c"
 TREE_LAST = "\u2514"
 TREE_PIPE = "\u2502"
 SUBSCRIPT_DIGIT_DELETE = dict.fromkeys(range(0x2080, 0x208A))
+QUASI_ISOMER_DETAIL_KEY = "_quasi_cage_isomer_detail"
+EXCEL_MAX_ROWS = 1_048_576
+EXCEL_MAX_COLUMNS = 16_384
 
 
 def result_row(result: FrameResult) -> dict[str, Any]:
@@ -182,6 +202,10 @@ def result_row(result: FrameResult) -> dict[str, Any]:
     used_ring_ids.update(ring_id for cage in filtering_cages for ring_id in cage.rings)
     half_cage_counts = patch_counts(result.half_cages)
     quasi_cage_counts = patch_counts(result.quasi_cages)
+    quasi_composition_counts: dict[str, int] = {}
+    for patch_type, count in quasi_cage_counts.items():
+        composition = patch_composition_label(patch_type)
+        quasi_composition_counts[composition] = quasi_composition_counts.get(composition, 0) + count
     cluster_details = hydrate_cluster_detail_records(result, guests_by_id, guest_order)
     domain_details = hydrate_domain_records(result, guests_by_id, guest_order)
     largest_cluster = max(result.hydrate_clusters, key=lambda cluster: cluster.cage_count, default=None)
@@ -283,6 +307,8 @@ def result_row(result: FrameResult) -> dict[str, Any]:
         "ice_like_waters": len(result.ice_like_waters),
         "ice_i_waters": len(result.ice_i_waters),
         "interfacial_ice_waters": len(result.interfacial_ice_waters),
+        # Keep exact quasi isomers out of the wide summary table.
+        QUASI_ISOMER_DETAIL_KEY: tuple(sorted(quasi_cage_counts.items())),
     }
     if f3f4 is not None:
         for degree in f3f4.q_degree:
@@ -308,8 +334,8 @@ def result_row(result: FrameResult) -> dict[str, Any]:
     row["guest_order"] = ";".join(guest_order)
     for patch_type, count in half_cage_counts.items():
         row[f"half_cage_{patch_type}"] = count
-    for patch_type, count in quasi_cage_counts.items():
-        row[f"quasi_cage_{patch_type}"] = count
+    for composition, count in quasi_composition_counts.items():
+        row[f"quasi_cage_{composition}"] = count
 
     cage_types = ordered_cage_types(cage_counts)
     for cage_type in cage_types:
@@ -427,7 +453,7 @@ def hydrate_cluster_detail_section(records: list[dict[str, Any]]) -> list[str]:
 
 def hydrate_cluster_hierarchy_section(result: FrameResult) -> list[str]:
     """Render cluster hierarchy as one aligned table per cluster."""
-    cage_by_id = {cage.object_id: cage for cage in result.cages}
+    cage_by_id = {cage.object_id: cage for cage in (result.all_cages or result.cages)}
     domains_by_cluster: dict[str, list[Any]] = defaultdict(list)
     for domain in result.hydrate_domains:
         domains_by_cluster[domain.cluster_id].append(domain)
@@ -645,7 +671,7 @@ def hydrate_boundary_info_section(result: FrameResult) -> list[str]:
     if not clusters:
         return section_table("Hydrate Boundary", ["item", "value"], [["boundary_cage_count", 0]])
     lines = ["", "## Hydrate Boundary", ""]
-    cage_by_id = {cage.object_id: cage for cage in result.cages}
+    cage_by_id = {cage.object_id: cage for cage in (result.all_cages or result.cages)}
     for cluster in clusters:
         unclassified_counts = Counter(
             cage_by_id[cage_id].cage_type for cage_id in cluster.unclassified_cage_ids if cage_id in cage_by_id
@@ -705,7 +731,7 @@ def hydrate_cluster_detail_records(
     """Return one plotting-friendly detail record per hydrate cluster."""
     if not result.hydrate_cluster_enabled:
         return []
-    cage_by_id = {cage.object_id: cage for cage in result.cages}
+    cage_by_id = {cage.object_id: cage for cage in (result.all_cages or result.cages)}
     records: list[dict[str, Any]] = []
     for cluster in result.hydrate_clusters:
         cluster_cages = [cage_by_id[cage_id] for cage_id in cluster.cage_ids if cage_id in cage_by_id]
@@ -753,7 +779,7 @@ def hydrate_domain_records(
     """Return one plotting-friendly record per hydrate domain."""
     if not result.hydrate_cluster_enabled:
         return []
-    cage_by_id = {cage.object_id: cage for cage in result.cages}
+    cage_by_id = {cage.object_id: cage for cage in (result.all_cages or result.cages)}
     records: list[dict[str, Any]] = []
     for domain in result.hydrate_domains:
         domain_cages = [cage_by_id[cage_id] for cage_id in domain.cage_ids if cage_id in cage_by_id]
@@ -788,7 +814,7 @@ def hydrate_motif_records(result: FrameResult) -> list[dict[str, Any]]:
     """Return one record per overlapping local topology motif."""
     if not result.hydrate_cluster_enabled:
         return []
-    cage_by_id = {cage.object_id: cage for cage in result.cages}
+    cage_by_id = {cage.object_id: cage for cage in (result.all_cages or result.cages)}
     records: list[dict[str, Any]] = []
     for motif in result.hydrate_motifs:
         member_cages = [cage_by_id[cage_id] for cage_id in motif.cage_ids if cage_id in cage_by_id]
@@ -868,10 +894,21 @@ def failed_row(frame_name: str, source: str, error: str) -> dict[str, Any]:
     return row
 
 
-def write_frame_info(result: FrameResult, frame_dir: Path, ring_sizes: list[int] | None = None, requested_bond_mode: Any | None = None) -> None:
+def write_frame_info(
+    result: FrameResult,
+    frame_dir: Path,
+    ring_sizes: list[int] | None = None,
+    requested_bond_mode: Any | None = None,
+    order_parameters: Any | None = None,
+) -> None:
     """Write the per-frame Markdown report with inspection-oriented tables."""
     frame_dir.mkdir(parents=True, exist_ok=True)
     row = result_row(result)
+    selected_order_parameters = selected_order_parameters_for_result(
+        result,
+        order_parameters,
+    )
+    selected_order_set = set(selected_order_parameters)
     cage_values = {cage.cage_type for cage in result.cages}
     cage_types = [cage_type for cage_type in ordered_cage_types(cage_values) if cage_type in cage_values]
     default_ring_sizes = result.ring_report_sizes or tuple(result.rings)
@@ -916,32 +953,56 @@ def write_frame_info(result: FrameResult, frame_dir: Path, ring_sizes: list[int]
     lines.extend(cage_occupancy_section(result, cage_types))
     lines.extend(hydrate_cluster_info_section(result, row))
 
+    has_focus = result.f3f4 is not None and bool(result.f3f4.focus_resids)
     order_headers = ["metric", "count", "mean"]
-    order_rows = [
-        ["F3", row["F3_count"], row["F3_mean"]],
-        ["F4", row["F4_count"], row["F4_mean"]],
-    ]
-    q_degree = result.f3f4.q_degree if result.f3f4 is not None else ()
-    for degree in q_degree:
-        prefix = f"q{degree}"
-        order_rows.append([f"Q{degree}", row.get(f"{prefix}_count"), row.get(f"{prefix}_mean")])
-    if result.f3f4 is not None and result.f3f4.focus_resids:
+    if has_focus:
         order_headers.extend(["focus_count", "focus_mean"])
-        order_rows[0].extend([row["F3_focus_count"], row["F3_focus_mean"]])
-        order_rows[1].extend([row["F4_focus_count"], row["F4_focus_mean"]])
-        for index, degree in enumerate(q_degree, start=2):
-            prefix = f"q{degree}"
-            order_rows[index].extend([row.get(f"{prefix}_focus_count"), row.get(f"{prefix}_focus_mean")])
+    order_rows: list[list[Any]] = []
+    for name, label, prefix in (
+        ("f3", "F3", "F3"),
+        ("f4", "F4", "F4"),
+    ):
+        if name not in selected_order_set:
+            continue
+        metric_row = [label, row.get(f"{prefix}_count"), row.get(f"{prefix}_mean")]
+        if has_focus:
+            metric_row.extend(
+                [
+                    row.get(f"{prefix}_focus_count"),
+                    row.get(f"{prefix}_focus_mean"),
+                ]
+            )
+        order_rows.append(metric_row)
+    for degree in q_degrees_from_order_parameters(selected_order_parameters):
+        prefix = f"q{degree}"
+        metric_row = [
+            f"Q{degree}",
+            row.get(f"{prefix}_count"),
+            row.get(f"{prefix}_mean"),
+        ]
+        if has_focus:
+            metric_row.extend(
+                [
+                    row.get(f"{prefix}_focus_count"),
+                    row.get(f"{prefix}_focus_mean"),
+                ]
+            )
+        order_rows.append(metric_row)
     lines.extend(section_table("Order Parameters", order_headers, order_rows))
 
     if result.hydrate_order is not None:
-        hydrate_order_rows = [
-            ["MCG-1", order_size_label(result.hydrate_order.mcg1.largest_cluster_size), result.hydrate_order.mcg1.member_type],
-            ["DHOP35", order_size_label(result.hydrate_order.dhop35.largest_cluster_size), result.hydrate_order.dhop35.member_type],
-        ]
-        if result.hydrate_order.mcg3 is not None:
+        hydrate_order_rows: list[list[Any]] = []
+        if "mcg1" in selected_order_set:
+            hydrate_order_rows.append(
+                ["MCG-1", order_size_label(result.hydrate_order.mcg1.largest_cluster_size), result.hydrate_order.mcg1.member_type]
+            )
+        if "mcg3" in selected_order_set and result.hydrate_order.mcg3 is not None:
             hydrate_order_rows.append(["MCG-3", order_size_label(result.hydrate_order.mcg3.largest_cluster_size), result.hydrate_order.mcg3.member_type])
-        if result.hydrate_order.dhop30 is not None:
+        if "dhop35" in selected_order_set:
+            hydrate_order_rows.append(
+                ["DHOP35", order_size_label(result.hydrate_order.dhop35.largest_cluster_size), result.hydrate_order.dhop35.member_type]
+            )
+        if "dhop30" in selected_order_set and result.hydrate_order.dhop30 is not None:
             hydrate_order_rows.append(["DHOP30", order_size_label(result.hydrate_order.dhop30.largest_cluster_size), result.hydrate_order.dhop30.member_type])
         lines.extend(
             section_table(
@@ -961,6 +1022,26 @@ def write_frame_info(result: FrameResult, frame_dir: Path, ring_sizes: list[int]
         lines.extend(["", "## Warnings", ""])
         lines.extend(f"- {warning}" for warning in result.warnings)
     (frame_dir / f"{result.frame.name}_info.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def selected_order_parameters_for_result(
+    result: FrameResult,
+    value: Any | None,
+) -> tuple[str, ...]:
+    """Resolve explicit output selection or infer legacy direct-call behavior."""
+    if value is not None:
+        return normalize_order_parameters(value)
+    inferred: list[str] = []
+    if result.f3f4 is not None:
+        inferred.extend(("f3", "f4"))
+        inferred.extend(f"q{degree}" for degree in result.f3f4.q_degree)
+    if result.hydrate_order is not None:
+        inferred.extend(("mcg1", "dhop35"))
+        if result.hydrate_order.mcg3 is not None:
+            inferred.append("mcg3")
+        if result.hydrate_order.dhop30 is not None:
+            inferred.append("dhop30")
+    return normalize_order_parameters(inferred or ["none"])
 
 
 def order_size_label(value: int | None) -> int | str:
@@ -1439,9 +1520,18 @@ def write_membership(result: FrameResult, frame_dir: Path) -> None:
     data.to_csv(frame_dir / f"{result.frame.name}_membership.tsv", sep="\t", index=False)
 
 
-def write_order_parameter(result: FrameResult, frame_dir: Path) -> None:
+def write_order_parameter(
+    result: FrameResult,
+    frame_dir: Path,
+    order_parameters: Any | None = None,
+) -> None:
     """Write per-water F3/F4/Q_l values for custom plotting or focus-water checks."""
-    if result.f3f4 is None:
+    path = frame_dir / f"{result.frame.name}_order_parameter.tsv"
+    selected = selected_order_parameters_for_result(result, order_parameters)
+    selected_set = set(selected)
+    q_degrees = q_degrees_from_order_parameters(selected)
+    if result.f3f4 is None or not (selected_set & {"f3", "f4"} or q_degrees):
+        path.unlink(missing_ok=True)
         return
     rows = []
     for item in result.f3f4.per_water:
@@ -1452,14 +1542,17 @@ def write_order_parameter(result: FrameResult, frame_dir: Path) -> None:
             "x_nm": item.xyz[0],
             "y_nm": item.xyz[1],
             "z_nm": item.xyz[2],
-            "F3": item.f3,
-            "F4": item.f4,
         }
-        for degree in result.f3f4.q_degree:
+        if "f3" in selected_set:
+            row["F3"] = item.f3
+        if "f4" in selected_set:
+            row["F4"] = item.f4
+        for degree in q_degrees:
             row[f"q{degree}"] = item.q_values.get(degree)
-        row["q_neighbors"] = item.q_neighbors
+        if q_degrees:
+            row["q_neighbors"] = item.q_neighbors
         rows.append(row)
-    pd.DataFrame(rows).to_csv(frame_dir / f"{result.frame.name}_order_parameter.tsv", sep="\t", index=False)
+    pd.DataFrame(rows).to_csv(path, sep="\t", index=False)
 
 
 def cage_center_name(cage_type: str) -> str:
@@ -1494,32 +1587,221 @@ def write_summary(
     config: dict[str, Any],
     write_xlsx: bool = True,
     run_info: dict[str, Any] | None = None,
-) -> None:
-    """Write global summaries, summary_detail CSV files, and the final run config."""
+) -> dict[str, Any]:
+    """Write global summaries and return deterministic output timing metadata."""
+    started = perf_counter()
     outdir.mkdir(parents=True, exist_ok=True)
+    metrics: dict[str, Any] = {
+        "dataframe_seconds": 0.0,
+        "run_config_initial_seconds": 0.0,
+        "detail_table_build_seconds": 0.0,
+        "detail_csv": {"enabled": False, "total_seconds": 0.0, "tables": []},
+        "xlsx": {"enabled": False, "total_seconds": 0.0, "sheets": []},
+    }
+
+    dataframe_started = perf_counter()
     columns = list(SUMMARY_COLUMNS)
     extra_columns = stable_extra_columns(rows, columns)
-    data = pd.DataFrame(rows, columns=columns + extra_columns)
+    public_rows = [
+        {key: value for key, value in row.items() if not str(key).startswith("_")}
+        for row in rows
+    ]
+    data = pd.DataFrame(public_rows, columns=columns + extra_columns)
+    metrics["dataframe_seconds"] = round(perf_counter() - dataframe_started, 6)
+
     summary_md = outdir / "summary.md"
     if summary_md.exists():
         summary_md.unlink()
-    config_for_dump = config_with_run_metadata(config, run_info or {})
-    with (outdir / "run_config.yaml").open("w", encoding="utf-8", newline="\n") as handle:
-        dump_config(config_for_dump, handle)
+
+    config_started = perf_counter()
+    config_for_dump = write_run_config(outdir, config, run_info or {})
+    metrics["run_config_initial_seconds"] = round(perf_counter() - config_started, 6)
 
     detail_index = pd.DataFrame()
-    if bool(config.get("output", {}).get("write_summary_detail_csv", True)):
-        detail_index = write_summary_detail_csvs(outdir, summary_detail_tables(data, config), config)
+    if output_enabled(config, "summary-detail"):
+        detail_build_started = perf_counter()
+        detail_tables = summary_detail_tables(data, config, raw_rows=rows)
+        metrics["detail_table_build_seconds"] = round(perf_counter() - detail_build_started, 6)
+        detail_index, detail_metrics = write_summary_detail_csvs(
+            outdir,
+            detail_tables,
+            config,
+            return_metrics=True,
+        )
+        metrics["detail_csv"] = detail_metrics
+    else:
+        remove_summary_detail_csvs(outdir, config)
 
-    if write_xlsx:
-        with pd.ExcelWriter(outdir / "summary.xlsx", engine="openpyxl") as writer:
-            summary_dashboard_table(data, run_info or {}, config).to_excel(writer, sheet_name="summary", index=False, header=False)
-            for sheet_name, table in summary_sheet_tables(data, config).items():
-                table.to_excel(writer, sheet_name=sheet_name, index=False)
+    summary_xlsx = outdir / "summary.xlsx"
+    if bool(write_xlsx) and output_enabled(config, "xlsx"):
+        xlsx_started = perf_counter()
+        xlsx_metrics: dict[str, Any] = {
+            "enabled": True,
+            "table_write_seconds": 0.0,
+            "format_seconds": 0.0,
+            "save_seconds": 0.0,
+            "total_seconds": 0.0,
+            "bytes": 0,
+            "sheets": [],
+        }
+        temp_path = temporary_output_path(summary_xlsx)
+        writer: pd.ExcelWriter | None = None
+        try:
+            writer = pd.ExcelWriter(temp_path, engine="openpyxl")
+            tables: list[tuple[str, pd.DataFrame, bool]] = [
+                ("summary", summary_dashboard_table(data, run_info or {}, config), False),
+            ]
+            tables.extend(
+                (sheet_name, table, True)
+                for sheet_name, table in summary_sheet_tables(data, config).items()
+            )
             if not detail_index.empty:
-                detail_index.to_excel(writer, sheet_name="detail_index", index=False)
-            pd.DataFrame(flatten_config(config_for_dump)).to_excel(writer, sheet_name="config", index=False)
-            format_summary_workbook(writer.book)
+                tables.append(("detail_index", detail_index, True))
+            tables.append(("config", pd.DataFrame(flatten_config(config_for_dump)), True))
+
+            for sheet_name, table, include_header in tables:
+                ensure_excel_table_size(table, sheet_name, include_header=include_header)
+                table_started = perf_counter()
+                table.to_excel(
+                    writer,
+                    sheet_name=sheet_name,
+                    index=False,
+                    header=include_header,
+                )
+                elapsed = perf_counter() - table_started
+                xlsx_metrics["table_write_seconds"] += elapsed
+                xlsx_metrics["sheets"].append(
+                    table_metric(
+                        sheet_name,
+                        table,
+                        write_seconds=elapsed,
+                    )
+                )
+
+            format_started = perf_counter()
+            format_metrics = format_summary_workbook(writer.book)
+            xlsx_metrics["format_seconds"] = perf_counter() - format_started
+            format_by_sheet = {item["sheet"]: item for item in format_metrics}
+            for item in xlsx_metrics["sheets"]:
+                item.update(format_by_sheet.get(item["sheet"], {}))
+
+            save_started = perf_counter()
+            writer.close()
+            writer = None
+            xlsx_metrics["save_seconds"] = perf_counter() - save_started
+            os.replace(temp_path, summary_xlsx)
+            xlsx_metrics["bytes"] = summary_xlsx.stat().st_size
+        except Exception:
+            if writer is not None:
+                try:
+                    writer.close()
+                except Exception:
+                    pass
+            raise
+        finally:
+            temp_path.unlink(missing_ok=True)
+        xlsx_metrics["table_write_seconds"] = round(xlsx_metrics["table_write_seconds"], 6)
+        xlsx_metrics["format_seconds"] = round(xlsx_metrics["format_seconds"], 6)
+        xlsx_metrics["save_seconds"] = round(xlsx_metrics["save_seconds"], 6)
+        xlsx_metrics["total_seconds"] = round(perf_counter() - xlsx_started, 6)
+        metrics["xlsx"] = xlsx_metrics
+    else:
+        summary_xlsx.unlink(missing_ok=True)
+
+    metrics["total_seconds"] = round(perf_counter() - started, 6)
+    return metrics
+
+
+def temporary_output_path(target: Path) -> Path:
+    """Create a same-directory temporary path suitable for atomic replacement."""
+    target.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, raw_path = tempfile.mkstemp(
+        prefix=f".{target.stem}.",
+        suffix=target.suffix,
+        dir=target.parent,
+    )
+    os.close(descriptor)
+    return Path(raw_path)
+
+
+def ensure_excel_table_size(
+    table: pd.DataFrame,
+    sheet_name: str,
+    *,
+    include_header: bool = True,
+) -> None:
+    """Fail early with a SQQ-specific message before pandas reaches Excel limits."""
+    rows = len(table) + int(include_header)
+    columns = len(table.columns)
+    if rows > EXCEL_MAX_ROWS or columns > EXCEL_MAX_COLUMNS:
+        raise ValueError(
+            f"Summary sheet {sheet_name!r} is too large for Excel "
+            f"({rows} rows x {columns} columns; limits are "
+            f"{EXCEL_MAX_ROWS} rows x {EXCEL_MAX_COLUMNS} columns). "
+            "Use the CSV files in summary_detail for high-cardinality detail data."
+        )
+
+
+def commit_output_bundle(
+    pending: list[tuple[Path, Path]],
+    removals: list[Path] | tuple[Path, ...] = (),
+) -> None:
+    """Replace a related output group together, restoring prior files on failure."""
+    targets = list(dict.fromkeys([target for _, target in pending] + list(removals)))
+    backups: dict[Path, Path] = {}
+    committed: list[Path] = []
+    try:
+        for target in targets:
+            if not target.exists():
+                continue
+            backup = temporary_output_path(target)
+            backup.unlink(missing_ok=True)
+            os.replace(target, backup)
+            backups[target] = backup
+        for temp_path, target in pending:
+            os.replace(temp_path, target)
+            committed.append(target)
+    except Exception:
+        for target in committed:
+            target.unlink(missing_ok=True)
+        for target, backup in backups.items():
+            if backup.exists():
+                os.replace(backup, target)
+        raise
+    finally:
+        for backup in backups.values():
+            backup.unlink(missing_ok=True)
+
+
+def table_metric(sheet_name: str, table: pd.DataFrame, *, write_seconds: float = 0.0) -> dict[str, Any]:
+    """Return compact, YAML-safe size and write metadata for one output table."""
+    rows, columns = table.shape
+    return {
+        "sheet": sheet_name,
+        "rows": int(rows),
+        "columns": int(columns),
+        "cells": int(rows * columns),
+        "write_seconds": round(float(write_seconds), 6),
+    }
+
+
+def write_run_config(
+    outdir: Path,
+    config: dict[str, Any],
+    run_info: dict[str, Any],
+) -> dict[str, Any]:
+    """Atomically write mandatory run metadata and return the dumped mapping."""
+    outdir.mkdir(parents=True, exist_ok=True)
+    config_for_dump = config_with_run_metadata(config, run_info)
+    target = outdir / "run_config.yaml"
+    temp_path = temporary_output_path(target)
+    try:
+        with temp_path.open("w", encoding="utf-8", newline="\n") as handle:
+            dump_config(config_for_dump, handle)
+        os.replace(temp_path, target)
+    finally:
+        temp_path.unlink(missing_ok=True)
+    return config_for_dump
 
 
 def config_with_run_metadata(config: dict[str, Any], run_info: dict[str, Any]) -> dict[str, Any]:
@@ -1531,46 +1813,108 @@ def config_with_run_metadata(config: dict[str, Any], run_info: dict[str, Any]) -
     parallel = config.get("parallel", {})
     run.update({
         "sqq_version": run_info.get("sqq_version", __version__),
+        "status": run_info.get("status", ""),
+        "error": run_info.get("error", ""),
         "graph_mode_requested": run_info.get("graph_mode", config.get("graph", {}).get("bond_mode", "")),
         "graph_mode_effective": run_info.get("effective_graph_modes", ""),
         "graph_mode_display": run_info.get("graph_mode_display", ""),
+        "order_parameters": run_info.get(
+            "order_parameters",
+            order_parameter_display(config.get("order", {}).get("parameters")),
+        ),
+        "disabled_outputs": run_info.get(
+            "disabled_outputs",
+            disabled_output_display(
+                config.get("output", {}).get("disabled_outputs")
+            ),
+        ),
+        "frames_total": run_info.get("frames_total", ""),
+        "frames_ok": run_info.get("frames_ok", ""),
+        "frames_failed": run_info.get("frames_failed", ""),
+        "failures": run_info.get("failures", []),
         "worker_request": parallel.get("workers", "auto"),
         "worker_policy": run_info.get("worker_policy", ""),
         "workers_resolved": run_info.get("workers", ""),
         "parallel_backend": run_info.get("parallel_backend", "serial"),
         "math_threads_per_worker": run_info.get("math_threads", 1),
+        "summary_write": run_info.get("summary_write", {}),
     })
     return enriched
 
 
-def write_summary_detail_csvs(outdir: Path, tables: dict[str, pd.DataFrame], config: dict[str, Any]) -> pd.DataFrame:
-    """Write large multi-row detail tables as CSV files and return a workbook index."""
+def write_summary_detail_csvs(
+    outdir: Path,
+    tables: dict[str, pd.DataFrame],
+    config: dict[str, Any],
+    *,
+    return_metrics: bool = False,
+) -> pd.DataFrame | tuple[pd.DataFrame, dict[str, Any]]:
+    """Atomically write detail CSVs and optionally return their timing metadata."""
+    started = perf_counter()
     detail_dir_name = str(config.get("output", {}).get("summary_detail_dir", "summary_detail")).strip() or "summary_detail"
     detail_dir = outdir / detail_dir_name
     detail_dir.mkdir(parents=True, exist_ok=True)
-    for name in SUMMARY_DETAIL_TABLE_NAMES:
-        stale = detail_dir / f"{name}.csv"
-        if stale.exists():
-            stale.unlink()
-
     rows: list[dict[str, Any]] = []
-    for name in SUMMARY_DETAIL_TABLE_NAMES:
-        table = tables.get(name)
-        if table is None:
-            continue
-        path = detail_dir / f"{name}.csv"
-        table.to_csv(path, index=False, encoding="utf-8-sig")
-        relative_dir = detail_dir_name.rstrip("/\\")
-        relative_file = f"{relative_dir}/{name}.csv".replace("\\", "/")
-        rows.append(
-            {
-                "table": name,
-                "file": relative_file,
-                "rows": len(table),
-                "columns": len(table.columns),
-            }
-        )
-    return pd.DataFrame(rows, columns=["table", "file", "rows", "columns"])
+    metrics: dict[str, Any] = {"enabled": True, "total_seconds": 0.0, "tables": []}
+    pending: list[tuple[Path, Path]] = []
+    written_names: set[str] = set()
+    try:
+        for name in SUMMARY_DETAIL_TABLE_NAMES:
+            table = tables.get(name)
+            if table is None:
+                continue
+            path = detail_dir / f"{name}.csv"
+            temp_path = temporary_output_path(path)
+            write_started = perf_counter()
+            table.to_csv(temp_path, index=False, encoding="utf-8-sig")
+            elapsed = perf_counter() - write_started
+            pending.append((temp_path, path))
+            written_names.add(name)
+            relative_dir = detail_dir_name.rstrip("/\\")
+            relative_file = f"{relative_dir}/{name}.csv".replace("\\", "/")
+            rows.append(
+                {
+                    "table": name,
+                    "file": relative_file,
+                    "rows": len(table),
+                    "columns": len(table.columns),
+                }
+            )
+            metric = table_metric(name, table, write_seconds=elapsed)
+            metric["bytes"] = temp_path.stat().st_size
+            metrics["tables"].append(metric)
+        stale_paths = [
+            detail_dir / f"{name}.csv"
+            for name in SUMMARY_DETAIL_TABLE_NAMES
+            if name not in written_names
+        ]
+        commit_output_bundle(pending, stale_paths)
+    finally:
+        for temp_path, _ in pending:
+            temp_path.unlink(missing_ok=True)
+    metrics["total_seconds"] = round(perf_counter() - started, 6)
+    detail_index = pd.DataFrame(rows, columns=["table", "file", "rows", "columns"])
+    if return_metrics:
+        return detail_index, metrics
+    return detail_index
+
+
+def remove_summary_detail_csvs(outdir: Path, config: dict[str, Any]) -> None:
+    """Remove known stale detail CSVs when summary-detail output is disabled."""
+    detail_dir_name = str(
+        config.get("output", {}).get("summary_detail_dir", "summary_detail")
+    ).strip() or "summary_detail"
+    detail_dir = outdir / detail_dir_name
+    if not detail_dir.exists():
+        return
+    commit_output_bundle(
+        [],
+        [detail_dir / f"{name}.csv" for name in SUMMARY_DETAIL_TABLE_NAMES],
+    )
+    try:
+        detail_dir.rmdir()
+    except OSError:
+        pass
 
 
 def summary_dashboard_table(data: pd.DataFrame, run_info: dict[str, Any], config: dict[str, Any]) -> pd.DataFrame:
@@ -1587,6 +1931,11 @@ def summary_dashboard_table(data: pd.DataFrame, run_info: dict[str, Any], config
         run_info.get("graph_mode", config.get("graph", {}).get("bond_mode", "auto")),
         data.get("connection_mode", []),
     )
+    selected_order_parameters = normalize_order_parameters(
+        config.get("order", {}).get("parameters", ["f3", "f4"])
+    )
+    selected_order_set = set(selected_order_parameters)
+    q_degrees = q_degrees_from_order_parameters(selected_order_parameters)
 
     rows: list[list[Any]] = [
         [title, ""],
@@ -1632,13 +1981,34 @@ def summary_dashboard_table(data: pd.DataFrame, run_info: dict[str, Any], config
         ["Hydrate cluster", "on" if config.get("hydrate_cluster", {}).get("enabled", False) else "off"],
         ["Cluster min cage", config.get("hydrate_cluster", {}).get("min_cage", 2)],
         ["Cluster detail", "on" if config.get("hydrate_cluster", {}).get("detail", False) else "off"],
-        ["Hydrate order", run_info.get("hydrate_order", "")],
-        ["MCG guest / water cutoff (nm)", f"{config.get('hydrate_order', {}).get('mcg_guest_cutoff_nm', 0.90)} / {config.get('hydrate_order', {}).get('mcg_water_cutoff_nm', 0.60)}"],
-        ["DHOP O-O cutoff (nm)", config.get("hydrate_order", {}).get("dhop_neighbor_cutoff_nm", 0.35)],
-        ["Q_l degree", excel_scalar(config.get("order", {}).get("q_degree", [6, 12]))],
-        ["Q_l neighbor mode", config.get("order", {}).get("q_neighbor_mode", "graph")],
-        ["Q_l cutoff (nm)", config.get("order", {}).get("q_cutoff_nm", 0.35)],
-        ["Q_l n neighbor", config.get("order", {}).get("q_n_neighbor", "NULL")],
+        ["Order parameters", order_parameter_display(selected_order_parameters)],
+    ])
+    if selected_order_set & {"mcg1", "mcg3"}:
+        rows.append([
+            "MCG guest / water cutoff (nm)",
+            f"{config.get('hydrate_order', {}).get('mcg_guest_cutoff_nm', 0.90)} / "
+            f"{config.get('hydrate_order', {}).get('mcg_water_cutoff_nm', 0.60)}",
+        ])
+    if selected_order_set & {"dhop35", "dhop30"}:
+        rows.append([
+            "DHOP O-O cutoff (nm)",
+            config.get("hydrate_order", {}).get("dhop_neighbor_cutoff_nm", 0.35),
+        ])
+    if q_degrees:
+        rows.extend([
+            ["Q_l degree", excel_scalar(q_degrees)],
+            ["Q_l neighbor mode", config.get("order", {}).get("q_neighbor_mode", "graph")],
+            ["Q_l cutoff (nm)", config.get("order", {}).get("q_cutoff_nm", 0.35)],
+            ["Q_l n neighbor", config.get("order", {}).get("q_n_neighbor", "NULL")],
+        ])
+    rows.extend([
+        [
+            "Disabled outputs",
+            run_info.get("disabled_outputs")
+            or disabled_output_display(
+                config.get("output", {}).get("disabled_outputs")
+            ),
+        ],
         ["Output layout", run_info.get("output_layout", "")],
         ["Worker policy", run_info.get("worker_policy", "")],
         ["Parallel backend", run_info.get("parallel_backend", "serial")],
@@ -1751,14 +2121,28 @@ def dashboard_cage_targets(config: dict[str, Any]) -> str:
         raw_targets = [str(item) for item in targets or []]
     return ", ".join(cage_display_label(target) for target in raw_targets)
 
-def format_summary_workbook(workbook) -> None:
-    """Apply readable formatting to the generated summary workbook."""
+def format_summary_workbook(workbook) -> list[dict[str, Any]]:
+    """Apply formatting and return per-sheet timing and size information."""
+    metrics: list[dict[str, Any]] = []
     for worksheet in workbook.worksheets:
+        started = perf_counter()
         worksheet.sheet_view.showGridLines = False
         if worksheet.title == "summary":
             format_summary_dashboard_sheet(worksheet)
+            format_mode = "dashboard"
         else:
-            format_table_sheet(worksheet)
+            format_mode = format_table_sheet(worksheet)
+        metrics.append(
+            {
+                "sheet": worksheet.title,
+                "rows": int(worksheet.max_row),
+                "columns": int(worksheet.max_column),
+                "cells": int(worksheet.max_row * worksheet.max_column),
+                "format_mode": format_mode,
+                "format_seconds": round(perf_counter() - started, 6),
+            }
+        )
+    return metrics
 
 
 def format_summary_dashboard_sheet(worksheet) -> None:
@@ -1810,20 +2194,36 @@ def format_summary_dashboard_sheet(worksheet) -> None:
                 row[1].alignment = Alignment(horizontal="left", vertical="top", wrap_text=True)
 
 
-def format_table_sheet(worksheet) -> None:
-    """Style plotting-friendly data sheets without changing their data shape."""
-    if worksheet.max_row < 1 or worksheet.max_column < 1:
-        return
+def format_table_header(worksheet) -> None:
+    """Apply the shared data-sheet header style."""
     header_fill = PatternFill("solid", fgColor="1E3A8A")
     header_font = Font(color="FFFFFF", bold=True)
     thin_border = Border(bottom=Side(style="thin", color="CBD5E1"))
-    worksheet.freeze_panes = "A2"
-    worksheet.auto_filter.ref = worksheet.dimensions
     for cell in worksheet[1]:
         cell.fill = header_fill
         cell.font = header_font
         cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
         cell.border = thin_border
+
+
+def format_table_sheet(worksheet) -> str:
+    """Style a data sheet, using lightweight formatting for very large tables."""
+    if worksheet.max_row < 1 or worksheet.max_column < 1:
+        return "empty"
+    worksheet.freeze_panes = "A2"
+    worksheet.auto_filter.ref = worksheet.dimensions
+    format_table_header(worksheet)
+    cells = worksheet.max_row * worksheet.max_column
+    if cells > FULL_TABLE_FORMAT_MAX_CELLS or worksheet.max_column > FULL_TABLE_FORMAT_MAX_COLUMNS:
+        for column_index, cell in enumerate(worksheet[1], start=1):
+            letter = get_column_letter(column_index)
+            header_width = len(str(cell.value or "")) + 2
+            worksheet.column_dimensions[letter].width = min(
+                max(10, header_width),
+                LIGHTWEIGHT_TABLE_COLUMN_WIDTH,
+            )
+        return "lightweight"
+
     for column_index in range(1, worksheet.max_column + 1):
         letter = get_column_letter(column_index)
         width = estimated_column_width(worksheet, column_index)
@@ -1841,6 +2241,7 @@ def format_table_sheet(worksheet) -> None:
                 vertical="center",
                 wrap_text=cell.column not in no_wrap_columns,
             )
+    return "full"
 
 
 def estimated_column_width(worksheet, column_index: int) -> int:
@@ -1860,6 +2261,8 @@ def stable_extra_columns(rows: list[dict[str, Any]], base_columns: list[str]) ->
     extras: list[str] = []
     for row in rows:
         for key in row:
+            if str(key).startswith("_"):
+                continue
             if key in seen:
                 continue
             seen.add(key)
@@ -1894,6 +2297,7 @@ def summary_markdown_tables(data: pd.DataFrame) -> list[tuple[str, pd.DataFrame]
         "pair_connection_count",
     ]
     tables: list[tuple[str, pd.DataFrame]] = [
+        ("Failures", failure_summary_table(data)),
         ("Frames", summary_simple_table(data, frame_columns)),
         ("Molecules", molecule_summary_table(data)),
         ("Rings", summary_simple_table(data, ["frame", "time_ps", "ring4", "ring5", "ring6", "ring7", "free_ring4", "free_ring5", "free_ring6", "free_ring7"])),
@@ -1919,26 +2323,52 @@ def summary_sheet_tables(data: pd.DataFrame, config: dict[str, Any]) -> dict[str
     for size in ring_sizes:
         ring_columns.extend([f"ring{size}", f"free_ring{size}"])
     tables: dict[str, pd.DataFrame] = {
-        "frame": frame_summary_table(data, ring_sizes),
+        "failures": failure_summary_table(data),
         connection_sheet_name(data): connection_summary_table(data),
         "ring": summary_simple_table(data, ring_columns),
         "half_cage": patch_summary_table(data, "half_cage"),
         "quasi_cage": patch_summary_table(data, "quasi_cage"),
         "cage": cage_summary_table(data),
         "hydrate_cluster": hydrate_cluster_summary_table(data),
-        "order_parameter": order_parameter_summary_table(data),
+        "order_parameter": order_parameter_summary_table(
+            data,
+            config.get("order", {}).get("parameters", ["f3", "f4"]),
+            include_focus=bool(config.get("order", {}).get("focus_waters", [])),
+        ),
         "ice": summary_simple_table(data, ["frame", "time_ps", "ice_like_waters", "ice_i_waters", "interfacial_ice_waters"]),
     }
     return {name: table for name, table in tables.items() if not table.empty}
 
 
-def summary_detail_tables(data: pd.DataFrame, config: dict[str, Any]) -> dict[str, pd.DataFrame]:
+def failure_summary_table(data: pd.DataFrame) -> pd.DataFrame:
+    """Return one diagnostic row per failed input frame."""
+    if "status" not in data.columns:
+        return pd.DataFrame()
+    columns = [
+        column
+        for column in ("frame", "time_ps", "source", "status", "error")
+        if column in data.columns
+    ]
+    failed = data.loc[
+        data["status"].astype(str).str.lower().eq("failed"),
+        columns,
+    ]
+    return failed.reset_index(drop=True)
+
+
+def summary_detail_tables(
+    data: pd.DataFrame,
+    config: dict[str, Any],
+    *,
+    raw_rows: list[dict[str, Any]] | None = None,
+) -> dict[str, pd.DataFrame]:
     """Build potentially large multi-row detail tables for summary_detail CSV output."""
     include_zero_isomers = str(config.get("output", {}).get("cage_isomer_rows", "nonzero")).lower() == "all"
     tables: dict[str, pd.DataFrame] = {
+        "failures": failure_summary_table(data),
         "cage_occupancy": cage_occupancy_summary_table(data, markdown_style=False),
         "cage_isomer": cage_isomer_summary_table(data, include_zero_rows=include_zero_isomers),
-        "quasi_cage_isomer": quasi_cage_isomer_summary_table(data),
+        "quasi_cage_isomer": quasi_cage_isomer_summary_table(data, raw_rows=raw_rows),
         "hydrate_domain": hydrate_domain_table(data),
     }
     detail_enabled = bool(config.get("hydrate_cluster", {}).get("detail", False))
@@ -1950,52 +2380,6 @@ def summary_detail_tables(data: pd.DataFrame, config: dict[str, Any]) -> dict[st
         if detail_enabled:
             keep_empty.add("hydrate_cluster_detail")
     return {name: table for name, table in tables.items() if not table.empty or name in keep_empty}
-
-def frame_summary_table(data: pd.DataFrame, ring_sizes: list[int]) -> pd.DataFrame:
-    """Build the main per-frame table using the active report scopes."""
-    columns = [
-        "frame",
-        "time_ps",
-        "source",
-        "status",
-        "error",
-        "n_atoms",
-        "n_waters",
-        "n_guests",
-    ]
-    for size in ring_sizes:
-        columns.extend([f"ring{size}", f"free_ring{size}"])
-    columns.extend(["half_cage_total", "quasi_cage_total"])
-    columns.extend(f"cage_{cage_type}" for cage_type in summary_cage_types_from_data(data))
-    columns.extend([
-        "cage_total",
-        "cage_empty",
-        "cage_occupied",
-    ])
-    if hydrate_cluster_is_enabled(data):
-        columns.extend([
-            "hydrate_cluster_count",
-            "hydrate_domain_count",
-            "boundary_cage_count",
-            "transition_cage_count",
-            "isolated_cage_count",
-            "largest_cluster_cage_count",
-            "largest_cluster_water_count",
-        ])
-    columns.extend([
-        "F3_mean",
-        "F3_count",
-        "F4_mean",
-        "F4_count",
-    ])
-    for degree in q_degree_from_data(data):
-        columns.extend([f"q{degree}_mean", f"q{degree}_count"])
-    columns.extend([
-        "ice_like_waters",
-        "ice_i_waters",
-        "interfacial_ice_waters",
-    ])
-    return summary_simple_table(data, columns)
 
 
 def hydrate_cluster_summary_table(data: pd.DataFrame) -> pd.DataFrame:
@@ -2152,38 +2536,63 @@ def summary_simple_table(data: pd.DataFrame, columns: list[str]) -> pd.DataFrame
     return data.loc[:, existing].copy() if existing else pd.DataFrame()
 
 
-def order_parameter_summary_table(data: pd.DataFrame) -> pd.DataFrame:
+def order_parameter_summary_table(
+    data: pd.DataFrame,
+    parameters: Any | None = None,
+    *,
+    include_focus: bool | None = None,
+) -> pd.DataFrame:
     """Build the per-frame F3/F4/Q_l and hydrate order-parameter table."""
-    columns = [
-        "frame",
-        "time_ps",
-        "F3_mean",
-        "F3_count",
-        "F4_mean",
-        "F4_count",
-        "MCG1_largest_cluster",
-        "DHOP35_largest_cluster",
-    ]
-    optional_columns = (
-        ("MCG3_largest_cluster", "MCG3_enabled"),
-        ("DHOP30_largest_cluster", "DHOP30_enabled"),
+    selected = (
+        normalize_order_parameters(parameters)
+        if parameters is not None
+        else infer_order_parameters_from_data(data)
     )
-    for optional, enabled_flag in optional_columns:
-        enabled = enabled_flag in data.columns and data[enabled_flag].fillna(False).astype(bool).any()
-        has_value = optional in data.columns and not data[optional].replace("", pd.NA).isna().all()
-        if enabled or has_value:
-            columns.append(optional)
-    for degree in q_degree_from_data(data):
-        columns.extend([f"q{degree}_mean", f"q{degree}_count"])
-    columns.extend([
-        "F3_focus_mean",
-        "F3_focus_count",
-        "F4_focus_mean",
-        "F4_focus_count",
-    ])
-    for degree in q_degree_from_data(data):
-        columns.extend([f"q{degree}_focus_mean", f"q{degree}_focus_count"])
-    table = summary_simple_table(data, columns)
+    if not selected:
+        return pd.DataFrame()
+    if include_focus is None:
+        focus_count_columns = [
+            column
+            for column in data.columns
+            if str(column).endswith("_focus_count")
+        ]
+        include_focus = any(
+            bool((pd.to_numeric(data[column], errors="coerce").fillna(0) > 0).any())
+            for column in focus_count_columns
+        )
+    columns = ["frame", "time_ps"]
+    for name in selected:
+        if name == "f3":
+            columns.extend(["F3_mean", "F3_count"])
+        elif name == "f4":
+            columns.extend(["F4_mean", "F4_count"])
+        elif name.startswith("q"):
+            columns.extend([f"{name}_mean", f"{name}_count"])
+        elif name == "mcg1":
+            columns.append("MCG1_largest_cluster")
+        elif name == "mcg3":
+            columns.append("MCG3_largest_cluster")
+        elif name == "dhop35":
+            columns.append("DHOP35_largest_cluster")
+        elif name == "dhop30":
+            columns.append("DHOP30_largest_cluster")
+    if include_focus:
+        for name in selected:
+            if name == "f3":
+                columns.extend(["F3_focus_mean", "F3_focus_count"])
+            elif name == "f4":
+                columns.extend(["F4_focus_mean", "F4_focus_count"])
+            elif name.startswith("q"):
+                columns.extend([f"{name}_focus_mean", f"{name}_focus_count"])
+    table = data.reindex(columns=columns).copy()
+    for column in (
+        "MCG1_largest_cluster",
+        "MCG3_largest_cluster",
+        "DHOP35_largest_cluster",
+        "DHOP30_largest_cluster",
+    ):
+        if column in table:
+            table[column] = table[column].where(table[column].notna(), "N/A")
     return table.rename(
         columns={
             "MCG1_largest_cluster": "MCG-1",
@@ -2192,6 +2601,24 @@ def order_parameter_summary_table(data: pd.DataFrame) -> pd.DataFrame:
             "DHOP30_largest_cluster": "DHOP30",
         }
     )
+
+
+def infer_order_parameters_from_data(data: pd.DataFrame) -> tuple[str, ...]:
+    """Infer legacy table selection when a caller does not provide config."""
+    inferred: list[str] = []
+    for name, count_column in (("f3", "F3_count"), ("f4", "F4_count")):
+        if count_column in data and not data[count_column].replace("", pd.NA).isna().all():
+            inferred.append(name)
+    inferred.extend(f"q{degree}" for degree in q_degree_from_data(data))
+    for name, column in (
+        ("mcg1", "MCG1_largest_cluster"),
+        ("mcg3", "MCG3_largest_cluster"),
+        ("dhop35", "DHOP35_largest_cluster"),
+        ("dhop30", "DHOP30_largest_cluster"),
+    ):
+        if column in data and not data[column].replace("", pd.NA).isna().all():
+            inferred.append(name)
+    return normalize_order_parameters(inferred or ["none"])
 
 
 def q_degree_from_data(data: pd.DataFrame) -> list[int]:
@@ -2427,18 +2854,37 @@ def global_cage_isomer_labels(data: pd.DataFrame, cage_types: list[str]) -> list
     return labels
 
 
-def quasi_cage_isomer_summary_table(data: pd.DataFrame) -> pd.DataFrame:
+def quasi_cage_isomer_summary_table(
+    data: pd.DataFrame,
+    *,
+    raw_rows: list[dict[str, Any]] | None = None,
+) -> pd.DataFrame:
     """Build long-form quasi-cage isomer rows for CSV detail output."""
+    output_columns = ["frame", "time_ps", "quasi_cage_type", "isomer", "count"]
+    rows: list[dict[str, Any]] = []
+    if raw_rows is not None:
+        for record in raw_rows:
+            details = record.get(QUASI_ISOMER_DETAIL_KEY, ())
+            for isomer, count in details:
+                count = count_cell(count)
+                if count:
+                    rows.append(
+                        {
+                            "frame": record.get("frame", ""),
+                            "time_ps": record.get("time_ps", ""),
+                            "quasi_cage_type": patch_composition_label(isomer),
+                            "isomer": patch_display_label(isomer),
+                            "count": count,
+                        }
+                    )
+        return pd.DataFrame(rows, columns=output_columns)
+
+    # Support legacy wide-row callers.
     columns = [
         column
         for column in data.columns
         if column.startswith("quasi_cage_") and column not in {"quasi_cage_total", "quasi_cage_breakdown"}
     ]
-    output_columns = ["frame", "time_ps", "quasi_cage_type", "isomer", "count"]
-    if not columns:
-        return pd.DataFrame(columns=output_columns)
-
-    rows: list[dict[str, Any]] = []
     for _, record in data.iterrows():
         for column in sorted(columns):
             count = count_cell(record.get(column, 0))

@@ -13,6 +13,5 @@ SQQ_BANNER = """
 
 HELP_BANNER = f"""
 {SQQ_BANNER}
-
 SQQ (Shell Qualification Quantifier): Python Joint Toolkit for Water-Shell Topology Analysis.
 """.strip()

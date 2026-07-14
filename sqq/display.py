@@ -28,16 +28,13 @@ def ordered_unique_graph_modes(values: Iterable[Any]) -> list[str]:
 
 
 def graph_mode_display(requested: Any, effective_modes: Iterable[Any] | None = None) -> str:
-    """Format requested/effective graph mode consistently across run outputs.
-
-    Explicit requested modes display as their compact identifiers. Auto mode displays
-    the resolved effective mode when available, or a mixed marker when frames resolve
-    differently.
-    """
+    """Format requested and effective graph modes for reports."""
     requested_mode = clean_graph_mode(requested) or "auto"
     if requested_mode != "auto":
         return requested_mode
-    modes = ordered_unique_graph_modes(effective_modes or [])
+    modes = ordered_unique_graph_modes(
+        [] if effective_modes is None else effective_modes
+    )
     if len(modes) == 1:
         return f"auto -> {modes[0]}"
     if len(modes) > 1:
