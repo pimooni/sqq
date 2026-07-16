@@ -197,7 +197,7 @@ class HydrateCluster:
 
     @property
     def boundary_cage_count(self) -> int:
-        """Number of transition, unclassified, or ambiguous cages."""
+        """Number of unique cages in the shared-face boundary layer."""
         return len(self.boundary_cage_ids)
 
 

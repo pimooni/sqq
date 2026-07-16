@@ -2,6 +2,83 @@
 
 This file records versioned update notes. New releases should be appended above older entries.
 
+## Version 0.2.8
+
+### Short Summary
+
+Version 0.2.8 separates hydrate phase identity from boundary membership. The first complete cage layer on both sides of a shared-face phase interface can now retain sI, sII, or sH identity while also being recorded as boundary. Boundary propagation stops after one cage-graph step, and summary output distinguishes unique boundary totals, phase-classified boundary cages, unclassified/ambiguous boundary cages, and all single-, two-, and three-phase interface contexts. This release also adds mode `09`, makes cluster-search defaults part of the four mode presets, replaces `--hydrate-cluster` with `--find-cluster`, and replaces negative output suppression with positive `--output-type` selection. The removed CLI and YAML output selectors have no compatibility aliases or migration. Ring, patch, cage, occupancy, order-parameter, and ice definitions are unchanged; hydrate boundary membership and related reports intentionally change from 0.2.7.
+
+### Main Changes
+
+1. Independent phase and boundary properties
+   - Removed the rule that skipped every phase-domain cage during boundary resolution.
+   - Removed the definition `boundary = component - classified`.
+   - `classified_cage_ids` and `boundary_cage_ids` may now overlap, while each tuple remains internally unique.
+   - Cluster `cage_count` continues to count unique cage ids and is not calculated by adding phase and boundary counts.
+
+2. One-layer shared-face boundary
+   - A direct shared-face contact between different phase domains marks the complete cage on both sides.
+   - A non-domain cage that directly contacts a phase domain and every directly contacted domain cage enter the same boundary layer.
+   - Contacted domain phases and retained phase claims produce stable labels in sI, sII, sH order.
+   - Supported interface contexts are `sI`, `sII`, `sH`, `sI+sII`, `sI+sH`, `sII+sH`, and `sI+sII+sH`.
+   - Expansion stops after the directly contacted cage layer; deeper unclassified cages are not treated as boundary automatically.
+
+3. Domain and cluster semantics
+   - Phase domains remain exclusive and use the established strict-seed and compatible-expansion logic.
+   - `HydrateDomain.boundary_cage_ids` records external boundary contacts rather than boundary members inside that domain.
+   - `transition_cage_ids` is the subset of boundary cages whose interface context contains more than one phase.
+   - Non-domain cages retain unclassified or ambiguous phase status independently of boundary membership.
+
+4. Workbook and cluster-detail reporting
+   - Added classified, unclassified, and ambiguous boundary counts alongside the unique boundary total.
+   - Phase-specific boundary counts now measure boundary cages that retain sI, sII, or sH domain identity.
+   - Added `sI_boundary_context_cage_count`, `sII_boundary_context_cage_count`, and `sH_boundary_context_cage_count`; existing multi-phase count columns measure the corresponding multi-phase interface context.
+   - Cluster detail records add `boundary_phase_counts` and the phase-specific/unclassified/ambiguous boundary breakdown.
+   - Boundary totals remain unique even when a cage retains a phase identity and also belongs to the boundary.
+
+5. Four analysis modes
+   - Added mode `09`: `hbond`, 4/5/6-ring search, 90% automatic worker fraction, and cluster search on.
+   - Mode `00` remains `hbond`, 4/5/6 rings, and 25% workers, and now defaults cluster search to on.
+   - Modes `50` and `99` default cluster search to off. Their graph/ring/worker presets remain `auto`, 5/6, 50% and `oo`, 5/6, 90%, respectively.
+   - Mode `50` remains the command default, so an unqualified run has cluster search off.
+
+6. Unified cluster search
+   - Replaced `--hydrate-cluster on/off` with `--find-cluster on/off`.
+   - Explicit `--find-cluster` overrides `hydrate_cluster.enabled` from the configuration and the selected mode.
+   - Enabling cluster search forces `xlsx` into the effective output set and guarantees the per-frame `hydrate_cluster` sheet in `summary.xlsx`.
+   - Cluster, domain, and boundary data is no longer copied into per-frame `*_info.md` reports.
+   - Output type `cluster-detail` writes `summary_detail/hydrate_domain.csv` and `summary_detail/hydrate_cluster_detail.csv` and is invalid when cluster search is off.
+
+7. Positive output selection
+   - Added `--output-type TYPE[,TYPE...]`, which replaces the complete output list. Its default is `info,gro,xlsx,summary-detail`.
+   - Canonical types are `info`, `membership-tsv`, `order-tsv`, `vmd`, `gro`, `ring-gro`, `half-gro`, `quasi-gro`, `cage-gro`, `ice-gro`, `xlsx`, `summary-detail`, and `cluster-detail`.
+   - `gro` expands to every GRO subtype; `all` selects every type applicable to enabled analyses; `none` selects no optional output. Mandatory `run_config.yaml` remains.
+   - Replaced `output.disabled_outputs` with canonical `output.types`. Old YAML is rejected rather than migrated.
+   - Removed `--cluster-detail`, `--no-output`, `--write-order-tsv`, and the hidden individual `--no-*` output switches. Together with `--hydrate-cluster`, these old names are no longer accepted.
+
+8. Visualization rule
+   - Scientific records retain dual phase/boundary identity.
+   - An exclusive three-color rendering should give boundary display priority and subtract boundary cage ids from the sI/sII/sH display sets.
+   - Hydrate clusters still do not generate separate GRO files. Coordinate unions cannot encode cage ownership because cages share waters and faces; a custom renderer should use detected cage/ring edges rather than infer cages from rebonded coordinates.
+
+9. Package version and verification
+   - Updated `pyproject.toml`, `sqq.__version__`, and root version output to `0.2.8`, released Jul 16, 2026.
+   - Added focused boundary, four-mode preset, CLI-priority, positive-output, stale-output cleanup, XLSX-forcing, cluster-detail routing, and removed-argument tests.
+   - Passed 132 tests plus five unittest subtests, including all retained and updated 0.2.7 regression coverage.
+   - A strict real-GRO smoke run on `sqq_example.gro` completed with zero failures. Its 154 unique boundary cages partitioned into 107 classified plus 47 unclassified cages, and independently into 9 sI-context plus 91 sI+sII-context plus 54 sII-context cages.
+   - Additional strict real-GRO runs confirmed that mode `09` with only `cluster-detail` selected forces XLSX and writes exactly the two cluster CSV files, while mode `50` with XLSX only omits both the cluster stage and `hydrate_cluster` sheet.
+
+### Compatibility
+
+- Ring, half-cage, quasi-cage, closed-cage, occupancy, F3/F4/Q_l, MCG/DHOP, and ice results are unchanged by this release.
+- Hydrate domain membership uses the same phase claims, but boundary cage ids, transition counts, domain boundary contacts, cluster-detail records, and hydrate-cluster summary columns can intentionally change.
+- Code that assumed `classified_cage_ids` and `boundary_cage_ids` were disjoint must switch to set-based unique totals.
+- Code that assumed `cluster.cage_count == classified_cage_count + boundary_cage_count` is no longer valid.
+- Mode `50` remains the default and therefore preserves the overall cluster-search default of off. Mode `00` now enables cluster search; mode `09` is new.
+- Scripts and configurations must replace `--hydrate-cluster` with `--find-cluster`, replace output switches with `--output-type`, and replace `output.disabled_outputs` with `output.types`.
+- The removed cluster/output CLI names and old YAML output selector are intentionally rejected without compatibility aliases or migration.
+- Enabling cluster search always creates `summary.xlsx`; select `cluster-detail` only when domain and per-cluster CSV records are required.
+
 ## Version 0.2.7
 
 ### Short Summary

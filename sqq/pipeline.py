@@ -35,14 +35,14 @@ except ImportError:  # pragma: no cover - exercised in minimal source-tree runs.
 from . import __version__
 from .banner import SQQ_BANNER
 from .config import (
-    disabled_output_display,
     load_config,
     mode_label,
     mode_worker_fraction,
-    normalize_disabled_outputs,
     normalize_order_parameters,
+    normalize_output_types,
     order_parameter_display,
     output_enabled,
+    output_type_display,
     q_degrees_from_order_parameters,
 )
 from .core.cage import (
@@ -286,8 +286,8 @@ def build_run_info(
         config.get("order", {}).get("parameters")
     )
     q_degrees = q_degrees_from_order_parameters(selected_order_parameters)
-    disabled_outputs = normalize_disabled_outputs(
-        config.get("output", {}).get("disabled_outputs")
+    output_types = normalize_output_types(
+        config.get("output", {}).get("types")
     )
     result_rows = rows or []
     failures = [
@@ -334,9 +334,8 @@ def build_run_info(
         "max_cage_face": config["cage"].get("max_faces", 20),
         "cage_fast_closure": on_off_text(config["cage"].get("fast_closure", True)),
         "cage_scientific_validation": on_off_text(config["cage"].get("scientific_validation", False)),
-        "hydrate_cluster": on_off_text(config.get("hydrate_cluster", {}).get("enabled", False)),
+        "find_cluster": on_off_text(config.get("hydrate_cluster", {}).get("enabled", False)),
         "cluster_min_cage": config.get("hydrate_cluster", {}).get("min_cage", 2),
-        "cluster_detail": on_off_text(config.get("hydrate_cluster", {}).get("detail", False)),
         "order_parameters": order_parameter_display(selected_order_parameters),
         "hydrate_order": hydrate_order_config_text(config),
         "mcg3": on_off_text("mcg3" in selected_order_parameters),
@@ -347,7 +346,7 @@ def build_run_info(
         "q_neighbor_mode": config["order"].get("q_neighbor_mode", "graph"),
         "q_cutoff_nm": config["order"].get("q_cutoff_nm", 0.35),
         "q_n_neighbor": config["order"].get("q_n_neighbor", None),
-        "disabled_outputs": disabled_output_display(disabled_outputs),
+        "output_types": output_type_display(output_types),
         "output_layout": config["output"].get("structure_layout", "grouped"),
         "workers": workers,
         "parallel_backend": parallel_backend,
@@ -369,7 +368,10 @@ def build_run_info(
                     )
                 ).resolve()
             )
-            if output_enabled(config, "summary-detail")
+            if (
+                output_enabled(config, "summary-detail")
+                or output_enabled(config, "cluster-detail")
+            )
             else "<disabled>"
         ),
         "run_config": str((outdir / "run_config.yaml").resolve()),
@@ -418,15 +420,14 @@ def print_run_header(
     print_terminal_field("Maximum cage face", config["cage"].get("max_faces", 20))
     print_terminal_field("Cage fast closure", on_off_text(config["cage"].get("fast_closure", True)))
     print_terminal_field("Scientific validation", on_off_text(config["cage"].get("scientific_validation", False)))
-    print_terminal_field("Hydrate cluster", on_off_text(config.get("hydrate_cluster", {}).get("enabled", False)))
+    print_terminal_field("Find cluster", on_off_text(config.get("hydrate_cluster", {}).get("enabled", False)))
     print_terminal_field("Cluster min cage", config.get("hydrate_cluster", {}).get("min_cage", 2))
-    print_terminal_field("Cluster detail", on_off_text(config.get("hydrate_cluster", {}).get("detail", False)))
     print_terminal_field("Order parameters", order_parameter_config_text(config))
     if q_degrees_from_order_parameters(config.get("order", {}).get("parameters")):
         print_terminal_field("Q_l settings", q_config_text(config))
     print_terminal_field(
-        "Disabled outputs",
-        disabled_output_display(config.get("output", {}).get("disabled_outputs")),
+        "Output types",
+        output_type_display(config.get("output", {}).get("types")),
     )
     print_terminal_field("Output layout", config["output"].get("structure_layout", "grouped"))
     print_terminal_field("Worker policy", worker_policy_text(config))
@@ -453,7 +454,8 @@ def print_run_summary(run_info: dict[str, Any]) -> None:
     print_terminal_field("SQQ version", run_info.get("sqq_version", __version__))
     print_terminal_field("Graph mode", run_info.get("graph_mode_display", run_info.get("graph_mode", "")))
     print_terminal_field("Order parameters", run_info.get("order_parameters", ""))
-    print_terminal_field("Disabled outputs", run_info.get("disabled_outputs", "none"))
+    print_terminal_field("Find cluster", run_info.get("find_cluster", "off"))
+    print_terminal_field("Output types", run_info.get("output_types", "none"))
     print_terminal_field("Worker policy", run_info.get("worker_policy", ""))
     print_terminal_field("Parallel backend", run_info.get("parallel_backend", "serial"))
     print_terminal_field("Workers", run_info.get("workers", ""))
@@ -1435,9 +1437,7 @@ def write_frame_outputs(result: FrameResult, frame_dir: Path, config: dict[str, 
     else:
         remove_optional_info_output(result, frame_dir)
 
-    write_legacy_tsv = bool(output.get("write_tsv", False))
-    write_order_tsv = bool(output.get("write_order_tsv", False))
-    if write_legacy_tsv and output_enabled(config, "membership-tsv"):
+    if output_enabled(config, "membership-tsv"):
         write_membership(result, frame_dir)
     else:
         remove_optional_tsv_outputs(
@@ -1446,7 +1446,7 @@ def write_frame_outputs(result: FrameResult, frame_dir: Path, config: dict[str, 
             remove_membership=True,
             remove_order=False,
         )
-    if (write_legacy_tsv or write_order_tsv) and output_enabled(config, "order-tsv"):
+    if output_enabled(config, "order-tsv"):
         write_order_parameter(result, frame_dir, order_parameters=order_parameters)
     else:
         remove_optional_tsv_outputs(
@@ -1456,13 +1456,14 @@ def write_frame_outputs(result: FrameResult, frame_dir: Path, config: dict[str, 
             remove_order=True,
         )
 
-    if bool(output.get("write_vmd", False)) and output_enabled(config, "vmd"):
+    if output_enabled(config, "vmd"):
         write_vmd_script(result, frame_dir)
     else:
         remove_optional_vmd_output(result, frame_dir)
 
     layout = str(output.get("structure_layout", "grouped"))
     write_empty = bool(output.get("write_empty_files", False))
+    remove_generated_gro_outputs(result, frame_dir, "ring-gro", layout)
     if output_enabled(config, "ring-gro"):
         write_ring_gro_files(
             result,
@@ -1471,8 +1472,7 @@ def write_frame_outputs(result: FrameResult, frame_dir: Path, config: dict[str, 
             layout=layout,
             sizes=set(result.ring_report_sizes),
         )
-    else:
-        remove_generated_gro_outputs(result, frame_dir, "ring-gro", layout)
+    remove_generated_gro_outputs(result, frame_dir, "half-gro", layout)
     if output_enabled(config, "half-gro"):
         write_half_cage_gro_files(
             result,
@@ -1480,8 +1480,7 @@ def write_frame_outputs(result: FrameResult, frame_dir: Path, config: dict[str, 
             write_empty=write_empty,
             layout=layout,
         )
-    else:
-        remove_generated_gro_outputs(result, frame_dir, "half-gro", layout)
+    remove_generated_gro_outputs(result, frame_dir, "quasi-gro", layout)
     if output_enabled(config, "quasi-gro"):
         write_quasi_cage_gro_files(
             result,
@@ -1489,8 +1488,7 @@ def write_frame_outputs(result: FrameResult, frame_dir: Path, config: dict[str, 
             write_empty=write_empty,
             layout=layout,
         )
-    else:
-        remove_generated_gro_outputs(result, frame_dir, "quasi-gro", layout)
+    remove_generated_gro_outputs(result, frame_dir, "cage-gro", layout)
     if output_enabled(config, "cage-gro"):
         write_cage_gro_files(
             result,
@@ -1498,8 +1496,7 @@ def write_frame_outputs(result: FrameResult, frame_dir: Path, config: dict[str, 
             write_empty=write_empty,
             layout=layout,
         )
-    else:
-        remove_generated_gro_outputs(result, frame_dir, "cage-gro", layout)
+    remove_generated_gro_outputs(result, frame_dir, "ice-gro", layout)
     if output_enabled(config, "ice-gro"):
         write_ice_gro_file(
             result,
@@ -1507,8 +1504,6 @@ def write_frame_outputs(result: FrameResult, frame_dir: Path, config: dict[str, 
             write_empty=write_empty,
             layout=layout,
         )
-    else:
-        remove_generated_gro_outputs(result, frame_dir, "ice-gro", layout)
     remove_frame_directory_if_empty(frame_dir)
 
 
@@ -1540,7 +1535,7 @@ def remove_generated_gro_outputs(
     output_type: str,
     layout: str,
 ) -> None:
-    """Remove only known SQQ-generated GRO files for one disabled category."""
+    """Remove known SQQ-generated GRO files before rewriting one category."""
     grouped_directories = {
         "ring-gro": "ring",
         "half-gro": "half_cage",
@@ -1839,14 +1834,15 @@ def apply_cli_overrides(config: dict[str, Any], args: Namespace) -> None:
             args.cage_scientific_validation,
             "--cage-scientific-validation",
         )
-    if getattr(args, "hydrate_cluster", None):
-        config["hydrate_cluster"]["enabled"] = parse_on_off(args.hydrate_cluster, "--hydrate-cluster")
+    if getattr(args, "find_cluster", None):
+        config["hydrate_cluster"]["enabled"] = parse_on_off(
+            args.find_cluster,
+            "--find-cluster",
+        )
     if getattr(args, "cluster_min_cage", None) is not None:
         if args.cluster_min_cage < 1:
             raise ValueError("--cluster-min-cage must be at least 1.")
         config["hydrate_cluster"]["min_cage"] = args.cluster_min_cage
-    if getattr(args, "cluster_detail", None):
-        config["hydrate_cluster"]["detail"] = parse_on_off(args.cluster_detail, "--cluster-detail")
     bond_mode = getattr(args, "bond_mode", None)
     if args.pairs:
         if bond_mode not in (None, "pairs"):
@@ -1865,44 +1861,10 @@ def apply_cli_overrides(config: dict[str, Any], args: Namespace) -> None:
         config["parallel"]["workers"] = args.worker
     if getattr(args, "output_layout", None):
         config["output"]["structure_layout"] = args.output_layout
-    unified_no_output = getattr(args, "no_output", None)
-    legacy_output_options = {
-        "info": getattr(args, "no_info", False),
-        "gro": getattr(args, "no_gro", False),
-        "ring-gro": getattr(args, "no_ring_gro", False),
-        "half-gro": getattr(args, "no_half_cage_gro", False),
-        "quasi-gro": getattr(args, "no_quasi_cage_gro", False),
-        "cage-gro": getattr(args, "no_cage_gro", False),
-        "ice-gro": getattr(args, "no_ice_gro", False),
-        "xlsx": getattr(args, "no_xlsx", False),
-        "summary-detail": getattr(args, "no_summary_detail", False),
-    }
-    has_legacy_output_options = any(legacy_output_options.values())
-    if unified_no_output is not None:
-        config["output"]["disabled_outputs"] = list(
-            normalize_disabled_outputs(unified_no_output)
-        )
-        if has_legacy_output_options:
-            warn_legacy_output_cli(ignored=True)
-    elif has_legacy_output_options:
-        warn_legacy_output_cli(ignored=False)
-        disabled_outputs = set(
-            normalize_disabled_outputs(
-                config.get("output", {}).get("disabled_outputs")
-            )
-        )
-        disabled_outputs.update(
-            name
-            for name, disabled in legacy_output_options.items()
-            if disabled
-        )
-        config["output"]["disabled_outputs"] = list(
-            normalize_disabled_outputs(disabled_outputs)
-        )
+    if getattr(args, "output_type", None) is not None:
+        config["output"]["types"] = args.output_type
     if getattr(args, "cage_isomer_rows", None):
         config["output"]["cage_isomer_rows"] = args.cage_isomer_rows
-    if getattr(args, "write_order_tsv", False):
-        config["output"]["write_order_tsv"] = True
 
 
 def warn_legacy_order_cli(*, ignored: bool) -> None:
@@ -1911,16 +1873,6 @@ def warn_legacy_order_cli(*, ignored: bool) -> None:
     print(
         "Warning: --no-q, -q/--q-degree, --mcg3, and --dhop30 are deprecated; "
         f"use --order-parameter instead.{suffix}",
-        file=sys.stderr,
-    )
-
-
-def warn_legacy_output_cli(*, ignored: bool) -> None:
-    """Print one visible warning for pre-unification output switches."""
-    suffix = " They were ignored because --no-output was also supplied." if ignored else ""
-    print(
-        "Warning: individual --no-info/--no-*-gro/--no-xlsx/"
-        f"--no-summary-detail options are deprecated; use --no-output instead.{suffix}",
         file=sys.stderr,
     )
 
@@ -2071,23 +2023,65 @@ def normalize_analysis_scopes(config: dict[str, Any]) -> None:
     cage["max_face_edge_cv"] = finite_float(cage.get("max_face_edge_cv", 0.35), "cage.max_face_edge_cv", nonnegative=True)
     cage["min_cage_volume_nm3"] = finite_float(cage.get("min_cage_volume_nm3", 1.0e-6), "cage.min_cage_volume_nm3", positive=True)
     hydrate_cluster = config.setdefault("hydrate_cluster", {})
+    if "detail" in hydrate_cluster:
+        raise ValueError(
+            "hydrate_cluster.detail is no longer supported; "
+            "add cluster-detail to output.types."
+        )
     hydrate_cluster["enabled"] = parse_on_off(hydrate_cluster.get("enabled", False), "hydrate_cluster.enabled")
     hydrate_cluster["min_cage"] = positive_integer(hydrate_cluster.get("min_cage", 2), "hydrate_cluster.min_cage / --cluster-min-cage")
-    hydrate_cluster["detail"] = parse_on_off(hydrate_cluster.get("detail", False), "hydrate_cluster.detail")
     parallel = config.setdefault("parallel", {})
     parallel["backend"] = normalize_parallel_backend(parallel.get("backend", "process"))
     parallel["math_threads"] = positive_integer(parallel.get("math_threads", 1), "parallel.math_threads")
     output = config.setdefault("output", {})
-    output["disabled_outputs"] = list(
-        normalize_disabled_outputs(output.get("disabled_outputs", []))
+    removed_output_keys = {
+        "disabled_outputs",
+        "write_tsv",
+        "write_order_tsv",
+        "write_vmd",
+        "write_info",
+        "write_gro",
+        "write_ring_gro",
+        "write_half_cage_gro",
+        "write_quasi_cage_gro",
+        "write_cage_gro",
+        "write_ice_gro",
+        "write_xlsx_summary",
+        "write_summary_detail_csv",
+    }.intersection(output)
+    if removed_output_keys:
+        names = ", ".join(sorted(removed_output_keys))
+        raise ValueError(
+            f"Unsupported output configuration key(s): {names}. Use output.types."
+        )
+    raw_output_types = output.get("types")
+    all_requested = (
+        isinstance(raw_output_types, str)
+        and raw_output_types.strip().lower() == "all"
+    ) or (
+        isinstance(raw_output_types, (list, tuple, set))
+        and len(raw_output_types) == 1
+        and str(next(iter(raw_output_types))).strip().lower() == "all"
     )
-    for key, default in (
-        ("write_tsv", False),
-        ("write_order_tsv", False),
-        ("write_vmd", False),
-        ("write_empty_files", False),
-    ):
-        output[key] = parse_on_off(output.get(key, default), f"output.{key}")
+    output_types = list(normalize_output_types(raw_output_types))
+    if not hydrate_cluster["enabled"] and "cluster-detail" in output_types:
+        if all_requested:
+            output_types.remove("cluster-detail")
+        else:
+            raise ValueError(
+                "output type 'cluster-detail' requires --find-cluster on."
+            )
+    if hydrate_cluster["enabled"] and "xlsx" not in output_types:
+        output_types = list(normalize_output_types([*output_types, "xlsx"]))
+        print(
+            "Note: xlsx was enabled because cluster search is on.",
+            file=sys.stderr,
+        )
+    output["types"] = output_types
+    output["write_empty_files"] = parse_on_off(
+        output.get("write_empty_files", False),
+        "output.write_empty_files",
+    )
     detail_dir = str(output.get("summary_detail_dir", "summary_detail")).strip() or "summary_detail"
     detail_path = Path(detail_dir)
     if detail_path.is_absolute() or ".." in detail_path.parts:
@@ -2129,13 +2123,9 @@ def normalize_analysis_scopes(config: dict[str, Any]) -> None:
         name in {"f3", "f4"} or name.startswith("q")
         for name in order["parameters"]
     )
-    if (
-        output.get("write_order_tsv", False)
-        and output_enabled(config, "order-tsv")
-        and not per_water_order
-    ):
+    if output_enabled(config, "order-tsv") and not per_water_order:
         print(
-            "Warning: --write-order-tsv has no per-water F3/F4/Q_l selection; "
+            "Warning: output type 'order-tsv' has no per-water F3/F4/Q_l selection; "
             "no order-parameter TSV will be written.",
             file=sys.stderr,
         )
@@ -2410,7 +2400,7 @@ def analyze_frame(
         warnings=warnings,
     )
     cages = select_reported_cages(all_cages, cage_report_types)
-    hydrate_cluster_detail = bool(config.get("hydrate_cluster", {}).get("detail", False))
+    hydrate_cluster_detail = output_enabled(config, "cluster-detail")
     if hydrate_cluster_enabled:
         report_stage(stage_callback, "classifying hydrate cluster")
         rings_by_id = ring_topology.ring_by_id

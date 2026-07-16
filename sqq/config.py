@@ -36,8 +36,13 @@ ORDER_PARAMETER_ALIASES = {
     "dhop-30": "dhop30",
     "dhop_30": "dhop30",
 }
-DEFAULT_DISABLED_OUTPUTS: tuple[str, ...] = ()
-ALL_DISABLED_OUTPUTS = (
+DEFAULT_OUTPUT_TYPES = (
+    "info",
+    "gro",
+    "xlsx",
+    "summary-detail",
+)
+ALL_OUTPUT_TYPES = (
     "info",
     "membership-tsv",
     "order-tsv",
@@ -45,6 +50,7 @@ ALL_DISABLED_OUTPUTS = (
     "gro",
     "xlsx",
     "summary-detail",
+    "cluster-detail",
 )
 OUTPUT_TYPE_ORDER = (
     "info",
@@ -59,13 +65,8 @@ OUTPUT_TYPE_ORDER = (
     "ice-gro",
     "xlsx",
     "summary-detail",
+    "cluster-detail",
 )
-OUTPUT_TYPE_ALIASES = {
-    "info-md": "info",
-    "half-cage-gro": "half-gro",
-    "quasi-cage-gro": "quasi-gro",
-    "detail-csv": "summary-detail",
-}
 GRO_OUTPUT_TYPES = {
     "ring-gro",
     "half-gro",
@@ -79,18 +80,28 @@ MODE_PRESETS: dict[str, dict[str, Any]] = {
         "worker_fraction": 0.25,
         "bond_mode": "hbond",
         "ring_sizes": [4, 5, 6],
+        "find_cluster": True,
+    },
+    "09": {
+        "label": "rigorous-performance",
+        "worker_fraction": 0.90,
+        "bond_mode": "hbond",
+        "ring_sizes": [4, 5, 6],
+        "find_cluster": True,
     },
     "50": {
         "label": "standard",
         "worker_fraction": 0.50,
         "bond_mode": "auto",
         "ring_sizes": [5, 6],
+        "find_cluster": False,
     },
     "99": {
         "label": "performance",
         "worker_fraction": 0.90,
         "bond_mode": "oo",
         "ring_sizes": [5, 6],
+        "find_cluster": False,
     },
 }
 
@@ -166,7 +177,6 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "hydrate_cluster": {
         "enabled": False,
         "min_cage": 2,
-        "detail": False,
     },
     "hydrate_order": {
         "mcg_guest_resnames": ["CH4", "MET"],
@@ -192,10 +202,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "require_four_coord_neighbors": True,
     },
     "output": {
-        "disabled_outputs": [],
-        "write_tsv": False,
-        "write_order_tsv": False,
-        "write_vmd": False,
+        "types": list(DEFAULT_OUTPUT_TYPES),
         "summary_detail_dir": "summary_detail",
         "cage_isomer_rows": "nonzero",
         "write_empty_files": False,
@@ -311,10 +318,10 @@ def order_parameter_display(value: Any) -> str:
     return ", ".join(parameters) if parameters else "none"
 
 
-def normalize_disabled_outputs(value: Any = None) -> tuple[str, ...]:
-    """Normalize the unified output-suppression list."""
-    if value is None or value == "":
-        raw_items: list[Any] = list(DEFAULT_DISABLED_OUTPUTS)
+def normalize_output_types(value: Any = None) -> tuple[str, ...]:
+    """Normalize the positive output allowlist."""
+    if value is None:
+        raw_items: list[Any] = list(DEFAULT_OUTPUT_TYPES)
     elif isinstance(value, str):
         raw_items = [item.strip() for item in value.split(",") if item.strip()]
     else:
@@ -322,20 +329,17 @@ def normalize_disabled_outputs(value: Any = None) -> tuple[str, ...]:
             raw_items = [item for item in value if str(item).strip()]
         except TypeError as exc:
             raise ValueError(
-                "output.disabled_outputs / --no-output must be a comma-separated list."
+                "output.types / --output-type must be a comma-separated list."
             ) from exc
     if not raw_items:
         return ()
 
-    cleaned = [
-        OUTPUT_TYPE_ALIASES.get(str(item).strip().lower(), str(item).strip().lower())
-        for item in raw_items
-    ]
+    cleaned = [str(item).strip().lower() for item in raw_items]
     keywords = set(cleaned) & {"all", "none"}
     if keywords:
         if len(cleaned) != 1:
-            raise ValueError("Use 'all' or 'none' alone in output.disabled_outputs / --no-output.")
-        return ALL_DISABLED_OUTPUTS if cleaned[0] == "all" else ()
+            raise ValueError("Use 'all' or 'none' alone in output.types / --output-type.")
+        return ALL_OUTPUT_TYPES if cleaned[0] == "all" else ()
 
     supported = set(OUTPUT_TYPE_ORDER)
     unknown = sorted(set(cleaned) - supported)
@@ -343,7 +347,7 @@ def normalize_disabled_outputs(value: Any = None) -> tuple[str, ...]:
         raise ValueError(
             f"Unsupported output type(s) {unknown}. Use info, membership-tsv, "
             "order-tsv, vmd, gro, ring-gro, half-gro, quasi-gro, cage-gro, "
-            "ice-gro, xlsx, summary-detail, all, or none."
+            "ice-gro, xlsx, summary-detail, cluster-detail, all, or none."
         )
     normalized = set(cleaned)
     if "gro" in normalized:
@@ -351,69 +355,29 @@ def normalize_disabled_outputs(value: Any = None) -> tuple[str, ...]:
     return tuple(name for name in OUTPUT_TYPE_ORDER if name in normalized)
 
 
-def disabled_output_display(value: Any) -> str:
-    """Render normalized disabled outputs for terminal and metadata."""
-    outputs = normalize_disabled_outputs(value)
+def output_type_display(value: Any) -> str:
+    """Render normalized output types for terminal and metadata."""
+    outputs = normalize_output_types(value)
     return ", ".join(outputs) if outputs else "none"
 
 
 def output_enabled(config: dict[str, Any], output_type: str) -> bool:
-    """Return whether one output category is enabled by the unified policy."""
-    normalized_type = OUTPUT_TYPE_ALIASES.get(
-        str(output_type).strip().lower(),
-        str(output_type).strip().lower(),
-    )
+    """Return whether one output category is selected."""
+    normalized_type = str(output_type).strip().lower()
     if normalized_type not in set(OUTPUT_TYPE_ORDER):
         raise ValueError(f"Unsupported output type: {output_type}")
-    disabled = set(
-        normalize_disabled_outputs(
-            config.get("output", {}).get("disabled_outputs", DEFAULT_DISABLED_OUTPUTS)
+    enabled = set(
+        normalize_output_types(
+            config.get("output", {}).get("types", DEFAULT_OUTPUT_TYPES)
         )
     )
-    if normalized_type in GRO_OUTPUT_TYPES and "gro" in disabled:
-        return False
-    return normalized_type not in disabled
-
-
-def migrate_legacy_disabled_outputs(
-    user_config: dict[str, Any],
-) -> tuple[str, ...] | None:
-    """Translate pre-0.2.7 output booleans when the unified list is absent."""
-    output = user_config.get("output", {})
-    if not isinstance(output, dict) or "disabled_outputs" in output:
-        return None
-    legacy_keys = {
-        "write_info",
-        "write_gro",
-        "write_ring_gro",
-        "write_half_cage_gro",
-        "write_quasi_cage_gro",
-        "write_cage_gro",
-        "write_ice_gro",
-        "write_xlsx_summary",
-        "write_summary_detail_csv",
-    }
-    if not legacy_keys & set(output):
-        return None
-    disabled: list[str] = []
-    for key, name in (
-        ("write_info", "info"),
-        ("write_gro", "gro"),
-        ("write_ring_gro", "ring-gro"),
-        ("write_half_cage_gro", "half-gro"),
-        ("write_quasi_cage_gro", "quasi-gro"),
-        ("write_cage_gro", "cage-gro"),
-        ("write_ice_gro", "ice-gro"),
-        ("write_xlsx_summary", "xlsx"),
-        ("write_summary_detail_csv", "summary-detail"),
-    ):
-        if key in output and not legacy_enabled(output[key]):
-            disabled.append(name)
-    return normalize_disabled_outputs(disabled)
+    if normalized_type in GRO_OUTPUT_TYPES and "gro" in enabled:
+        return True
+    return normalized_type in enabled
 
 
 def strip_legacy_selection_keys(user_config: dict[str, Any]) -> None:
-    """Remove migrated selector booleans so run_config has one source of truth."""
+    """Remove migrated order-selector booleans."""
     order = user_config.get("order", {})
     if isinstance(order, dict):
         for key in ("f3f4_enabled", "q_enabled", "q_degree"):
@@ -427,20 +391,6 @@ def strip_legacy_selection_keys(user_config: dict[str, Any]) -> None:
             "dhop30_enabled",
         ):
             hydrate_order.pop(key, None)
-    output = user_config.get("output", {})
-    if isinstance(output, dict):
-        for key in (
-            "write_info",
-            "write_gro",
-            "write_ring_gro",
-            "write_half_cage_gro",
-            "write_quasi_cage_gro",
-            "write_cage_gro",
-            "write_ice_gro",
-            "write_xlsx_summary",
-            "write_summary_detail_csv",
-        ):
-            output.pop(key, None)
 
 
 def migrate_legacy_order_parameters(user_config: dict[str, Any]) -> tuple[str, ...] | None:
@@ -504,6 +454,7 @@ def apply_mode_preset(config: dict[str, Any], mode: Any) -> dict[str, Any]:
     config["ring"]["report_sizes"] = "auto"
     config["quasi_cage"]["base_sizes"] = "auto"
     config["quasi_cage"]["side_sizes"] = "auto"
+    config["hydrate_cluster"]["enabled"] = bool(preset["find_cluster"])
     return config
 
 
@@ -527,11 +478,6 @@ def load_config(path: Path | None, mode: Any = None) -> dict[str, Any]:
     migrated_parameters = migrate_legacy_order_parameters(user_config)
     if migrated_parameters is not None:
         user_config.setdefault("order", {})["parameters"] = list(migrated_parameters)
-    migrated_outputs = migrate_legacy_disabled_outputs(user_config)
-    if migrated_outputs is not None:
-        user_config.setdefault("output", {})["disabled_outputs"] = list(
-            migrated_outputs
-        )
     strip_legacy_selection_keys(user_config)
 
     selected_mode = normalize_mode(mode if mode is not None else user_config.get("mode", DEFAULT_MODE))
@@ -565,9 +511,6 @@ def dump_config(config: dict[str, Any], handle) -> None:
     else:
         json.dump(config, handle, ensure_ascii=False, indent=2)
         handle.write("\n")
-
-
-
 
 
 

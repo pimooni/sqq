@@ -51,18 +51,20 @@ Examples:
   sqq analyze -i "./gro/*.gro" -o ./result_sqq
   sqq analyze -i traj.xtc --top topol.gro -c config.yaml -o ./result_sqq
   sqq analyze -i ./gro -m 00 -b hbond -w 4 --order-parameter f3,f4,q6 -o ./result_sqq
-  sqq analyze -i md.gro --no-output quasi-gro,cage-gro,xlsx -o ./result_sqq
+  sqq analyze -i md.gro --output-type info,cage-gro,xlsx -o ./result_sqq
   sqq analyze -i md.gro -s 4,5,6 --cage-size H -o ./result_sqq_h
-  sqq analyze -i md.gro -s 4,5,6 --hydrate-cluster on -o ./result_sqq_cluster
+  sqq analyze -i md.gro -s 4,5,6 --find-cluster on -o ./result_sqq_cluster
 
 Analysis modes:
-  -m 00  Rigorous: hbond, 4/5/6 search, 25% physical-core workers
-  -m 50  Standard: auto graph, 5/6 search, 50% physical-core workers
-  -m 99  Performance: O-O graph, 5/6 search, 90% physical-core workers
+  -m 00  Rigorous: hbond, 4/5/6 search, 25% workers, find cluster on
+  -m 09  Rigorous performance: hbond, 4/5/6 search, 90% workers, find cluster on
+  -m 50  Standard: auto graph, 5/6 search, 50% workers, find cluster off
+  -m 99  Performance: O-O graph, 5/6 search, 90% workers, find cluster off
 
 Modes do not change quasi_cage.max_layers or order.parameters.
 Their defaults remain 1 and f3,f4 respectively.
 -b/--bond-mode overrides the graph setting supplied by the selected mode.
+--find-cluster overrides the cluster setting supplied by the selected mode.
 
 Output layout:
   grouped: frame/ring/, frame/half_cage/<type>/,
@@ -99,8 +101,8 @@ def build_parser() -> argparse.ArgumentParser:
     analyze_parser.add_argument(
         "-m",
         "--mode",
-        choices=("00", "50", "99"),
-        help="Analysis preset: 00 rigorous, 50 standard (default), or 99 performance.",
+        choices=("00", "09", "50", "99"),
+        help="Analysis preset: 00 rigorous, 09 rigorous-performance, 50 standard (default), or 99 performance.",
     )
     analyze_parser.add_argument(
         "-b",
@@ -144,9 +146,8 @@ def build_parser() -> argparse.ArgumentParser:
     analyze_parser.add_argument("--max-cage-face", metavar="N", type=int, help="Maximum face count searched for Euler-compatible cages; default 20.")
     analyze_parser.add_argument("--cage-fast-closure", choices=("on", "off"), help="Enable or disable indexed 2-4 half-cage fast closure; default on.")
     analyze_parser.add_argument("--cage-scientific-validation", choices=("on", "off"), help="Enable or disable strict face/manifold/volume cage validation and volume centroids; default off.")
-    analyze_parser.add_argument("--hydrate-cluster", choices=("on", "off"), help="Enable or disable reported-cage hydrate_cluster analysis; default off.")
+    analyze_parser.add_argument("--find-cluster", choices=("on", "off"), help="Override the mode preset for hydrate-cluster search; the overall default mode 50 is off.")
     analyze_parser.add_argument("--cluster-min-cage", metavar="N", type=int, help="Minimum connected cage count required for a hydrate_cluster; default 2.")
-    analyze_parser.add_argument("--cluster-detail", choices=("on", "off"), help="Enable or disable the detailed hydrate_cluster workbook sheet; default off.")
     analyze_parser.add_argument("--recursive", action="store_true", help="Read input directory recursively.")
     analyze_parser.add_argument("--pairs", metavar="PAIRS.txt", help="Pair file for bond_mode=pairs; each line contains two water ids.")
     analyze_parser.add_argument("--pair-id", metavar="KIND", choices=["resid", "oxygen_index", "atomid"], help="How ids in --pairs are interpreted; default resid.")
@@ -156,25 +157,16 @@ def build_parser() -> argparse.ArgumentParser:
     analyze_parser.add_argument("--strict", action="store_true", help="Stop on the first failed frame.")
     analyze_parser.add_argument("--output-layout", choices=["grouped", "flat"], help="GRO layout: grouped uses ring/, half_cage/<type>/, quasi_cage/<type>/, cage/<type>/, and ice/; flat keeps same-folder files.")
     analyze_parser.add_argument(
-        "--no-output",
+        "--output-type",
         metavar="TYPE[,TYPE...]",
         help=(
-            "Disable output types: info, membership-tsv, order-tsv, vmd, gro, "
+            "Select outputs: info, membership-tsv, order-tsv, vmd, gro, "
             "ring-gro, half-gro, quasi-gro, cage-gro, ice-gro, xlsx, "
-            "summary-detail, all, or none. Default: none."
+            "summary-detail, cluster-detail, all, or none. "
+            "Default: info,gro,xlsx,summary-detail."
         ),
     )
-    analyze_parser.add_argument("--no-info", action="store_true", help=argparse.SUPPRESS)
-    analyze_parser.add_argument("--no-gro", action="store_true", help=argparse.SUPPRESS)
-    analyze_parser.add_argument("--no-ring-gro", action="store_true", help=argparse.SUPPRESS)
-    analyze_parser.add_argument("--no-half-cage-gro", action="store_true", help=argparse.SUPPRESS)
-    analyze_parser.add_argument("--no-quasi-cage-gro", action="store_true", help=argparse.SUPPRESS)
-    analyze_parser.add_argument("--no-cage-gro", action="store_true", help=argparse.SUPPRESS)
-    analyze_parser.add_argument("--no-ice-gro", action="store_true", help=argparse.SUPPRESS)
-    analyze_parser.add_argument("--no-xlsx", action="store_true", help=argparse.SUPPRESS)
-    analyze_parser.add_argument("--no-summary-detail", action="store_true", help=argparse.SUPPRESS)
     analyze_parser.add_argument("--cage-isomer-rows", choices=("nonzero", "all"), help="Rows written to summary_detail/cage_isomer.csv; default nonzero.")
-    analyze_parser.add_argument("--write-order-tsv", action="store_true", help="Write per-water *_order_parameter.tsv files.")
     return parser
 
 

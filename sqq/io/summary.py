@@ -20,11 +20,11 @@ from openpyxl.utils import get_column_letter
 from .. import __version__
 from ..banner import SQQ_BANNER
 from ..config import (
-    disabled_output_display,
     dump_config,
     normalize_order_parameters,
     order_parameter_display,
     output_enabled,
+    output_type_display,
     q_degrees_from_order_parameters,
 )
 from ..core.cage import KNOWN_CAGE_TYPES, parse_cage_face_label
@@ -107,10 +107,16 @@ SUMMARY_COLUMNS = [
     "sII_domain_count",
     "sH_domain_count",
     "boundary_cage_count",
+    "classified_boundary_cage_count",
+    "unclassified_boundary_cage_count",
+    "ambiguous_boundary_cage_count",
     "transition_cage_count",
     "sI_boundary_cage_count",
     "sII_boundary_cage_count",
     "sH_boundary_cage_count",
+    "sI_boundary_context_cage_count",
+    "sII_boundary_context_cage_count",
+    "sH_boundary_context_cage_count",
     "sI_sII_boundary_cage_count",
     "sI_sH_boundary_cage_count",
     "sII_sH_boundary_cage_count",
@@ -164,13 +170,18 @@ SUMMARY_DETAIL_TABLE_NAMES = (
 TREE_MIDDLE = "\u251c"
 TREE_LAST = "\u2514"
 TREE_PIPE = "\u2502"
+PHASE_DISPLAY_ORDER = ("sI", "sII", "sH")
 SUBSCRIPT_DIGIT_DELETE = dict.fromkeys(range(0x2080, 0x208A))
 QUASI_ISOMER_DETAIL_KEY = "_quasi_cage_isomer_detail"
 EXCEL_MAX_ROWS = 1_048_576
 EXCEL_MAX_COLUMNS = 16_384
 
 
-def result_row(result: FrameResult) -> dict[str, Any]:
+def result_row(
+    result: FrameResult,
+    *,
+    include_cluster_details: bool = True,
+) -> dict[str, Any]:
     """Flatten a FrameResult into one summary-table row."""
     cage_counts: dict[str, int] = {}
     cage_detail_counts: dict[str, int] = {}
@@ -206,12 +217,38 @@ def result_row(result: FrameResult) -> dict[str, Any]:
     for patch_type, count in quasi_cage_counts.items():
         composition = patch_composition_label(patch_type)
         quasi_composition_counts[composition] = quasi_composition_counts.get(composition, 0) + count
-    cluster_details = hydrate_cluster_detail_records(result, guests_by_id, guest_order)
-    domain_details = hydrate_domain_records(result, guests_by_id, guest_order)
+    cluster_details = (
+        hydrate_cluster_detail_records(result, guests_by_id, guest_order)
+        if include_cluster_details and result.hydrate_cluster_detail
+        else []
+    )
+    domain_details = (
+        hydrate_domain_records(result, guests_by_id, guest_order)
+        if include_cluster_details and result.hydrate_cluster_detail
+        else []
+    )
     largest_cluster = max(result.hydrate_clusters, key=lambda cluster: cluster.cage_count, default=None)
     cluster_type_counts = Counter(cluster.hydrate_type for cluster in result.hydrate_clusters)
     domain_type_counts = Counter(domain.hydrate_type for domain in result.hydrate_domains)
     boundary_cage_count = sum(cluster.boundary_cage_count for cluster in result.hydrate_clusters)
+    boundary_by_cluster = {
+        cluster.object_id: set(cluster.boundary_cage_ids)
+        for cluster in result.hydrate_clusters
+    }
+    phase_boundary_cage_counts: Counter[str] = Counter()
+    for domain in result.hydrate_domains:
+        phase_boundary_cage_counts[domain.hydrate_type] += len(
+            set(domain.cage_ids).intersection(boundary_by_cluster.get(domain.cluster_id, set()))
+        )
+    unclassified_boundary_cage_count = sum(
+        len(set(cluster.unclassified_cage_ids).intersection(cluster.boundary_cage_ids))
+        for cluster in result.hydrate_clusters
+    )
+    ambiguous_boundary_cage_count = sum(
+        len(set(cluster.ambiguous_cage_ids).intersection(cluster.boundary_cage_ids))
+        for cluster in result.hydrate_clusters
+    )
+    classified_boundary_cage_count = sum(phase_boundary_cage_counts.values())
     transition_cage_count = sum(len(cluster.transition_cage_ids) for cluster in result.hydrate_clusters)
     phase_boundary_counts = Counter(
         label
@@ -272,10 +309,16 @@ def result_row(result: FrameResult) -> dict[str, Any]:
         "sII_domain_count": domain_type_counts.get("sII", 0),
         "sH_domain_count": domain_type_counts.get("sH", 0),
         "boundary_cage_count": boundary_cage_count,
+        "classified_boundary_cage_count": classified_boundary_cage_count,
+        "unclassified_boundary_cage_count": unclassified_boundary_cage_count,
+        "ambiguous_boundary_cage_count": ambiguous_boundary_cage_count,
         "transition_cage_count": transition_cage_count,
-        "sI_boundary_cage_count": phase_boundary_counts.get("sI", 0),
-        "sII_boundary_cage_count": phase_boundary_counts.get("sII", 0),
-        "sH_boundary_cage_count": phase_boundary_counts.get("sH", 0),
+        "sI_boundary_cage_count": phase_boundary_cage_counts.get("sI", 0),
+        "sII_boundary_cage_count": phase_boundary_cage_counts.get("sII", 0),
+        "sH_boundary_cage_count": phase_boundary_cage_counts.get("sH", 0),
+        "sI_boundary_context_cage_count": phase_boundary_counts.get("sI", 0),
+        "sII_boundary_context_cage_count": phase_boundary_counts.get("sII", 0),
+        "sH_boundary_context_cage_count": phase_boundary_counts.get("sH", 0),
         "sI_sII_boundary_cage_count": phase_boundary_counts.get("sI+sII", 0),
         "sI_sH_boundary_cage_count": phase_boundary_counts.get("sI+sH", 0),
         "sII_sH_boundary_cage_count": phase_boundary_counts.get("sII+sH", 0),
@@ -396,6 +439,9 @@ def hydrate_cluster_info_section(result: FrameResult, row: dict[str, Any]) -> li
         ["cluster_count", row.get("hydrate_cluster_count", 0)],
         ["domain_count", row.get("hydrate_domain_count", 0)],
         ["boundary_cage_count", row.get("boundary_cage_count", 0)],
+        ["classified_boundary_cage_count", row.get("classified_boundary_cage_count", 0)],
+        ["unclassified_boundary_cage_count", row.get("unclassified_boundary_cage_count", 0)],
+        ["ambiguous_boundary_cage_count", row.get("ambiguous_boundary_cage_count", 0)],
         ["interphase_boundary_cage_count", row.get("transition_cage_count", 0)],
         ["isolated_cage_count", row.get("isolated_cage_count", 0)],
         ["sI_cluster_count", row.get("sI_cluster_count", 0)],
@@ -425,9 +471,15 @@ def hydrate_cluster_detail_section(records: list[dict[str, Any]]) -> list[str]:
         "hydrate_type",
         "cage_count",
         "classified_cage_count",
+        "classified_boundary_cage_count",
+        "sI_boundary_cage_count",
+        "sII_boundary_cage_count",
+        "sH_boundary_cage_count",
         "interphase_boundary_cage_count",
         "unclassified_cage_count",
+        "unclassified_boundary_cage_count",
         "ambiguous_cage_count",
+        "ambiguous_boundary_cage_count",
         "boundary_cage_count",
         "classified_cage_fraction",
         "domain_count",
@@ -455,8 +507,10 @@ def hydrate_cluster_hierarchy_section(result: FrameResult) -> list[str]:
     """Render cluster hierarchy as one aligned table per cluster."""
     cage_by_id = {cage.object_id: cage for cage in (result.all_cages or result.cages)}
     domains_by_cluster: dict[str, list[Any]] = defaultdict(list)
+    phase_by_cage_id: dict[str, str] = {}
     for domain in result.hydrate_domains:
         domains_by_cluster[domain.cluster_id].append(domain)
+        phase_by_cage_id.update({cage_id: domain.hydrate_type for cage_id in domain.cage_ids})
     if not result.hydrate_clusters:
         return ["", "## Hydrate Cluster Hierarchy", "", "no hydrate cluster"]
 
@@ -510,13 +564,28 @@ def hydrate_cluster_hierarchy_section(result: FrameResult) -> list[str]:
                     cage_by_id,
                 )
             )
-            labelled: dict[str, list[str]] = defaultdict(list)
-            for cage_id, label in cluster.phase_boundary_labels:
-                labelled[label].append(cage_id)
+            boundary_ids = set(cluster.boundary_cage_ids)
+            phase_groups: dict[str, list[str]] = defaultdict(list)
+            for cage_id in cluster.boundary_cage_ids:
+                phase = phase_by_cage_id.get(cage_id)
+                if phase is not None:
+                    phase_groups[phase].append(cage_id)
             boundary_groups = [
-                *((f"{label} boundary", tuple(cage_ids), label) for label, cage_ids in sorted(labelled.items())),
-                ("unclassified", cluster.unclassified_cage_ids, "-"),
-                ("ambiguous", cluster.ambiguous_cage_ids, "-"),
+                *(
+                    (f"{phase} phase", tuple(phase_groups[phase]), phase)
+                    for phase in PHASE_DISPLAY_ORDER
+                    if phase_groups[phase]
+                ),
+                (
+                    "unclassified",
+                    tuple(cage_id for cage_id in cluster.unclassified_cage_ids if cage_id in boundary_ids),
+                    "-",
+                ),
+                (
+                    "ambiguous",
+                    tuple(cage_id for cage_id in cluster.ambiguous_cage_ids if cage_id in boundary_ids),
+                    "-",
+                ),
             ]
             boundary_groups = [item for item in boundary_groups if item[1]]
             for group_index, (name, cage_ids, hydrate_type) in enumerate(boundary_groups):
@@ -673,22 +742,30 @@ def hydrate_boundary_info_section(result: FrameResult) -> list[str]:
     lines = ["", "## Hydrate Boundary", ""]
     cage_by_id = {cage.object_id: cage for cage in (result.all_cages or result.cages)}
     for cluster in clusters:
+        boundary_ids = set(cluster.boundary_cage_ids)
+        boundary_phase_counts = boundary_phase_counts_for_cluster(result, cluster)
+        unclassified_boundary_ids = boundary_ids.intersection(cluster.unclassified_cage_ids)
+        ambiguous_boundary_ids = boundary_ids.intersection(cluster.ambiguous_cage_ids)
         unclassified_counts = Counter(
-            cage_by_id[cage_id].cage_type for cage_id in cluster.unclassified_cage_ids if cage_id in cage_by_id
+            cage_by_id[cage_id].cage_type for cage_id in unclassified_boundary_ids if cage_id in cage_by_id
         )
         ambiguous_counts = Counter(
-            cage_by_id[cage_id].cage_type for cage_id in cluster.ambiguous_cage_ids if cage_id in cage_by_id
+            cage_by_id[cage_id].cage_type for cage_id in ambiguous_boundary_ids if cage_id in cage_by_id
         )
         labelled_ids: dict[str, list[str]] = defaultdict(list)
         for cage_id, label in cluster.phase_boundary_labels:
             labelled_ids[label].append(cage_id)
         rows = [
             ["boundary_cage_count", len(cluster.boundary_cage_ids)],
+            ["classified_boundary_cage_count", sum(boundary_phase_counts.values())],
+            ["sI_boundary_cage_count", boundary_phase_counts.get("sI", 0)],
+            ["sII_boundary_cage_count", boundary_phase_counts.get("sII", 0)],
+            ["sH_boundary_cage_count", boundary_phase_counts.get("sH", 0)],
             ["interphase_boundary_cage_count", len(cluster.transition_cage_ids)],
-            ["unclassified_cage_count", len(cluster.unclassified_cage_ids)],
-            ["unclassified_composition", format_cage_type_counts(unclassified_counts)],
-            ["ambiguous_cage_count", len(cluster.ambiguous_cage_ids)],
-            ["ambiguous_composition", format_cage_type_counts(ambiguous_counts)],
+            ["unclassified_boundary_cage_count", len(unclassified_boundary_ids)],
+            ["unclassified_boundary_composition", format_cage_type_counts(unclassified_counts)],
+            ["ambiguous_boundary_cage_count", len(ambiguous_boundary_ids)],
+            ["ambiguous_boundary_composition", format_cage_type_counts(ambiguous_counts)],
         ]
         for label, cage_ids in sorted(labelled_ids.items()):
             counts = Counter(
@@ -696,8 +773,8 @@ def hydrate_boundary_info_section(result: FrameResult) -> list[str]:
                 for cage_id in cage_ids
                 if cage_id in cage_by_id
             )
-            rows.append([f"{label}_boundary_cage_count", len(cage_ids)])
-            rows.append([f"{label}_boundary_composition", format_cage_type_counts(counts)])
+            rows.append([f"{label}_boundary_context_cage_count", len(cage_ids)])
+            rows.append([f"{label}_boundary_context_composition", format_cage_type_counts(counts)])
         lines.extend(object_vertical_table(cluster.object_id, rows))
     return lines
 
@@ -723,6 +800,17 @@ def split_record_ids(value: Any) -> list[str]:
     return [item for item in str(value).split(";") if item]
 
 
+def boundary_phase_counts_for_cluster(result: FrameResult, cluster: Any) -> Counter[str]:
+    """Count phase-classified boundary cages without double-counting cage ids."""
+    boundary_ids = set(cluster.boundary_cage_ids)
+    counts: Counter[str] = Counter()
+    for domain in result.hydrate_domains:
+        if domain.cluster_id != cluster.object_id:
+            continue
+        counts[domain.hydrate_type] += len(boundary_ids.intersection(domain.cage_ids))
+    return counts
+
+
 def hydrate_cluster_detail_records(
     result: FrameResult,
     guests_by_id: dict[str, Any],
@@ -738,6 +826,10 @@ def hydrate_cluster_detail_records(
         type_counts = Counter(cage.cage_type for cage in cluster_cages)
         ordered_types = present_cage_types(type_counts)
         classified_fraction = 0.0 if not cluster.cage_count else len(cluster.classified_cage_ids) / cluster.cage_count
+        boundary_ids = set(cluster.boundary_cage_ids)
+        boundary_phase_counts = boundary_phase_counts_for_cluster(result, cluster)
+        unclassified_boundary_ids = boundary_ids.intersection(cluster.unclassified_cage_ids)
+        ambiguous_boundary_ids = boundary_ids.intersection(cluster.ambiguous_cage_ids)
         records.append(
             {
                 "cluster_id": cluster.object_id,
@@ -748,13 +840,20 @@ def hydrate_cluster_detail_records(
                 "empty_cage_count": sum(1 for cage in cluster_cages if not cage.occupied),
                 "occupied_cage_count": sum(1 for cage in cluster_cages if cage.occupied),
                 "classified_cage_count": len(cluster.classified_cage_ids),
+                "classified_boundary_cage_count": sum(boundary_phase_counts.values()),
+                "sI_boundary_cage_count": boundary_phase_counts.get("sI", 0),
+                "sII_boundary_cage_count": boundary_phase_counts.get("sII", 0),
+                "sH_boundary_cage_count": boundary_phase_counts.get("sH", 0),
                 "interphase_boundary_cage_count": len(cluster.transition_cage_ids),
                 "unclassified_cage_count": len(cluster.unclassified_cage_ids),
+                "unclassified_boundary_cage_count": len(unclassified_boundary_ids),
                 "ambiguous_cage_count": len(cluster.ambiguous_cage_ids),
+                "ambiguous_boundary_cage_count": len(ambiguous_boundary_ids),
                 "boundary_cage_count": len(cluster.boundary_cage_ids),
                 "classified_cage_fraction": classified_fraction,
                 "domain_count": cluster.domain_count,
                 "phase_boundary_counts": dict(Counter(label for _, label in cluster.phase_boundary_labels)),
+                "boundary_phase_counts": dict(boundary_phase_counts),
                 "cage_type_counts": {cage_type: type_counts[cage_type] for cage_type in ordered_types},
                 "cage_composition": ";".join(f"{cage_display_label(cage_type)}:{type_counts[cage_type]}" for cage_type in ordered_types),
                 "guest_composition": cluster_guest_composition(cluster.guest_ids, guests_by_id, guest_order),
@@ -903,7 +1002,7 @@ def write_frame_info(
 ) -> None:
     """Write the per-frame Markdown report with inspection-oriented tables."""
     frame_dir.mkdir(parents=True, exist_ok=True)
-    row = result_row(result)
+    row = result_row(result, include_cluster_details=False)
     selected_order_parameters = selected_order_parameters_for_result(
         result,
         order_parameters,
@@ -951,8 +1050,6 @@ def write_frame_info(
     lines.extend(cage_info_section(result, cage_types))
     lines.extend(cage_isomer_description_section(result, cage_types))
     lines.extend(cage_occupancy_section(result, cage_types))
-    lines.extend(hydrate_cluster_info_section(result, row))
-
     has_focus = result.f3f4 is not None and bool(result.f3f4.focus_resids)
     order_headers = ["metric", "count", "mean"]
     if has_focus:
@@ -1618,7 +1715,10 @@ def write_summary(
     metrics["run_config_initial_seconds"] = round(perf_counter() - config_started, 6)
 
     detail_index = pd.DataFrame()
-    if output_enabled(config, "summary-detail"):
+    if (
+        output_enabled(config, "summary-detail")
+        or output_enabled(config, "cluster-detail")
+    ):
         detail_build_started = perf_counter()
         detail_tables = summary_detail_tables(data, config, raw_rows=rows)
         metrics["detail_table_build_seconds"] = round(perf_counter() - detail_build_started, 6)
@@ -1822,11 +1922,13 @@ def config_with_run_metadata(config: dict[str, Any], run_info: dict[str, Any]) -
             "order_parameters",
             order_parameter_display(config.get("order", {}).get("parameters")),
         ),
-        "disabled_outputs": run_info.get(
-            "disabled_outputs",
-            disabled_output_display(
-                config.get("output", {}).get("disabled_outputs")
-            ),
+        "find_cluster": run_info.get(
+            "find_cluster",
+            "on" if config.get("hydrate_cluster", {}).get("enabled", False) else "off",
+        ),
+        "output_types": run_info.get(
+            "output_types",
+            output_type_display(config.get("output", {}).get("types")),
         ),
         "frames_total": run_info.get("frames_total", ""),
         "frames_ok": run_info.get("frames_ok", ""),
@@ -1978,9 +2080,8 @@ def summary_dashboard_table(data: pd.DataFrame, run_info: dict[str, Any], config
         ["Quasi search policy", config.get("quasi_cage", {}).get("search_policy", "bounded")],
         ["Cage report types", dashboard_cage_targets(config)],
         ["Maximum cage face", config.get("cage", {}).get("max_faces", 20)],
-        ["Hydrate cluster", "on" if config.get("hydrate_cluster", {}).get("enabled", False) else "off"],
+        ["Find cluster", "on" if config.get("hydrate_cluster", {}).get("enabled", False) else "off"],
         ["Cluster min cage", config.get("hydrate_cluster", {}).get("min_cage", 2)],
-        ["Cluster detail", "on" if config.get("hydrate_cluster", {}).get("detail", False) else "off"],
         ["Order parameters", order_parameter_display(selected_order_parameters)],
     ])
     if selected_order_set & {"mcg1", "mcg3"}:
@@ -2003,11 +2104,9 @@ def summary_dashboard_table(data: pd.DataFrame, run_info: dict[str, Any], config
         ])
     rows.extend([
         [
-            "Disabled outputs",
-            run_info.get("disabled_outputs")
-            or disabled_output_display(
-                config.get("output", {}).get("disabled_outputs")
-            ),
+            "Output types",
+            run_info.get("output_types")
+            or output_type_display(config.get("output", {}).get("types")),
         ],
         ["Output layout", run_info.get("output_layout", "")],
         ["Worker policy", run_info.get("worker_policy", "")],
@@ -2029,10 +2128,13 @@ def summary_dashboard_table(data: pd.DataFrame, run_info: dict[str, Any], config
         ["Cage total", min_mean_max_column(data, "cage_total")],
         ["Empty cage", min_mean_max_column(data, "cage_empty")],
         ["Occupied cage", min_mean_max_column(data, "cage_occupied")],
-        ["Hydrate cluster", min_mean_max_column(data, "hydrate_cluster_count")],
-        ["Isolated cage", min_mean_max_column(data, "isolated_cage_count")],
-        ["Ice-like waters", min_mean_max_column(data, "ice_like_waters")],
     ])
+    if config.get("hydrate_cluster", {}).get("enabled", False):
+        rows.extend([
+            ["Hydrate cluster", min_mean_max_column(data, "hydrate_cluster_count")],
+            ["Isolated cage", min_mean_max_column(data, "isolated_cage_count")],
+        ])
+    rows.append(["Ice-like waters", min_mean_max_column(data, "ice_like_waters")])
     return pd.DataFrame(rows)
 
 
@@ -2364,21 +2466,33 @@ def summary_detail_tables(
 ) -> dict[str, pd.DataFrame]:
     """Build potentially large multi-row detail tables for summary_detail CSV output."""
     include_zero_isomers = str(config.get("output", {}).get("cage_isomer_rows", "nonzero")).lower() == "all"
-    tables: dict[str, pd.DataFrame] = {
-        "failures": failure_summary_table(data),
-        "cage_occupancy": cage_occupancy_summary_table(data, markdown_style=False),
-        "cage_isomer": cage_isomer_summary_table(data, include_zero_rows=include_zero_isomers),
-        "quasi_cage_isomer": quasi_cage_isomer_summary_table(data, raw_rows=raw_rows),
-        "hydrate_domain": hydrate_domain_table(data),
-    }
-    detail_enabled = bool(config.get("hydrate_cluster", {}).get("detail", False))
-    if detail_enabled:
+    tables: dict[str, pd.DataFrame] = {}
+    if output_enabled(config, "summary-detail"):
+        tables.update(
+            {
+                "failures": failure_summary_table(data),
+                "cage_occupancy": cage_occupancy_summary_table(
+                    data,
+                    markdown_style=False,
+                ),
+                "cage_isomer": cage_isomer_summary_table(
+                    data,
+                    include_zero_rows=include_zero_isomers,
+                ),
+                "quasi_cage_isomer": quasi_cage_isomer_summary_table(
+                    data,
+                    raw_rows=raw_rows,
+                ),
+            }
+        )
+    cluster_detail_enabled = output_enabled(config, "cluster-detail")
+    if cluster_detail_enabled:
+        tables["hydrate_domain"] = hydrate_domain_table(data)
         tables["hydrate_cluster_detail"] = hydrate_cluster_detail_table(data)
     keep_empty: set[str] = set()
-    if hydrate_cluster_is_enabled(data):
+    if cluster_detail_enabled and hydrate_cluster_is_enabled(data):
         keep_empty.add("hydrate_domain")
-        if detail_enabled:
-            keep_empty.add("hydrate_cluster_detail")
+        keep_empty.add("hydrate_cluster_detail")
     return {name: table for name, table in tables.items() if not table.empty or name in keep_empty}
 
 
@@ -2400,10 +2514,16 @@ def hydrate_cluster_summary_table(data: pd.DataFrame) -> pd.DataFrame:
         "sII_domain_count",
         "sH_domain_count",
         "boundary_cage_count",
+        "classified_boundary_cage_count",
+        "unclassified_boundary_cage_count",
+        "ambiguous_boundary_cage_count",
         "transition_cage_count",
         "sI_boundary_cage_count",
         "sII_boundary_cage_count",
         "sH_boundary_cage_count",
+        "sI_boundary_context_cage_count",
+        "sII_boundary_context_cage_count",
+        "sH_boundary_context_cage_count",
         "sI_sII_boundary_cage_count",
         "sI_sH_boundary_cage_count",
         "sII_sH_boundary_cage_count",
@@ -2444,8 +2564,11 @@ def expanded_hydrate_table(data: pd.DataFrame, column: str) -> pd.DataFrame:
         "hydrate_cluster_detail": [
             "cluster_id", "hydrate_type", "cage_count", "water_count", "guest_count",
             "empty_cage_count", "occupied_cage_count", "classified_cage_count",
-            "interphase_boundary_cage_count", "unclassified_cage_count", "ambiguous_cage_count", "boundary_cage_count",
-            "classified_cage_fraction", "domain_count", "phase_boundary_counts", "cage_type_counts",
+            "classified_boundary_cage_count", "sI_boundary_cage_count", "sII_boundary_cage_count",
+            "sH_boundary_cage_count", "interphase_boundary_cage_count", "unclassified_cage_count",
+            "unclassified_boundary_cage_count", "ambiguous_cage_count", "ambiguous_boundary_cage_count",
+            "boundary_cage_count", "classified_cage_fraction", "domain_count", "phase_boundary_counts",
+            "boundary_phase_counts", "cage_type_counts",
             "cage_composition", "guest_composition", "domain_ids", "cage_ids",
             "boundary_cage_ids", "interphase_boundary_cage_ids", "phase_boundary_labels", "shared_face_count",
         ],
@@ -2963,12 +3086,3 @@ def flatten_config(config: dict[str, Any], prefix: str = "") -> list[dict[str, s
         else:
             rows.append({"parameter": name, "value": repr(value)})
     return rows
-
-
-
-
-
-
-
-
-
