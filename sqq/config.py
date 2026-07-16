@@ -48,6 +48,7 @@ ALL_OUTPUT_TYPES = (
     "order-tsv",
     "vmd",
     "gro",
+    "cluster-gro",
     "xlsx",
     "summary-detail",
     "cluster-detail",
@@ -63,6 +64,7 @@ OUTPUT_TYPE_ORDER = (
     "quasi-gro",
     "cage-gro",
     "ice-gro",
+    "cluster-gro",
     "xlsx",
     "summary-detail",
     "cluster-detail",
@@ -347,7 +349,7 @@ def normalize_output_types(value: Any = None) -> tuple[str, ...]:
         raise ValueError(
             f"Unsupported output type(s) {unknown}. Use info, membership-tsv, "
             "order-tsv, vmd, gro, ring-gro, half-gro, quasi-gro, cage-gro, "
-            "ice-gro, xlsx, summary-detail, cluster-detail, all, or none."
+            "ice-gro, cluster-gro, xlsx, summary-detail, cluster-detail, all, or none."
         )
     normalized = set(cleaned)
     if "gro" in normalized:

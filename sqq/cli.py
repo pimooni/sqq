@@ -155,13 +155,13 @@ def build_parser() -> argparse.ArgumentParser:
     analyze_parser.add_argument("-w", "--worker", metavar="N|auto", default=None, help="Worker count or physical-core fraction; e.g. 1, 4, 0.5, 1.0, or 50%%. Reserves one physical core.")
     analyze_parser.add_argument("--workers", dest="worker", metavar="N|auto", help=argparse.SUPPRESS)
     analyze_parser.add_argument("--strict", action="store_true", help="Stop on the first failed frame.")
-    analyze_parser.add_argument("--output-layout", choices=["grouped", "flat"], help="GRO layout: grouped uses ring/, half_cage/<type>/, quasi_cage/<type>/, cage/<type>/, and ice/; flat keeps same-folder files.")
+    analyze_parser.add_argument("--output-layout", choices=["grouped", "flat"], help="GRO layout: grouped uses ring/, half_cage/<type>/, quasi_cage/<type>/, cage/<type>/, hydrate_cluster/, and ice/; flat keeps same-folder files.")
     analyze_parser.add_argument(
         "--output-type",
         metavar="TYPE[,TYPE...]",
         help=(
             "Select outputs: info, membership-tsv, order-tsv, vmd, gro, "
-            "ring-gro, half-gro, quasi-gro, cage-gro, ice-gro, xlsx, "
+            "ring-gro, half-gro, quasi-gro, cage-gro, ice-gro, cluster-gro, xlsx, "
             "summary-detail, cluster-detail, all, or none. "
             "Default: info,gro,xlsx,summary-detail."
         ),

@@ -199,17 +199,16 @@ def analyze_hydrate_clusters(
     )
 
     domain_members = {index for spec in specs for index in spec.cage_indexes}
-    boundary_labels, ambiguous_indexes = resolve_boundary_labels(
+    boundary_indexes, ambiguous_indexes = resolve_boundary_cages(
         clusters,
         cluster_components,
-        specs,
         claims,
         adjacency,
         domain_members,
     )
     specs = attach_domain_boundaries(
         specs,
-        boundary_labels,
+        boundary_indexes,
         adjacency,
     )
     domains = materialize_domains(specs, cages)
@@ -218,8 +217,7 @@ def analyze_hydrate_clusters(
         cluster_components,
         domains,
         cages,
-        claims,
-        boundary_labels,
+        boundary_indexes,
         ambiguous_indexes,
     )
     return clusters, [], domains, tuple(isolated)
@@ -655,79 +653,39 @@ def build_domain_specs(
     )
 
 
-def resolve_boundary_labels(
+def resolve_boundary_cages(
     clusters: list[HydrateCluster],
     cluster_components: dict[str, tuple[int, ...]],
-    specs: list[DomainSpec],
     claims: dict[int, set[str]],
     adjacency: dict[int, set[int]],
     domain_members: set[int],
-) -> tuple[dict[int, tuple[str, ...]], set[int]]:
-    """Label the first shared-face cage layer on each domain boundary."""
-    domain_phase_by_index = {
-        index: spec.hydrate_type
-        for spec in specs
-        for index in spec.cage_indexes
-    }
-    label_sets: dict[int, set[str]] = defaultdict(set)
+) -> tuple[set[int], set[int]]:
+    """Return the external first cage layer and unresolved phase claims."""
+    boundary: set[int] = set()
     ambiguous: set[int] = set()
     for cluster in clusters:
         component = cluster_components[cluster.object_id]
         component_set = set(component)
-
-        # A non-domain cage and every directly contacted domain cage form one
-        # boundary layer. Claims retain phase evidence on distorted cages.
         for index in component:
             if index in domain_members:
                 continue
-            phase_claims = set(claims.get(index, set()))
-            domain_neighbors = {
-                neighbor
+            touches_domain = any(
+                neighbor in domain_members
                 for neighbor in adjacency[index].intersection(component_set)
-                if neighbor in domain_phase_by_index
-            }
-            contacted = {
-                domain_phase_by_index[neighbor] for neighbor in domain_neighbors
-            }
-            if not contacted:
-                if len(phase_claims) > 1:
-                    ambiguous.add(index)
-                continue
-            boundary_phases = contacted.union(phase_claims)
-            label_sets[index].update(boundary_phases)
-            for neighbor in domain_neighbors:
-                label_sets[neighbor].update(boundary_phases)
-
-        # Direct contacts between two exclusive phase domains also place both
-        # complete cages in the interphase boundary layer.
-        for left in component:
-            left_phase = domain_phase_by_index.get(left)
-            if left_phase is None:
-                continue
-            for right in adjacency[left].intersection(component_set):
-                if right <= left:
-                    continue
-                right_phase = domain_phase_by_index.get(right)
-                if right_phase is None or right_phase == left_phase:
-                    continue
-                phases = {left_phase, right_phase}
-                label_sets[left].update(phases)
-                label_sets[right].update(phases)
-
-    labels = {
-        index: tuple(phase for phase in PHASE_TYPES if phase in phases)
-        for index, phases in label_sets.items()
-    }
-    return labels, ambiguous
+            )
+            if touches_domain:
+                boundary.add(index)
+            elif len(claims.get(index, set())) > 1:
+                ambiguous.add(index)
+    return boundary, ambiguous
 
 
 def attach_domain_boundaries(
     specs: list[DomainSpec],
-    boundary_labels: dict[int, tuple[str, ...]],
+    boundary_indexes: set[int],
     adjacency: dict[int, set[int]],
 ) -> list[DomainSpec]:
     """Attach unique external boundary contacts to every domain."""
-    boundary_indexes = set(boundary_labels)
     output: list[DomainSpec] = []
     for spec in specs:
         members = set(spec.cage_indexes)
@@ -787,11 +745,10 @@ def enrich_clusters(
     cluster_components: dict[str, tuple[int, ...]],
     domains: list[HydrateDomain],
     cages: list[Cage],
-    claims: dict[int, set[str]],
-    boundary_labels: dict[int, tuple[str, ...]],
+    boundary_indexes: set[int],
     ambiguous_indexes: set[int],
 ) -> list[HydrateCluster]:
-    """Attach exclusive phase domains and independent boundary labels."""
+    """Partition each cluster into phase, boundary, ambiguous, and residual cages."""
     cage_index_by_id = {cage.object_id: index for index, cage in enumerate(cages)}
     output: list[HydrateCluster] = []
     for cluster in clusters:
@@ -804,17 +761,13 @@ def enrich_clusters(
             for domain in cluster_domains
             for cage_id in domain.cage_ids
         }
-        component_boundary_labels = {
-            index: boundary_labels[index]
-            for index in component
-            if index in boundary_labels
-        }
-        phase_boundary_indexes = {
-            index for index, labels in component_boundary_labels.items() if len(labels) > 1
-        }
-        ambiguous = set(component).intersection(ambiguous_indexes)
-        unclassified = set(component).difference(classified_indexes, ambiguous)
-        boundary = set(component).intersection(component_boundary_labels)
+        boundary = set(component).intersection(boundary_indexes)
+        ambiguous = set(component).intersection(ambiguous_indexes).difference(boundary)
+        unclassified = set(component).difference(
+            classified_indexes,
+            boundary,
+            ambiguous,
+        )
         domain_types = {domain.hydrate_type for domain in cluster_domains}
         if not domain_types:
             hydrate_type = "unclassified"
@@ -826,13 +779,6 @@ def enrich_clusters(
             domain.hydrate_type
             for domain in cluster_domains
             for _ in domain.cage_ids
-        )
-        phase_label_pairs = tuple(
-            (
-                cages[index].object_id,
-                "+".join(component_boundary_labels[index]),
-            )
-            for index in sorted(component_boundary_labels)
         )
         output.append(
             replace(
@@ -849,9 +795,6 @@ def enrich_clusters(
                 ambiguous_cage_ids=tuple(
                     cages[index].object_id for index in component if index in ambiguous
                 ),
-                transition_cage_ids=tuple(
-                    cages[index].object_id for index in component if index in phase_boundary_indexes
-                ),
                 boundary_cage_ids=tuple(
                     cages[index].object_id for index in component if index in boundary
                 ),
@@ -860,7 +803,6 @@ def enrich_clusters(
                     for phase in PHASE_TYPES
                     if type_counts[phase]
                 ),
-                phase_boundary_labels=phase_label_pairs,
             )
         )
     return output

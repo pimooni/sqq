@@ -71,6 +71,7 @@ from .core.selection import select_guests, select_waters
 from .io.gro_writer import (
     write_cage_gro_files,
     write_half_cage_gro_files,
+    write_hydrate_cluster_gro_files,
     write_ice_gro_file,
     write_quasi_cage_gro_files,
     write_ring_gro_files,
@@ -1496,6 +1497,14 @@ def write_frame_outputs(result: FrameResult, frame_dir: Path, config: dict[str, 
             write_empty=write_empty,
             layout=layout,
         )
+    remove_generated_gro_outputs(result, frame_dir, "cluster-gro", layout)
+    if result.hydrate_cluster_enabled and output_enabled(config, "cluster-gro"):
+        write_hydrate_cluster_gro_files(
+            result,
+            frame_dir,
+            write_empty=write_empty,
+            layout=layout,
+        )
     remove_generated_gro_outputs(result, frame_dir, "ice-gro", layout)
     if output_enabled(config, "ice-gro"):
         write_ice_gro_file(
@@ -1542,6 +1551,7 @@ def remove_generated_gro_outputs(
         "quasi-gro": "quasi_cage",
         "cage-gro": "cage",
         "ice-gro": "ice",
+        "cluster-gro": "hydrate_cluster",
     }
     flat_patterns = {
         "ring-gro": f"{result.frame.name}_ring_*.gro",
@@ -1549,6 +1559,7 @@ def remove_generated_gro_outputs(
         "quasi-gro": f"{result.frame.name}_qc_*.gro",
         "cage-gro": f"{result.frame.name}_cage_*.gro",
         "ice-gro": f"{result.frame.name}_ice*.gro",
+        "cluster-gro": f"{result.frame.name}_cluster_*.gro",
     }
     if layout not in {"grouped", "flat"}:
         raise ValueError("output.structure_layout must be 'grouped' or 'flat'.")
@@ -2064,13 +2075,28 @@ def normalize_analysis_scopes(config: dict[str, Any]) -> None:
         and str(next(iter(raw_output_types))).strip().lower() == "all"
     )
     output_types = list(normalize_output_types(raw_output_types))
-    if not hydrate_cluster["enabled"] and "cluster-detail" in output_types:
-        if all_requested:
-            output_types.remove("cluster-detail")
-        else:
+    if not hydrate_cluster["enabled"]:
+        conditional_cluster_outputs = {
+            "cluster-gro",
+            "cluster-detail",
+        }.intersection(output_types)
+        if conditional_cluster_outputs and all_requested:
+            output_types = [
+                output_type
+                for output_type in output_types
+                if output_type not in conditional_cluster_outputs
+            ]
+        elif conditional_cluster_outputs:
+            names = ", ".join(sorted(conditional_cluster_outputs))
             raise ValueError(
-                "output type 'cluster-detail' requires --find-cluster on."
+                f"output type(s) {names} require --find-cluster on."
             )
+    if hydrate_cluster["enabled"] and "cluster-gro" not in output_types:
+        output_types = list(normalize_output_types([*output_types, "cluster-gro"]))
+        print(
+            "Note: cluster-gro was enabled because cluster search is on.",
+            file=sys.stderr,
+        )
     if hydrate_cluster["enabled"] and "xlsx" not in output_types:
         output_types = list(normalize_output_types([*output_types, "xlsx"]))
         print(

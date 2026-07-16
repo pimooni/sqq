@@ -165,10 +165,8 @@ class HydrateCluster:
     classified_cage_ids: tuple[str, ...] = ()
     unclassified_cage_ids: tuple[str, ...] = ()
     ambiguous_cage_ids: tuple[str, ...] = ()
-    transition_cage_ids: tuple[str, ...] = ()
     boundary_cage_ids: tuple[str, ...] = ()
     hydrate_type_counts: tuple[tuple[str, int], ...] = ()
-    phase_boundary_labels: tuple[tuple[str, str], ...] = ()
 
     @property
     def cage_count(self) -> int:
@@ -197,7 +195,7 @@ class HydrateCluster:
 
     @property
     def boundary_cage_count(self) -> int:
-        """Number of unique cages in the shared-face boundary layer."""
+        """Number of non-phase cages in the external boundary layer."""
         return len(self.boundary_cage_ids)
 
 

@@ -2,6 +2,63 @@
 
 This file records versioned update notes. New releases should be appended above older entries.
 
+## Version 0.2.9
+
+### Short Summary
+
+Version 0.2.9 replaces overlapping phase/boundary labels with one mutually exclusive hydrate-cluster partition. Final sI, sII, and sH domain cages remain classified phase cages; the generic boundary contains only non-domain cages in the first complete shared-face layer outside a final phase domain. Direct phase-phase contacts no longer relabel either endpoint, boundary membership does not propagate beyond the first external layer, and the former sI/sII/sH-boundary, transition, and interface-context categories are removed. Enabled cluster search now also forces native per-frame sI/sII/sH/boundary GRO views together with XLSX output. Phase seeds and domain expansion are unchanged, but boundary IDs, cluster-summary schemas, and cluster output files intentionally change from 0.2.8.
+
+### Main Changes
+
+1. Mutually exclusive cluster categories
+   - Every cage in a reported cluster belongs to exactly one of `classified_cage_ids`, `boundary_cage_ids`, `ambiguous_cage_ids`, or `unclassified_cage_ids`.
+   - `classified_cage_ids` remains the union of exclusive final sI, sII, and sH domains.
+   - Boundary, ambiguous, and residual unclassified cages are selected only after the final domains are frozen.
+   - The four category counts sum to the cluster's unique `cage_count`.
+
+2. Generic external first-layer boundary
+   - A boundary cage must be outside every final phase domain and share a complete cage face with at least one domain cage.
+   - Only the non-domain cage is marked. Its contacted domain neighbors retain only their sI, sII, or sH identity.
+   - A direct contact between different phase domains does not create a boundary cage by itself and does not relabel either endpoint.
+   - Search stops at the first external non-phase layer; another non-domain graph step is not added automatically.
+   - A non-domain cage touching multiple phase domains remains one generic boundary cage.
+
+3. Removed overlap categories
+   - Removed `sI-boundary`, `sII-boundary`, `sH-boundary`, phase-boundary context labels, and transition-cage membership.
+   - Removed the old phase-specific, classified/unclassified/ambiguous-boundary, transition, and interface-context report fields.
+   - Competing phase claims outside the boundary remain ambiguous; all other residual cluster cages remain unclassified.
+
+4. Workbook and cluster-detail reporting
+   - The `hydrate_cluster` workbook sheet now reports `classified_cage_count`, `boundary_cage_count`, `ambiguous_cage_count`, and `unclassified_cage_count`.
+   - `hydrate_cluster_detail.csv` exposes the four corresponding cage-ID groups and adds `boundary_composition`.
+   - `hydrate_domain.csv` names direct external adjacency as `external_boundary_contact_count` and `external_boundary_contact_ids`.
+   - Domain boundary-contact records remain relationships; they do not assign another scientific category to a cage.
+
+5. Native cluster GRO output
+   - Added the search-dependent `cluster-gro` output type. Resolved `--find-cluster on` forces both `cluster-gro` and `xlsx`, even when the requested output selection is `none`.
+   - Resolved cluster search off writes no category GRO files. Reusing an output directory removes stale SQQ-generated grouped `hydrate_cluster` directories and flat cluster filenames.
+   - Grouped layout writes `<frame>/hydrate_cluster/<frame>_cluster_sI.gro`, `<frame>_cluster_sII.gro`, `<frame>_cluster_sH.gro`, and `<frame>_cluster_boundary.gro`; flat layout places the same filenames at the frame root.
+   - Each file aggregates every domain/cluster of its category within the frame. Ambiguous, residual unclassified, isolated, and below-threshold cage IDs are omitted.
+   - Export maps exclusive cage IDs to deduplicated complete water molecules only. Guests, CNT atoms, and other non-water molecules are excluded.
+   - Missing categories are omitted unless `output.write_empty_files` is enabled.
+   - Every exported atom retains its exact original wrapped frame coordinate and every file retains the original box. No category is moved, centered, unwrapped, or independently made whole.
+   - Periodic/percolating networks may retain cross-box lines because one single-copy GRO cannot remove every periodic seam. Different category files may share face-water molecules even though their cage IDs are exclusive.
+
+6. Package version and verification
+   - Updated `pyproject.toml`, `sqq.__version__`, and root version output to `0.2.9`, released Jul 16, 2026.
+   - Unit tests cover mutually exclusive classification, direct phase-phase contact, multi-phase contact through one non-domain cage, first-layer stopping, sH behavior, report schemas, category-count conservation, forced cluster output, grouped/flat paths, stale cleanup, molecule completeness, and exact PBC coordinate/box preservation.
+   - The mixed sI/sII real-GRO regression contains one 334-cage main cluster: 260 classified cages (66 sI and 194 sII), 69 boundary cages, 0 ambiguous cages, and 5 residual unclassified cages. Five additional cages are isolated or in below-threshold components. All main-cluster category ID sets are disjoint.
+
+### Compatibility
+
+- Ring, half-cage, quasi-cage, closed-cage, occupancy, F3/F4/Q_l, MCG/DHOP, ice, phase-seed, and phase-domain expansion results are unchanged by this release.
+- Boundary cage IDs and every report derived from the former overlapping boundary model can intentionally change.
+- Code must no longer expect phase cages inside `boundary_cage_ids`, phase-specific boundary categories, `transition_cage_ids`, or phase-boundary context labels.
+- Consumers of `summary.xlsx`, `hydrate_cluster_detail.csv`, or `hydrate_domain.csv` must use the new mutually exclusive count/ID fields and renamed external-contact fields.
+- `cluster-gro` is now a canonical output type but requires cluster search. Search on forces it together with XLSX; search off suppresses it and cleans stale generated category files.
+- Cluster GRO consumers receive full water molecules in original wrapped coordinates and the original box, not independently unwrapped or centered category structures.
+- Neighboring cages may still share face-water coordinates in structure files; mutual exclusivity applies to detected cage IDs, not to the union of their water atoms.
+
 ## Version 0.2.8
 
 ### Short Summary

@@ -16,6 +16,7 @@ from .occupancy import guest_composition_label, guest_lookup, guest_resname_orde
 
 RING_CENTER_NAMES = {4: "R4", 5: "R5", 6: "R6", 7: "R7"}
 CAGE_CENTER_NAMES = {"512": "G512", "51262": "G62", "51263": "G63", "51264": "G64", "51268": "G68", "435663": "G436"}
+HYDRATE_CLUSTER_GRO_LABELS = ("sI", "sII", "sH", "boundary")
 SUPERSCRIPT_DIGITS = str.maketrans("0123456789-", "⁰¹²³⁴⁵⁶⁷⁸⁹⁻")
 SUPERSCRIPT_TO_ASCII = str.maketrans("⁰¹²³⁴⁵⁶⁷⁸⁹⁻", "0123456789-")
 SUBSCRIPT_TO_ASCII = str.maketrans("₀₁₂₃₄₅₆₇₈₉", "0123456789")
@@ -197,6 +198,82 @@ def aggregate_cage_atoms(
             )
         )
     return [atom_indices[idx] for idx in sorted(atom_indices)] + centers
+
+
+def write_hydrate_cluster_gro_files(
+    result: FrameResult,
+    frame_dir: Path,
+    write_empty: bool = False,
+    layout: str = "grouped",
+) -> None:
+    """Write one frame-wide water-only GRO file per cluster category."""
+    if not result.hydrate_cluster_enabled:
+        return
+    cage_groups = hydrate_cluster_cage_groups(result)
+    for label in HYDRATE_CLUSTER_GRO_LABELS:
+        oxygens = tuple(
+            sorted(
+                {
+                    oxygen
+                    for cage in cage_groups[label]
+                    for oxygen in cage.waters
+                }
+            )
+        )
+        atoms = aggregate_water_atoms(result.frame, result.waters, oxygens)
+        if not atoms and not write_empty:
+            continue
+        filename = f"{result.frame.name}_cluster_{label}.gro"
+        path = structure_path(
+            frame_dir,
+            "hydrate_cluster",
+            filename,
+            filename,
+            layout,
+        )
+        write_gro(
+            path,
+            f"{result.frame.name} hydrate cluster {label}",
+            atoms,
+            result.frame.box,
+        )
+
+
+def hydrate_cluster_cage_groups(result: FrameResult) -> dict[str, list[Cage]]:
+    """Return cage-exclusive phase and boundary groups in stable cage order."""
+    cage_source = result.all_cages or result.cages
+    cage_by_id = {cage.object_id: cage for cage in cage_source}
+    cage_ids: dict[str, set[str]] = {
+        label: set() for label in HYDRATE_CLUSTER_GRO_LABELS
+    }
+    for domain in result.hydrate_domains:
+        if domain.hydrate_type in cage_ids:
+            cage_ids[domain.hydrate_type].update(domain.cage_ids)
+    for cluster in result.hydrate_clusters:
+        cage_ids["boundary"].update(cluster.boundary_cage_ids)
+
+    claimed_by: dict[str, str] = {}
+    for label in HYDRATE_CLUSTER_GRO_LABELS:
+        for cage_id in cage_ids[label]:
+            previous = claimed_by.setdefault(cage_id, label)
+            if previous != label:
+                raise ValueError(
+                    "Hydrate cluster GRO categories must be cage-exclusive; "
+                    f"{cage_id} belongs to both {previous} and {label}."
+                )
+
+    missing = sorted(set(claimed_by).difference(cage_by_id))
+    if missing:
+        raise ValueError(
+            "Hydrate cluster GRO output references unknown cage ids: "
+            + ", ".join(missing[:10])
+        )
+    return {
+        label: [
+            cage for cage in cage_source if cage.object_id in cage_ids[label]
+        ]
+        for label in HYDRATE_CLUSTER_GRO_LABELS
+    }
 
 
 def write_ice_gro_file(result: FrameResult, frame_dir: Path, write_empty: bool = False, layout: str = "grouped") -> None:
