@@ -21,6 +21,8 @@ from .. import __version__
 from ..banner import SQQ_BANNER
 from ..config import (
     dump_config,
+    mode_label,
+    normalize_mode,
     normalize_order_parameters,
     order_parameter_display,
     output_enabled,
@@ -394,45 +396,109 @@ def graph_connection_counts(result: FrameResult) -> dict[str, Any]:
     return values
 
 
-def hydrate_cluster_info_section(result: FrameResult, row: dict[str, Any]) -> list[str]:
-    """Render vertical cluster, hierarchy, domain, and boundary details."""
+def hydrate_cluster_info_section(
+    result: FrameResult,
+    row: dict[str, Any] | None = None,
+) -> list[str]:
+    """Render the compact, mutually exclusive cluster hierarchy."""
     if not result.hydrate_cluster_enabled:
         return []
-    summary_rows = [
-        ["hydrate_cluster", "on"],
-        ["cluster_count", row.get("hydrate_cluster_count", 0)],
-        ["domain_count", row.get("hydrate_domain_count", 0)],
-        ["classified_cage_count", row.get("classified_cage_count", 0)],
-        ["boundary_cage_count", row.get("boundary_cage_count", 0)],
-        ["ambiguous_cage_count", row.get("ambiguous_cage_count", 0)],
-        ["unclassified_cage_count", row.get("unclassified_cage_count", 0)],
-        ["isolated_cage_count", row.get("isolated_cage_count", 0)],
-        ["sI_cluster_count", row.get("sI_cluster_count", 0)],
-        ["sII_cluster_count", row.get("sII_cluster_count", 0)],
-        ["sH_cluster_count", row.get("sH_cluster_count", 0)],
-        ["mixed_cluster_count", row.get("mixed_cluster_count", 0)],
-        ["unclassified_cluster_count", row.get("unclassified_cluster_count", 0)],
-        ["largest_cluster_cage_count", row.get("largest_cluster_cage_count", 0)],
-        ["largest_cluster_water_count", row.get("largest_cluster_water_count", 0)],
-        ["cluster_size_distribution", row.get("cluster_size_distribution", "")],
-    ]
-    lines = section_table("Hydrate Cluster", ["item", "value"], summary_rows)
-    lines.extend(hydrate_cluster_hierarchy_section(result))
-    detail_records = hydrate_cluster_detail_records(
-        result,
-        build_guest_lookup(result.guests),
-        guest_resname_order(result),
-    )
-    lines.extend(hydrate_cluster_detail_section(detail_records))
-    lines.extend(
-        hydrate_domain_info_section(
-            result,
-            build_guest_lookup(result.guests),
-            guest_resname_order(result),
+
+    cage_by_id = {
+        cage.object_id: cage for cage in (result.all_cages or result.cages)
+    }
+    domains_by_cluster: dict[str, list[Any]] = defaultdict(list)
+    for domain in result.hydrate_domains:
+        domains_by_cluster[domain.cluster_id].append(domain)
+
+    rows: list[list[Any]] = []
+    displayed_cluster_ids: set[str] = set()
+    for cluster in sorted(result.hydrate_clusters, key=lambda item: item.object_id):
+        cluster_ids = tuple(dict.fromkeys(cluster.cage_ids))
+        cluster_id_set = set(cluster_ids)
+        displayed_cluster_ids.update(cluster_id_set)
+        remaining_ids = set(cluster_ids)
+        rows.append(
+            [cluster.object_id, cluster.hydrate_type, len(cluster_id_set)]
         )
+
+        children: list[tuple[str, str, tuple[str, ...]]] = []
+        domains = sorted(
+            domains_by_cluster.get(cluster.object_id, []),
+            key=lambda item: item.object_id,
+        )
+        for domain in domains:
+            domain_ids = tuple(
+                cage_id
+                for cage_id in dict.fromkeys(domain.cage_ids)
+                if cage_id in remaining_ids
+            )
+            if not domain_ids:
+                continue
+            remaining_ids.difference_update(domain_ids)
+            children.append(
+                (domain.object_id, domain.hydrate_type, domain_ids)
+            )
+
+        boundary_ids = tuple(
+            cage_id
+            for cage_id in dict.fromkeys(cluster.boundary_cage_ids)
+            if cage_id in remaining_ids
+        )
+        if boundary_ids:
+            remaining_ids.difference_update(boundary_ids)
+            children.append(("boundary", "boundary", boundary_ids))
+
+        unclassified_ids = tuple(
+            cage_id for cage_id in cluster_ids if cage_id in remaining_ids
+        )
+        if unclassified_ids:
+            children.append(
+                ("unclassified", "unclassified", unclassified_ids)
+            )
+
+        for child_index, (name, hydrate_type, cage_ids) in enumerate(children):
+            child_branch = (
+                TREE_LAST if child_index == len(children) - 1 else TREE_MIDDLE
+            )
+            rows.append(
+                [
+                    f"{child_branch} {name}",
+                    hydrate_type,
+                    f"{child_branch} {len(cage_ids)}",
+                ]
+            )
+            type_counts = Counter(
+                cage_by_id[cage_id].cage_type
+                for cage_id in cage_ids
+                if cage_id in cage_by_id
+            )
+            cage_types = present_cage_types(type_counts)
+            for type_index, cage_type in enumerate(cage_types):
+                type_branch = (
+                    TREE_LAST if type_index == len(cage_types) - 1 else TREE_MIDDLE
+                )
+                rows.append(
+                    [
+                        f"  {type_branch} {cage_display_label(cage_type)}",
+                        "",
+                        f"  {type_branch} {type_counts[cage_type]}",
+                    ]
+                )
+
+    isolated_count = len(
+        set(result.isolated_cage_ids).difference(displayed_cluster_ids)
     )
-    lines.extend(hydrate_boundary_info_section(result))
-    return lines
+    if isolated_count:
+        rows.append(["isolated", "isolated", isolated_count])
+
+    if not rows:
+        return ["", "## Hydrate Cluster", "", "no hydrate cluster"]
+    return section_table(
+        "Hydrate Cluster",
+        ["item", "type", "cage_qty"],
+        rows,
+    )
 
 
 def hydrate_cluster_detail_section(records: list[dict[str, Any]]) -> list[str]:
@@ -917,6 +983,7 @@ def write_frame_info(
     ring_sizes: list[int] | None = None,
     requested_bond_mode: Any | None = None,
     order_parameters: Any | None = None,
+    analysis_mode: Any = "50",
 ) -> None:
     """Write the per-frame Markdown report with inspection-oriented tables."""
     frame_dir.mkdir(parents=True, exist_ok=True)
@@ -930,8 +997,8 @@ def write_frame_info(
     cage_types = [cage_type for cage_type in ordered_cage_types(cage_values) if cage_type in cage_values]
     default_ring_sizes = result.ring_report_sizes or tuple(result.rings)
     enabled_ring_sizes = sorted(set(ring_sizes if ring_sizes is not None else default_ring_sizes))
-    lines = [
-        f"# SQQ Frame Report: {result.frame.name}",
+    mode_code = normalize_mode(analysis_mode)
+    lines = [        f"# SQQ Frame Report: {result.frame.name}",
         "",
     ]
 
@@ -945,9 +1012,10 @@ def write_frame_info(
                 ["source", source_label(result.frame.source)],
                 ["frame", result.frame.name],
                 ["time_ps", result.frame.time_ps],
-                ["graph_mode", graph_mode_display(requested_bond_mode or row["connection_mode"], [row["connection_mode"]])],
+                ["mode", f"{mode_code} ({mode_label(mode_code)})"],                ["graph_mode", graph_mode_display(requested_bond_mode or row["connection_mode"], [row["connection_mode"]])],
                 ["bond_mode", row["connection_mode"]],
                 ["ring_sizes", ", ".join(str(size) for size in enabled_ring_sizes)],
+                ["find_cluster", "on" if result.hydrate_cluster_enabled else "off"],
                 ["status", "ok"],
                 ["n_atoms", len(result.frame.atoms)],
                 ["n_waters", len(result.waters)],
@@ -958,9 +1026,18 @@ def write_frame_info(
     lines.extend(section_table("Molecules", ["resname", "molecules", "atoms"], molecule_count_rows(result)))
     lines.extend(connection_info_section(result, row))
 
-    ring_rows = [[size, row.get(f"free_ring{size}", 0)] for size in enabled_ring_sizes]
-    ring_rows.append(["total", sum(int(item[1]) for item in ring_rows)])
-    lines.extend(section_table("Ring", ["ring type", "count"], ring_rows))
+    ring_rows = [
+        [size, row.get(f"ring{size}", 0), row.get(f"free_ring{size}", 0)]
+        for size in enabled_ring_sizes
+    ]
+    ring_rows.append(
+        [
+            "total",
+            sum(int(item[1]) for item in ring_rows),
+            sum(int(item[2]) for item in ring_rows),
+        ]
+    )
+    lines.extend(section_table("Ring", ["ring size", "total", "free"], ring_rows))
     lines.extend(patch_info_section("Half Cage", result.half_cages))
     lines.extend(patch_info_section("Quasi Cage", result.quasi_cages))
     lines.extend(patch_isomer_description_section("Quasi Cage Isomer Description", result.quasi_cages))
@@ -968,6 +1045,7 @@ def write_frame_info(
     lines.extend(cage_info_section(result, cage_types))
     lines.extend(cage_isomer_description_section(result, cage_types))
     lines.extend(cage_occupancy_section(result, cage_types))
+    lines.extend(hydrate_cluster_info_section(result))
     has_focus = result.f3f4 is not None and bool(result.f3f4.focus_resids)
     order_headers = ["metric", "count", "mean"]
     if has_focus:

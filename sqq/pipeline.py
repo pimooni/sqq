@@ -1434,6 +1434,7 @@ def write_frame_outputs(result: FrameResult, frame_dir: Path, config: dict[str, 
             ring_sizes=list(result.ring_report_sizes),
             requested_bond_mode=config["graph"]["bond_mode"],
             order_parameters=order_parameters,
+            analysis_mode=config.get("mode", "50"),
         )
     else:
         remove_optional_info_output(result, frame_dir)

@@ -2,6 +2,49 @@
 
 This file records versioned update notes. New releases should be appended above older entries.
 
+## Version 0.2.10
+
+### Short Summary
+
+Per-frame reports now record the selected mode directly and expand the Ring table to show both total primitive rings and final free rings for every reported size. These are presentation-only changes.
+
+Version 0.2.10 restores a compact hydrate-cluster hierarchy to each selected per-frame `*_info.md` report when the resolved cluster-search state is on. Mode `09` therefore reports cluster information by default, while `--find-cluster off` suppresses both the search and the section. The report summarizes unique cluster cages, sI/sII/sH domains, boundary cages, unresolved cages, and isolated cages without restoring the verbose pre-0.2.8 detail sections. Hydrate topology, phase classification, boundary assignment, and every other scientific result are unchanged.
+
+### Main Changes
+
+1. Resolved cluster state in per-frame info
+   - `Frame Information` records `find_cluster` as `on` or `off`.
+   - `Hydrate Cluster` is written only when cluster search resolves to on and `info` belongs to the effective output selection.
+   - `-m 09` and `-m 00` include the section by default. `-m 09 --find-cluster off` omits it, while `-m 50 --find-cluster on` includes it.
+   - Cluster search still forces `xlsx` and `cluster-gro`, but does not force `info`; `--find-cluster on --output-type none` therefore writes no `*_info.md` file.
+
+2. Compact hierarchy
+   - Reported clusters are listed sequentially as `cluster_00001`, `cluster_00002`, and so on.
+   - Each cluster row reports its unique cage count. Child rows show sI/sII/sH domains, generic boundary, and compact unclassified topology; each child is further divided by cage type.
+   - The compact `unclassified` row is the deduplicated unresolved set: stored `ambiguous_cage_ids` and `unclassified_cage_ids` plus any uncategorized residual cluster cages. This is display-only; the workbook and cluster-detail CSV retain their separate ambiguous and unclassified fields.
+   - Zero-count categories are omitted. `isolated` appears once as the final top-level row and is not divided by cage type.
+   - Child counts conserve their parent count, and cluster counts use unique cage IDs rather than water-coordinate unions.
+
+3. Detail ownership
+   - Exact cage IDs, seeds, confidence, domain adjacency, and other verbose records remain in `summary_detail/hydrate_domain.csv` and `summary_detail/hydrate_cluster_detail.csv` when `cluster-detail` is selected.
+   - `summary.xlsx` retains the separate classified, boundary, ambiguous, and unclassified cluster fields and the existing plotting-oriented schema.
+
+4. Mode and documentation alignment
+   - Every `*_info.md` Frame Information table records the selected preset after `time_ps`, using the same two-digit code and label as the terminal and workbook, for example `09 (rigorous-performance)`.
+   - The per-frame Ring table now reports `ring size | total | free` and sums both numeric columns. `total` is the primitive-ring population; `free` excludes rings owned by final half-cage, quasi-cage, or closed-cage output.
+   - The README mode table explicitly records graph mode, ring sizes, automatic worker fraction, and initial cluster state for modes `00`, `09`, `50`, and `99`.
+   - Cluster-state precedence is documented as `--find-cluster` over `hydrate_cluster.enabled` in `config.yaml` over the mode preset. Mode `50` remains the command default.
+
+5. Package version and verification
+   - Updated package and root version output to `0.2.10`, released Jul 19, 2026.
+   - Regression coverage checks mode/config/CLI precedence, Info mode ordering, total/free ring conservation, conditional cluster-info creation, multiple clusters, sI/sII/sH domains, compact unresolved counts, zero omission, isolated placement, and cage-count conservation.
+
+### Compatibility
+
+- Ring, half-cage, quasi-cage, closed-cage, hydrate-domain, boundary, occupancy, F3/F4/Q_l, MCG/DHOP, and ice algorithms and values are unchanged.
+- Existing XLSX, detail-CSV, and cluster-GRO scientific schemas are unchanged.
+- Every generated `*_info.md` gains the mode row and expanded Ring table. The compact Hydrate Cluster hierarchy remains conditional on resolved cluster search being on; output selections without `info` still create no Markdown report.
+
 ## Version 0.2.9
 
 ### Short Summary

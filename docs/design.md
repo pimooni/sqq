@@ -38,6 +38,12 @@ built-in defaults -> mode preset -> config.yaml -> explicit CLI options
 
 The mode preset controls graph mode, shared ring-face search sizes, automatic worker fraction, and the initial cluster-search state. It does not control `quasi_cage.max_layers`, `order.parameters`, or the initially selected `output.types`. L1, the `f3,f4` order-parameter selection, and `info,gro,xlsx,summary-detail` output selection are therefore the defaults in every mode. After cluster search is resolved, an enabled search forces `xlsx` and `cluster-gro`; a disabled search writes no cluster GRO/detail output while ordinary XLSX remains independently selectable. L2/L3 require `--quasi-max-layer`, and other descriptors require `--order-parameter` or an explicit config value. An explicit `--find-cluster on|off` overrides `hydrate_cluster.enabled` from the config and the mode preset. Because mode `50` is the default, an unqualified command has cluster search off.
 
+Cluster-search precedence is:
+
+```text
+--find-cluster > hydrate_cluster.enabled in config.yaml > mode preset
+```
+
 An explicit `-b` / `--bond-mode {auto,hbond,oo,pairs}` overrides the graph mode from both the preset and `config.yaml`. `--pairs PAIRS.txt` implies pairs mode unless `-b pairs` is already given; it cannot be combined with another explicit bond mode.
 
 `parallel.workers: auto` calculates `floor(physical_core_count * mode_fraction)`, then reserves one physical core for the operating system and caps the result by the number of independent files or selected trajectory frames. Physical-core detection prefers optional `psutil`, then platform probes such as Windows CIM, macOS `sysctl`, or Linux `/proc/cpuinfo`; if physical cores cannot be detected, SQQ falls back to the CPU count visible to the process. `--worker N` / `-w N` overrides the mode fraction using form-based parsing: integer text such as `1`, `4`, or `100` is an explicit worker count; decimal text such as `0.5` or `1.0` and percentages such as `50%` or `100%` are physical-core fractions. Thus `-w 1` means one worker, while `-w 1.0` and `-w 100%` mean all detected physical cores before the reserve-one-core clamp. Percentages above `100%` and decimal values above `1.0` are rejected. The old `--workers` spelling is retained as a hidden compatibility alias. Worker resolution remains capped by task count and the Windows `ProcessPoolExecutor` limit. `parallel.backend` defaults to `process`; `thread` is retained for compatibility and `serial` forces one process.
@@ -80,7 +86,7 @@ Standalone files whose case-insensitive stems collide are rejected because the s
 
 Terminal and summary dashboard metadata share the same display helpers. The requested graph mode is preserved from config/CLI, and the effective per-frame graph modes are collected from `connection_mode` in summary rows. Explicit graph modes display as `hbond`, `oo`, or `pairs`. Automatic graph mode displays as `auto -> hbond`, `auto -> oo`, or `auto -> mixed (hbond, oo)` when different frames resolve differently. Before frame analysis completes, the terminal header may show `auto -> pending`; the final run summary and `summary.xlsx` dashboard use the resolved display value.
 
-Root `sqq` / `sqq -h` output renders the banner and product sentence, then `SQQ version: 0.2.9   Release date: Jul 16, 2026`, then the ordinary `usage:` line. Root `sqq -v` / `sqq --version` exits successfully after printing only that version line. Subcommand help retains the standard argparse layout.
+Root `sqq` / `sqq -h` output renders the banner and product sentence, then `SQQ version: 0.2.10   Release date: Jul 19, 2026`, then the ordinary `usage:` line. Root `sqq -v` / `sqq --version` exits successfully after printing only that version line. Subcommand help retains the standard argparse layout.
 
 `run_config.yaml` preserves normalized configuration values such as `graph.bond_mode: auto`, `hydrate_cluster.enabled: false`, `order.parameters: [f3, f4]`, `output.types: [info, gro, xlsx, summary-detail]`, and `parallel.workers: 1.0`, then adds a `run` block with status/error, frame totals, failure details, `sqq_version`, requested/effective graph mode, normalized order/output selections, worker policy, resolved workers, backend, math threads, and final `summary_write` timing/table-size metadata. The metadata reports per-table rows, columns, cells, bytes, write time, format mode/time, final workbook-save time, and total summary-write time. An initial `status: running` file is written before frame analysis; strict analysis or summary-write failures update it to `status: failed`. `output.types` is the only output selector; removed `output.disabled_outputs` configurations are rejected rather than migrated. Run-config, detail CSV, and workbook writes use same-directory temporary files followed by atomic replacement, so a failed rewrite does not truncate an existing completed artifact.
 
@@ -469,7 +475,7 @@ hydrate_cluster.enabled = false
 hydrate_cluster.min_cage = 2
 ```
 
-Modes `00` and `09` set cluster search on, whereas modes `50` and `99` set it off. The command-line controls are `--find-cluster on/off` and `--cluster-min-cage N`; the explicit find-cluster value has precedence over config and mode. Enabling search forces both `xlsx` and `cluster-gro` into the effective output set, guarantees a `hydrate_cluster` workbook sheet, and writes native per-frame sI/sII/sH/boundary GRO views. Per-frame Markdown reports do not contain cluster, domain, or boundary sections. Output type `cluster-detail` controls the optional domain and one-row-per-cluster CSV files. Explicit `cluster-detail` or `cluster-gro` requires resolved cluster search on.
+Modes `00` and `09` set cluster search on, whereas modes `50` and `99` set it off. The command-line controls are `--find-cluster on/off` and `--cluster-min-cage N`; the explicit find-cluster value has precedence over config and mode. Enabling search forces both `xlsx` and `cluster-gro` into the effective output set, guarantees a `hydrate_cluster` workbook sheet, and writes native per-frame sI/sII/sH/boundary GRO views. It does not force `info`. When `info` is selected, each per-frame Markdown report records the resolved state and includes one compact cluster hierarchy. Output type `cluster-detail` controls the optional domain and one-row-per-cluster CSV files. Explicit `cluster-detail` or `cluster-gro` requires resolved cluster search on.
 
 Hydrate_cluster uses `result.all_cages`, the complete detected cage set in the selected ring/search scope. `cage.report_types` / `--cage-size` filters cage counts, occupancy, GRO, Markdown cage tables, and workbook cage columns only; it does not filter the cluster graph or phase evidence. Cluster hierarchy/detail/domain records resolve cage IDs against the same complete set, so an unreported cage can remain topologically necessary without appearing in the report-scoped cage table.
 
@@ -552,6 +558,35 @@ Neighboring cages can share vertices and complete face waters, so separate struc
 
 The mixed sI/sII real-GRO regression contains one 334-cage main cluster partitioned into 260 classified cages (66 sI and 194 sII), 69 boundary cages, 0 ambiguous cages, and 5 residual unclassified cages. Five additional cages occur in isolated or below-threshold components. All four main-cluster cage-ID sets are disjoint.
 
+### Compact per-frame cluster hierarchy
+
+Cluster reporting reuses the finalized `HydrateCluster` and `HydrateDomain` objects; it never reruns search, expands a domain, or changes cage ownership. When resolved cluster search is on and `info` is selected, `Frame Information` records `find_cluster: on` and the report adds one compact `Hydrate Cluster` table. Search off omits the section. Because cluster search forces `xlsx` and `cluster-gro` but not `info`, an output selection without `info` creates no Markdown report.
+
+Each `cluster_XXXXX` row reports the number of unique cage IDs in that connected component. Its children are deterministic sI/sII/sH domain rows, boundary, and compact unclassified topology, each subdivided by detected cage type. For this compact display only, `unclassified` is the deduplicated unresolved set: stored `ambiguous_cage_ids` and `unclassified_cage_ids` plus any uncategorized residual cluster cages. The workbook and cluster-detail CSV preserve those fields separately. Zero-count rows are omitted, multiple clusters are written sequentially, and `isolated` is one final top-level count with no cage-type children. Parent-child totals are conserved. Tree symbols decorate both `item` and `cage_qty`; Markdown columns are padded by display width.
+
+```text
+## Hydrate Cluster
+
+| item               | type         | cage_qty |
+| ------------------ | ------------ | -------- |
+| cluster_00001      | mixed        | 334      |
+| ├ domain_00001     | sI           | ├ 66     |
+|   ├ 5¹²            |              |   ├ 13   |
+|   └ 5¹²6²          |              |   └ 53   |
+| ├ domain_00002     | sII          | ├ 194    |
+|   ├ 5¹²            |              |   ├ 131  |
+|   └ 5¹²6⁴          |              |   └ 63   |
+| ├ boundary         | boundary     | ├ 69     |
+|   ├ 5¹²            |              |   ├ 24   |
+|   └ 5¹²6³          |              |   └ 45   |
+| └ unclassified     | unclassified | └ 5      |
+|   ├ 5¹²6³          |              |   ├ 2    |
+|   └ 4¹5¹⁰6²        |              |   └ 3    |
+| isolated           | isolated     | 5        |
+```
+
+The table contains no cage IDs, seed lists, confidence values, water membership, or guest records. Those remain in the existing plotting/detail outputs. The formatter changes presentation only and cannot change ring, cage, phase-domain, boundary, occupancy, order-parameter, or ice results.
+
 ### Native cluster GRO views
 
 Resolved cluster search on forces the search-dependent `cluster-gro` type together with `xlsx`, even when the requested output list is `none`. Search off writes no cluster GRO output; reusing an output directory removes stale grouped or flat cluster GRO files generated by SQQ. The ordinary `gro` umbrella remains limited to ring, half-cage, quasi-cage, cage, and ice files, so the default mode-50 run remains valid while cluster search is off.
@@ -632,7 +667,7 @@ Selection precedence is:
 
 The explicit CLI value replaces the complete configured output set. `--hydrate-cluster`, `--cluster-detail`, `--no-output`, `--write-order-tsv`, the individual `--no-*` output switches, and `output.disabled_outputs` were removed without aliases or migration. Unsupported old CLI names fail argument parsing; an old YAML selector fails configuration validation.
 
-The default types write per-frame info, ring/half/quasi/cage/ice GRO, `summary.xlsx`, and ordinary `summary_detail/*.csv`. `membership-tsv`, `order-tsv`, `vmd`, `cluster-gro`, and `cluster-detail` are initially default-off. `summary-detail` owns ordinary multi-row and isomer CSV files; `cluster-detail` separately owns `hydrate_domain.csv` and `hydrate_cluster_detail.csv`. Explicit `cluster-detail` and `cluster-gro` require resolved cluster search on. Resolved `--find-cluster on` forces both `xlsx` and `cluster-gro`, so `--find-cluster on --output-type none` still writes `summary.xlsx`, category GRO files, and mandatory `run_config.yaml`. Resolved search off removes `cluster-gro` and cleans stale SQQ-generated grouped directories or flat category filenames. If no per-frame type remains selected, the pipeline removes the empty frame directory. Unrelated files are preserved.
+The default types write per-frame info, ring/half/quasi/cage/ice GRO, `summary.xlsx`, and ordinary `summary_detail/*.csv`. `membership-tsv`, `order-tsv`, `vmd`, `cluster-gro`, and `cluster-detail` are initially default-off. `summary-detail` owns ordinary multi-row and isomer CSV files; `cluster-detail` separately owns `hydrate_domain.csv` and `hydrate_cluster_detail.csv`. Explicit `cluster-detail` and `cluster-gro` require resolved cluster search on. Resolved `--find-cluster on` forces both `xlsx` and `cluster-gro`, so `--find-cluster on --output-type none` still writes `summary.xlsx`, category GRO files, and mandatory `run_config.yaml`, but no `*_info.md` report. Resolved search off removes `cluster-gro` and cleans stale SQQ-generated grouped directories or flat category filenames. If no per-frame type remains selected, the pipeline removes the empty frame directory. Unrelated files are preserved.
 
 Per-frame output folders use the default grouped structure. Generated GRO paths and title lines use ASCII-only structure labels (`5^12`, `5^126^2`, `hc_5r_5^5`, and similar); Unicode superscripts/subscripts remain display-only in Markdown and Excel. This prevents Windows locale-dependent GRO parsers from failing before they read otherwise valid fixed-width atom records.
 
@@ -658,16 +693,16 @@ When `xlsx` output is selected or forced by cluster search, the global workbook 
 
 Each per-frame `*_info.md` report is optimized for inspection rather than plotting:
 
-- the Ring table shows only report-selected ring sizes and reports final free-ring counts;
+- Frame Information inserts the selected mode as its two-digit code plus label immediately after `time_ps`; explicit overrides change the later effective-setting rows without hiding the selected preset;
+- the Ring table shows only report-selected ring sizes, with `total` primitive-ring counts, final `free` ring counts, and a sum row for both columns;
 - Half Cage and Quasi Cage omit internal `hc_`/`qc_` prefixes, aggregate each composition on a parent row, and list exact isomers on synchronized child rows;
 - Cage combines composition totals and structural isomers in one vertical table: each cage composition is a parent row, and observed isomers are synchronized child rows below it;
 - Quasi Cage Isomer Description gives one explanation row for each observed quasi-cage isomer, including the base ring and L1/L2/L3 ring sequence;
 - Cage Isomer Description gives one explanation row for each observed cage isomer, including face composition and the 6-ring face adjacency pattern;
 - Cage Occupancy remains separate because it describes guest assignment, not topology; it uses one cage type per row and dynamic exact guest-composition columns in source guest order;
-- cluster, domain, and boundary data is omitted from per-frame info reports; compact counts belong to the forced `hydrate_cluster` workbook sheet, exact records belong to optional `cluster-detail` CSV files, and native sI/sII/sH/boundary structures belong to forced `cluster-gro`;
-- all hierarchy labels use the same short `├`, `└`, and `│` symbols, and Markdown source tables are padded using Unicode display width so their pipe columns align;
-- Frame Information starts with `sqq version`, `date & time`, `source`, `frame`, and `time_ps`, then reports requested/effective `graph_mode`, effective `bond_mode`, ring sizes, status, and molecule counts; Molecules, active connection coordination, selected Order Parameters, selected Hydrate Nucleation Order Parameters, and Ice are separated into compact sections. Empty order sections are omitted.
-
+- when resolved cluster search is on, one compact `Hydrate Cluster` hierarchy follows the cage sections; exact IDs remain in optional `cluster-detail` CSV files, and native sI/sII/sH/boundary structures remain in forced `cluster-gro`;
+- hierarchy labels use short tree symbols, and Markdown source tables are padded using Unicode display width so their pipe columns align;
+- Frame Information starts with `sqq version`, `date & time`, `source`, `frame`, and `time_ps`; the mode code and label come next, followed by requested/effective `graph_mode`, effective `bond_mode`, ring sizes, resolved `find_cluster`, status, and molecule counts. Molecules, active connection coordination, selected Order Parameters, selected Hydrate Nucleation Order Parameters, and Ice are separated into compact sections. Empty order sections are omitted.
 The optional global `summary.xlsx` workbook keeps plotting-oriented analysis sheets with one input file or trajectory frame per row. Its `hydrate_cluster` sheet reports `classified_cage_count`, `boundary_cage_count`, `ambiguous_cage_count`, and `unclassified_cage_count`, which are mutually exclusive within each reported cluster. Its `quasi_cage` sheet aggregates exact isomer columns into composition-level columns such as `5r_5²6³`. When `summary-detail` is selected, failed rows are written to `summary_detail/failures.csv`, exact quasi-cage isomers are split into `quasi_cage_isomer.csv`, and other ordinary multi-row detail outputs are `cage_occupancy.csv` and `cage_isomer.csv`. When cluster search is enabled and `cluster-detail` is selected, `hydrate_domain.csv` and `hydrate_cluster_detail.csv` are also written. Cluster detail includes the four category ID groups and `boundary_composition`; domain detail uses `external_boundary_contact_count` and `external_boundary_contact_ids` for direct external adjacency. `detail_index` records only generated CSV files. `cage_isomer.csv` defaults to nonzero isomer rows plus per-frame totals; `output.cage_isomer_rows = all` or `--cage-isomer-rows all` restores the full zero-filled matrix. Public motif output is not written. The `order_parameter` sheet reports only selected F3/F4 mean/count pairs, selected `qN` mean/count pairs, and selected MCG/DHOP largest clusters. Matching focus-water mean/count columns are added only when `order.focus_waters` is non-empty. MCG without a configured guest remains `N/A`. `order.parameters: []` or `--order-parameter none` omits the sheet. Output type `order-tsv` contains only selected per-water F3/F4/Q_l columns; MCG/DHOP remain frame-level outputs, so a hydrate-only selection does not create an otherwise empty `*_order_parameter.tsv`.
 Summary generation records all table dimensions and write/format/save timings in `run.summary_write`. Exact quasi isomers are carried as sparse records until `quasi_cage_isomer.csv` is built, avoiding a summary DataFrame column for every observed isomer; composition-level quasi counts remain in the compact sheets. `summary.xlsx`, every detail CSV, and `run_config.yaml` are written through same-directory temporary files and atomically replaced after success. Detail CSV replacements/removals commit as one recoverable bundle. Before any table is handed to pandas Excel output, SQQ checks the 1,048,576-row and 16,384-column workbook limits and reports an actionable error for an unexpected oversize compact sheet. For an analysis sheet above 200,000 cells or 128 columns, Excel keeps header style, filter, freeze pane, and fixed widths but skips per-body-cell formatting and broad auto-width scans. This I/O policy does not change values, row/column schemas, or CSV selection.
 
