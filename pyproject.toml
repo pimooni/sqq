@@ -1,10 +1,13 @@
 [build-system]
-requires = ["setuptools >= 77.0.3", "wheel"]
-build-backend = "setuptools.build_meta"
+requires = [
+  "scikit-build-core >= 0.10",
+  "pybind11 >= 2.13",
+]
+build-backend = "scikit_build_core.build"
 
 [project]
 name = "sqq"
-version = "0.2.10"
+version = "0.3.1"
 description = "Shell Quant Qualifier for water-shell topology analysis in MD trajectories."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -24,7 +27,11 @@ dependencies = [
 classifiers = [
   "Programming Language :: Python :: 3",
   "Programming Language :: Python :: 3 :: Only",
-  "Operating System :: OS Independent",
+  "Programming Language :: Python :: Implementation :: CPython",
+  "Programming Language :: C++",
+  "Operating System :: Microsoft :: Windows",
+  "Operating System :: POSIX :: Linux",
+  "Operating System :: MacOS :: MacOS X",
 ]
 
 [project.optional-dependencies]
@@ -36,3 +43,16 @@ sqq = "sqq.cli:main"
 [project.urls]
 Homepage = "https://github.com/pimooni/sqq"
 Repository = "https://github.com/pimooni/sqq"
+
+[tool.scikit-build]
+minimum-version = "0.10"
+cmake.version = ">=3.20"
+cmake.source-dir = "sqq/core/sqq-cpp"
+cmake.build-type = "Release"
+wheel.packages = ["sqq"]
+wheel.exclude = ["sqq/core/sqq-cpp/**"]
+sdist.include = [
+  "sqq/core/sqq-cpp/CMakeLists.txt",
+  "sqq/core/sqq-cpp/include/**",
+  "sqq/core/sqq-cpp/src/**",
+]

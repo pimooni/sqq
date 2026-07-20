@@ -51,18 +51,21 @@ Examples:
   sqq analyze -i "./gro/*.gro" -o ./result_sqq
   sqq analyze -i traj.xtc --top topol.gro -c config.yaml -o ./result_sqq
   sqq analyze -i ./gro -m 00 -b hbond -w 4 --order-parameter f3,f4,q6 -o ./result_sqq
-  sqq analyze -i md.gro --output-type info,cage-gro,xlsx -o ./result_sqq
+  sqq analyze -i md.gro --output-type info,cage-gro,summary-xlsx -o ./result_sqq
   sqq analyze -i md.gro -s 4,5,6 --cage-size H -o ./result_sqq_h
   sqq analyze -i md.gro -s 4,5,6 --find-cluster on -o ./result_sqq_cluster
+  sqq analyze -m cpp -i md.gro --output-type info,cage-gro,summary-csv -o ./result_sqq_cpp
 
 Analysis modes:
   -m 00  Rigorous: hbond, 4/5/6 search, 25% workers, find cluster on
   -m 09  Rigorous performance: hbond, 4/5/6 search, 90% workers, find cluster on
   -m 50  Standard: auto graph, 5/6 search, 50% workers, find cluster off
   -m 99  Performance: O-O graph, 5/6 search, 90% workers, find cluster off
+  -m cpp Native C++17 cage/F3/F4 backend: auto graph, 4/5/6 search, 90% workers
 
-Modes do not change quasi_cage.max_layers or order.parameters.
-Their defaults remain 1 and f3,f4 respectively.
+Numeric modes do not change quasi_cage.max_layers or order.parameters.
+Mode cpp disables quasi-cage, cluster, and ice analysis and supports only F3/F4.
+Its default compact outputs are info, cage-gro, and summary-csv.
 -b/--bond-mode overrides the graph setting supplied by the selected mode.
 --find-cluster overrides the cluster setting supplied by the selected mode.
 
@@ -101,8 +104,8 @@ def build_parser() -> argparse.ArgumentParser:
     analyze_parser.add_argument(
         "-m",
         "--mode",
-        choices=("00", "09", "50", "99"),
-        help="Analysis preset: 00 rigorous, 09 rigorous-performance, 50 standard (default), or 99 performance.",
+        choices=("00", "09", "50", "99", "cpp"),
+        help="Analysis mode: numeric sqq-py preset or the native C++17 cpp backend.",
     )
     analyze_parser.add_argument(
         "-b",
@@ -161,12 +164,16 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="TYPE[,TYPE...]",
         help=(
             "Select outputs: info, membership-tsv, order-tsv, vmd, gro, "
-            "ring-gro, half-gro, quasi-gro, cage-gro, ice-gro, cluster-gro, xlsx, "
-            "summary-detail, cluster-detail, all, or none. "
-            "Default: info,gro,xlsx,summary-detail."
+            "ring-gro, half-gro, quasi-gro, cage-gro, ice-gro, cluster-gro, "
+            "summary-xlsx, summary-csv, summary-detail-csv, cluster-detail, all, or none. "
+            "SQQ-Py default: info,gro,summary-xlsx; SQQ-CPP default: info,cage-gro,summary-csv."
         ),
     )
-    analyze_parser.add_argument("--cage-isomer-rows", choices=("nonzero", "all"), help="Rows written to summary_detail/cage_isomer.csv; default nonzero.")
+    analyze_parser.add_argument(
+        "--cage-isomer-rows",
+        choices=("nonzero", "all"),
+        help="Cage-isomer rows retained in summary/detail tables; default nonzero.",
+    )
     return parser
 
 

@@ -2,6 +2,83 @@
 
 This file records versioned update notes. New releases should be appended above older entries.
 
+## Version 0.3.1
+
+### Short Summary
+
+Version 0.3.1 adds `sqq analyze -m cpp`, a focused C++17 backend for the performance-critical cage workflow. Python remains responsible for the CLI, input/topology readers, configuration, process scheduling, and output writers; the native extension performs graph construction, internal chordless 4/5/6-ring search, generic cage topology and cage-isomer detection, automatic guest occupancy, and F3/F4.
+
+The native mode intentionally does not reproduce the complete SQQ-Py feature surface. Its reports contain only connection diagnostics, cage topology/isomers, occupancy status, selected F3/F4, and the corresponding cage GRO, Markdown, per-table summary CSV, and optional XLSX output. Explicit unsupported requests fail before analysis, and the program never silently falls back to Python. Numeric modes `00`, `09`, `50`, and `99` retain the complete Python pipeline and existing scientific behavior.
+
+The package and native-core version are `0.3.1`, released Jul 19, 2026. Release automation is configured to build platform wheels and a source distribution; this entry does not claim that the release has already been uploaded to PyPI.
+
+### Main Changes
+
+1. Hybrid Python/C++ architecture
+   - Added the C++17 source tree under `sqq/core/sqq-cpp/` and the importable native module `sqq.core._sqq_cpp`.
+   - Added a Python adapter that converts normalized SQQ frames, waters, guests, pair maps, boxes, and supported configuration into the native data contract, then reconstructs the existing graph/ring/cage/F3F4 result models.
+   - The native call releases the Python GIL while one frame is analyzed. Existing process scheduling remains available for independent files and selected trajectory frames.
+   - Native-module import or analysis failure is a hard error in mode `cpp`; no automatic SQQ-Py fallback is permitted.
+
+2. Native scientific scope
+   - Implemented `auto`, `hbond`, `oo`, and user `pairs` water graphs with deterministic edge ordering and orthorhombic minimum images.
+   - Implemented internal canonical chordless-ring search for any nonempty subset of sizes 4, 5, and 6. Rings are retained for cage construction but are not public SQQ-CPP output.
+   - Implemented generic Euler-compatible cage growth, report-group filtering, the existing cage labels, optional shell/manifold/geometry scientific validation, and the established hexagonal-face cage-isomer definition.
+   - Implemented polyhedron occupancy automatically when selected guest molecules exist. Reports distinguish an analysis with no selected guests (`not evaluated`) from an evaluated cage population with zero occupancy.
+   - Implemented independently selectable F3 and F4. F4 without usable water-hydrogen coordinates is unavailable with a warning rather than zero.
+
+3. Mode defaults and supported controls
+   - Added `cpp` to `-m` / `--mode`; the command default remains mode `50`.
+   - SQQ-CPP defaults are `auto` graph, internal 4/5/6 rings, `f3,f4`, approximately 90% of detected physical cores with one core reserved, and `info,cage-gro,summary-csv` output. XLSX is no longer part of the native default.
+   - Compatible controls include input/topology/output/configuration, graph/pair settings, `-s` within 4/5/6, cage report groups and face limit, scientific cage validation, F3/F4 selection, worker count/fraction, process or serial execution, strict/input controls, grouped/flat supported output selection, and `--cage-isomer-rows nonzero|all` for native `summary_csv/cage_isomer.csv` and an optional XLSX isomer sheet.
+   - In mode `cpp`, `--order-parameter all` means `f3,f4`; `--output-type gro` means `cage-gro`; `--output-type all` means `info,cage-gro,summary-csv,summary-xlsx`.
+   - Added `summary-csv`, which writes each applicable main-summary table as a separate UTF-8-SIG file under `summary_csv/`. It is the CSV equivalent of workbook sheets, not detail output. SQQ-Py supports it but leaves it off by default; SQQ-CPP enables it by default.
+   - Added `output.summary_csv_dir` with default `summary_csv`, alongside the retained `output.summary_detail_dir` default `summary_detail`. The two values must be different relative paths inside the output root.
+   - Stale CSV cleanup is restricted to known SQQ-generated filenames inside the currently configured summary directories; unknown files and formerly configured custom directories are not removed.
+   - Renamed `xlsx` to `summary-xlsx` and `summary-detail` to `summary-detail-csv`, without compatibility aliases. SQQ-Py now defaults to `info,gro,summary-xlsx`, so ordinary detail CSV is no longer written unless selected explicitly. SQQ-CPP does not support `summary-detail-csv`.
+   - Resolved cluster search always forces `cluster-gro`. It adds `summary-xlsx` only when neither `summary-csv` nor `summary-xlsx` is selected; an existing `summary-csv` selection remains CSV-only.
+   - `--output-type none` disables optional native reports and cage GRO files, but the mandatory `run_config.yaml` is still written.
+
+4. Explicitly unsupported scope
+   - SQQ-CPP does not expose public ring results, ring GRO, ring size 7, or shortest-path rings.
+   - It does not calculate or output half-cages, quasi-cages, hydrate clusters, ice, Q_l, MCG, or DHOP.
+   - VMD, membership/order TSV, `summary-detail-csv`, `cluster-detail`, and other detailed exports remain SQQ-Py features.
+   - Thread backend, Python fast closure, and triclinic boxes are unsupported.
+   - Explicit incompatible CLI options and nondefault incompatible configuration values are collected into clear validation errors instead of being ignored.
+
+5. Compact native reports and main summaries
+   - Terminal, main summary, and per-frame Markdown use `SQQ version` followed by `Mode`; numeric modes display as `NN (sqq-py)` and native mode displays as `sqq-cpp`.
+   - SQQ-CPP progress omits Python-only half/quasi, cluster, filtering, and ice stages.
+   - Per-frame `Frame Information` begins `sqq version`, `mode`, `date & time`, `source`, `frame`, and `time_ps` and omits Python-only analysis sections.
+   - The compact native main-summary mapping contains `summary`, `cage`, `cage_isomer`, selected F3/F4 `order_parameter`, and `config`; `failures` is conditional, and `cage_occupancy` is present only when selected guests exist. Default `summary-csv` writes one file per table, while explicit `summary-xlsx` writes the same mapping as workbook sheets.
+   - Default structure output is cage GRO only. The Python reader/writer layer preserves standard GRO records and the source box; the SQQ-CPP cage export does not add a synthetic cage-center atom.
+
+6. Build and release packaging
+   - Replaced the pure-Python build backend with scikit-build-core plus CMake/pybind11 so source builds compile the C++17 extension.
+   - A local CPython 3.12 Windows x86_64 wheel was built, installed into an isolated target, and imported successfully. The wheel contains the native `.pyd` and omits the C++ source tree.
+   - The source distribution contains the CMake, header, and C++ source files required for an explicit local build.
+   - Release CI builds and tests precompiled wheels for CPython 3.10-3.14 on Windows x86_64, Linux x86_64, macOS x86_64, and macOS arm64, then builds a source distribution. Installing a matching wheel does not compile C++ on the user's machine; an explicit source build requires CMake 3.20 or newer and a C++17 toolchain.
+   - Native build products, CMake/Ninja state, wheels, source archives, and local test outputs remain ignored; handwritten `.cpp`, `.hpp`, and `CMakeLists.txt` files remain tracked.
+
+7. Verification
+   - GCC 16, CMake, and Ninja completed a clean native build; the native module and installed wheel reported core version `0.3.1`.
+   - Random parity covered 100 graph/ring cases, 40 random frames in each of `oo`, `hbond`, and `auto`, and 50 random F3/F4 frames. Graph edges and canonical rings matched exactly; F3/F4 matched within `2e-14`.
+   - Cube-cage tests covered topology, scientific geometry validation, and occupancy against the Python reference.
+   - The real `tests/100.gro` frame contains 11,104 atoms, 2,176 waters, and 384 guests. C++ and Python matched exactly for 4,322 graph edges; 2,499 rings (45 four-rings, 2,147 five-rings, and 307 six-rings); 339 cages across 16 types by type, water membership, and face rings; all 339 cage-isomer labels; and all 339 occupancy assignments, including 315 occupied cages.
+   - All 2,176 F3 values matched exactly. All 2,176 F4 values passed tolerance with maximum absolute difference `4.44e-16`.
+   - On that frame, the supported native core took about 0.5673 s versus 10.0967 s for the equivalent Python core, approximately 17.8 times faster. This is a core-path benchmark, not a guarantee for total runs, which also include input and output time.
+   - The installed-wheel end-to-end run on the same frame completed in about 0.9 s and produced compact info, main-summary, and cage GRO outputs. Output-format tests cover default per-table CSV and explicit XLSX separately.
+   - The current external regression suite passed 151 tests plus five unittest subtests under the 0.3.1 output contract.
+
+### Compatibility
+
+- Numeric SQQ-Py modes retain their graph, ring, patch, cage, cluster, occupancy, order-parameter, and ice behavior. The output selector names and defaults intentionally change as documented above. Selecting `-m cpp` is an explicit opt-in to a reduced backend and compact schema.
+- There is no `-m c` alias. Scripts must use exactly `-m cpp`.
+- Scientific definitions for the supported graph/ring/cage/isomer/occupancy/F3/F4 path are aligned with SQQ-Py. Native floating-point reductions are compared with tolerance where bitwise identity is not portable.
+- Python-only options are not accepted as no-ops in mode `cpp`; explicit incompatible requests fail. Full configurations may retain unrelated default sections, but incompatible nondefault requests are rejected.
+- SQQ-CPP supports orthorhombic or non-periodic boxes only and never falls back to the Python engine.
+- Consumers must not expect ring, half/quasi, cluster, ice, hydrate-order, VMD, TSV, or `summary-detail-csv` records from SQQ-CPP. Use a numeric mode when those outputs are required.
+
 ## Version 0.2.10
 
 ### Short Summary

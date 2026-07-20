@@ -16,6 +16,10 @@ except ImportError:  # pragma: no cover - exercised in minimal source-tree runs.
 
 DEFAULT_MODE = "50"
 DEFAULT_ORDER_PARAMETERS = ("f3", "f4")
+CPP_MODE = "cpp"
+CPP_DEFAULT_OUTPUT_TYPES = ("info", "cage-gro", "summary-csv")
+CPP_ALL_OUTPUT_TYPES = ("info", "cage-gro", "summary-csv", "summary-xlsx")
+CPP_OUTPUT_TYPES = frozenset({"info", "gro", "cage-gro", "summary-csv", "summary-xlsx"})
 ALL_ORDER_PARAMETERS = (
     "f3",
     "f4",
@@ -39,8 +43,7 @@ ORDER_PARAMETER_ALIASES = {
 DEFAULT_OUTPUT_TYPES = (
     "info",
     "gro",
-    "xlsx",
-    "summary-detail",
+    "summary-xlsx",
 )
 ALL_OUTPUT_TYPES = (
     "info",
@@ -49,8 +52,9 @@ ALL_OUTPUT_TYPES = (
     "vmd",
     "gro",
     "cluster-gro",
-    "xlsx",
-    "summary-detail",
+    "summary-xlsx",
+    "summary-csv",
+    "summary-detail-csv",
     "cluster-detail",
 )
 OUTPUT_TYPE_ORDER = (
@@ -65,8 +69,9 @@ OUTPUT_TYPE_ORDER = (
     "cage-gro",
     "ice-gro",
     "cluster-gro",
-    "xlsx",
-    "summary-detail",
+    "summary-xlsx",
+    "summary-csv",
+    "summary-detail-csv",
     "cluster-detail",
 )
 GRO_OUTPUT_TYPES = {
@@ -103,6 +108,13 @@ MODE_PRESETS: dict[str, dict[str, Any]] = {
         "worker_fraction": 0.90,
         "bond_mode": "oo",
         "ring_sizes": [5, 6],
+        "find_cluster": False,
+    },
+    CPP_MODE: {
+        "label": "sqq-cpp",
+        "worker_fraction": 0.90,
+        "bond_mode": "auto",
+        "ring_sizes": [4, 5, 6],
         "find_cluster": False,
     },
 }
@@ -205,6 +217,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     },
     "output": {
         "types": list(DEFAULT_OUTPUT_TYPES),
+        "summary_csv_dir": "summary_csv",
         "summary_detail_dir": "summary_detail",
         "cage_isomer_rows": "nonzero",
         "write_empty_files": False,
@@ -224,8 +237,8 @@ DEFAULT_CONFIG: dict[str, Any] = {
 
 
 def normalize_mode(value: Any) -> str:
-    """Normalize and validate a two-digit analysis mode."""
-    text = str(value).strip()
+    """Normalize and validate an analysis mode."""
+    text = str(value).strip().lower()
     if text.isdigit():
         text = text.zfill(2)
     if text not in MODE_PRESETS:
@@ -237,6 +250,17 @@ def normalize_mode(value: Any) -> str:
 def mode_label(mode: Any) -> str:
     """Return the human-readable mode label."""
     return str(MODE_PRESETS[normalize_mode(mode)]["label"])
+
+
+def is_cpp_mode(mode: Any) -> bool:
+    """Return whether the native C++ backend was selected."""
+    return normalize_mode(mode) == CPP_MODE
+
+
+def mode_display(mode: Any) -> str:
+    """Return the unified public mode/engine label."""
+    normalized = normalize_mode(mode)
+    return "sqq-cpp" if normalized == CPP_MODE else f"{normalized} (sqq-py)"
 
 
 def mode_worker_fraction(mode: Any) -> float:
@@ -285,6 +309,37 @@ def normalize_order_parameters(value: Any = None) -> tuple[str, ...]:
             "dhop35, dhop30, all, or none."
         )
     return tuple(sorted(normalized, key=order_parameter_sort_key))
+
+
+def normalize_cpp_order_parameters(value: Any = None) -> tuple[str, ...]:
+    """Normalize the F3/F4-only selector used by mode cpp."""
+    if value is None or value == "":
+        raw_items: list[Any] = list(DEFAULT_ORDER_PARAMETERS)
+    elif isinstance(value, str):
+        raw_items = [item.strip() for item in value.split(",") if item.strip()]
+    else:
+        try:
+            raw_items = [item for item in value if str(item).strip()]
+        except TypeError as exc:
+            raise ValueError(
+                "mode cpp --order-parameter must be f3, f4, f3,f4, all, or none."
+            ) from exc
+    if not raw_items:
+        return ()
+    cleaned = [str(item).strip().lower() for item in raw_items]
+    keywords = set(cleaned) & {"all", "none"}
+    if keywords:
+        if len(cleaned) != 1:
+            raise ValueError("Use 'all' or 'none' alone in mode cpp.")
+        return DEFAULT_ORDER_PARAMETERS if cleaned[0] == "all" else ()
+    normalized = normalize_order_parameters(cleaned)
+    unsupported = [name for name in normalized if name not in {"f3", "f4"}]
+    if unsupported:
+        names = ", ".join(unsupported)
+        raise ValueError(
+            f"order parameter(s) {names} are not supported in mode cpp; use f3 and/or f4."
+        )
+    return normalized
 
 
 def order_parameter_sort_key(name: str) -> tuple[int, int]:
@@ -349,7 +404,7 @@ def normalize_output_types(value: Any = None) -> tuple[str, ...]:
         raise ValueError(
             f"Unsupported output type(s) {unknown}. Use info, membership-tsv, "
             "order-tsv, vmd, gro, ring-gro, half-gro, quasi-gro, cage-gro, "
-            "ice-gro, cluster-gro, xlsx, summary-detail, cluster-detail, all, or none."
+            "ice-gro, cluster-gro, summary-xlsx, summary-csv, summary-detail-csv, cluster-detail, all, or none."
         )
     normalized = set(cleaned)
     if "gro" in normalized:
@@ -357,9 +412,13 @@ def normalize_output_types(value: Any = None) -> tuple[str, ...]:
     return tuple(name for name in OUTPUT_TYPE_ORDER if name in normalized)
 
 
-def output_type_display(value: Any) -> str:
+def output_type_display(value: Any, *, cpp_mode: bool = False) -> str:
     """Render normalized output types for terminal and metadata."""
-    outputs = normalize_output_types(value)
+    outputs = (
+        normalize_cpp_output_types(value)
+        if cpp_mode
+        else normalize_output_types(value)
+    )
     return ", ".join(outputs) if outputs else "none"
 
 
@@ -457,6 +516,12 @@ def apply_mode_preset(config: dict[str, Any], mode: Any) -> dict[str, Any]:
     config["quasi_cage"]["base_sizes"] = "auto"
     config["quasi_cage"]["side_sizes"] = "auto"
     config["hydrate_cluster"]["enabled"] = bool(preset["find_cluster"])
+    if normalized == CPP_MODE:
+        config["quasi_cage"]["enabled"] = False
+        config["ice"]["enabled"] = False
+        config["order"]["parameters"] = list(DEFAULT_ORDER_PARAMETERS)
+        config["output"]["types"] = list(CPP_DEFAULT_OUTPUT_TYPES)
+        config["cage"]["fast_closure"] = False
     return config
 
 
@@ -514,5 +579,189 @@ def dump_config(config: dict[str, Any], handle) -> None:
         json.dump(config, handle, ensure_ascii=False, indent=2)
         handle.write("\n")
 
+
+
+def normalize_cpp_output_types(value: Any = None) -> tuple[str, ...]:
+    """Normalize the compact output allowlist used by mode cpp."""
+    if value is None:
+        raw_items: list[Any] = list(CPP_DEFAULT_OUTPUT_TYPES)
+    elif isinstance(value, str):
+        raw_items = [item.strip() for item in value.split(",") if item.strip()]
+    else:
+        try:
+            raw_items = [item for item in value if str(item).strip()]
+        except TypeError as exc:
+            raise ValueError(
+                "mode cpp --output-type must contain info, gro, cage-gro, summary-csv, or summary-xlsx."
+            ) from exc
+    if not raw_items:
+        return ()
+    cleaned = [str(item).strip().lower() for item in raw_items]
+    keywords = set(cleaned) & {"all", "none"}
+    if keywords:
+        if len(cleaned) != 1:
+            raise ValueError("Use 'all' or 'none' alone in mode cpp.")
+        return CPP_ALL_OUTPUT_TYPES if cleaned[0] == "all" else ()
+    unsupported = sorted(set(cleaned) - CPP_OUTPUT_TYPES)
+    if unsupported:
+        names = ", ".join(unsupported)
+        raise ValueError(
+            f"output type(s) {names} are not supported in mode cpp; "
+            "use info, gro, cage-gro, summary-csv, summary-xlsx, all, or none."
+        )
+    normalized = set(cleaned)
+    if "gro" in normalized:
+        normalized.remove("gro")
+        normalized.add("cage-gro")
+    return tuple(name for name in CPP_ALL_OUTPUT_TYPES if name in normalized)
+
+
+def validate_cpp_cli(args: Any, config: dict[str, Any]) -> None:
+    """Reject unsupported settings and finalize the mode-cpp subset."""
+    if not is_cpp_mode(config.get("mode", DEFAULT_MODE)):
+        return
+    errors: list[str] = []
+    explicit_unsupported: set[str] = set()
+    unsupported_args = (
+        ("ring_size", "--ring-size"),
+        ("quasi_size", "--quasi-size"),
+        ("quasi_base_size", "--quasi-base-size"),
+        ("quasi_side_size", "--quasi-side-size"),
+        ("quasi_max_layer", "--quasi-max-layer"),
+        ("quasi_search_policy", "--quasi-search-policy"),
+        ("no_q", "--no-q"),
+        ("q_degree", "--q-degree"),
+        ("q_neighbor_mode", "--q-neighbor-mode"),
+        ("q_cutoff", "--q-cutoff"),
+        ("q_n_neighbor", "--q-n-neighbor"),
+        ("mcg3", "--mcg3"),
+        ("dhop30", "--dhop30"),
+        ("cage_fast_closure", "--cage-fast-closure"),
+        ("find_cluster", "--find-cluster"),
+        ("cluster_min_cage", "--cluster-min-cage"),
+    )
+    for attribute, option in unsupported_args:
+        value = getattr(args, attribute, None)
+        if value not in (None, False):
+            errors.append(f"{option} is not supported in mode cpp")
+            explicit_unsupported.add(attribute)
+
+    ring = config.setdefault("ring", {})
+    explicit_ring_definition = getattr(args, "ring_definition", None) not in (None, "chordless")
+    if explicit_ring_definition:
+        errors.append("--ring-definition shortest_path is not supported in mode cpp")
+    if not explicit_ring_definition and str(ring.get("definition", "chordless")).strip().lower() != "chordless":
+        errors.append("ring.definition must be chordless in mode cpp")
+    if not bool(ring.get("chordless", True)):
+        errors.append("ring.chordless=false is not supported in mode cpp")
+    if "ring_size" not in explicit_unsupported and ring.get("report_sizes", "auto") not in (None, "", "auto"):
+        errors.append("public ring reporting is not supported in mode cpp")
+    try:
+        ring["sizes"] = _normalize_cpp_ring_sizes(ring.get("sizes", (4, 5, 6)))
+    except (TypeError, ValueError) as exc:
+        errors.append(str(exc))
+
+    quasi = config.setdefault("quasi_cage", {})
+    if getattr(args, "size", None):
+        quasi["base_sizes"] = "auto"
+        quasi["side_sizes"] = "auto"
+    explicit_quasi = any(name.startswith("quasi_") for name in explicit_unsupported)
+    if not explicit_quasi:
+        for key, default in DEFAULT_CONFIG["quasi_cage"].items():
+            if key != "enabled" and quasi.get(key, default) != default:
+                errors.append(f"quasi_cage.{key} is not supported in mode cpp")
+    quasi["enabled"] = False
+
+    cage = config.setdefault("cage", {})
+    if str(cage.get("search_mode", "grow")).strip().lower() != "grow":
+        errors.append("cage.search_mode must be grow in mode cpp")
+    if str(cage.get("seed_mode", "ring")).strip().lower() != "ring":
+        errors.append("cage.seed_mode must be ring in mode cpp")
+    default_fast_limit = DEFAULT_CONFIG["cage"]["fast_closure_max_states"]
+    if cage.get("fast_closure_max_states", default_fast_limit) != default_fast_limit:
+        errors.append("cage.fast_closure_max_states is not supported in mode cpp")
+    cage["fast_closure"] = False
+
+    cluster = config.setdefault("hydrate_cluster", {})
+    if "find_cluster" not in explicit_unsupported and _cpp_requested_on(cluster.get("enabled", False)):
+        errors.append("hydrate_cluster.enabled is not supported in mode cpp")
+    default_min_cage = DEFAULT_CONFIG["hydrate_cluster"]["min_cage"]
+    if (
+        "cluster_min_cage" not in explicit_unsupported
+        and cluster.get("min_cage", default_min_cage) != default_min_cage
+    ):
+        errors.append("hydrate_cluster.min_cage is not supported in mode cpp")
+    cluster["enabled"] = False
+
+    ice = config.setdefault("ice", {})
+    for key, default in DEFAULT_CONFIG["ice"].items():
+        if key != "enabled" and ice.get(key, default) != default:
+            errors.append(f"ice.{key} is not supported in mode cpp")
+    ice["enabled"] = False
+
+    order = config.setdefault("order", {})
+    explicit_legacy_order = bool(
+        {"no_q", "q_degree", "mcg3", "dhop30"} & explicit_unsupported
+    )
+    order_source = getattr(args, "order_parameter", None)
+    if order_source is None and explicit_legacy_order:
+        order_source = DEFAULT_ORDER_PARAMETERS
+    elif order_source is None:
+        order_source = order.get("parameters", DEFAULT_ORDER_PARAMETERS)
+    try:
+        order["parameters"] = list(normalize_cpp_order_parameters(order_source))
+    except ValueError as exc:
+        errors.append(str(exc))
+    q_option_for_key = {
+        "q_neighbor_mode": "q_neighbor_mode",
+        "q_cutoff_nm": "q_cutoff",
+        "q_n_neighbor": "q_n_neighbor",
+    }
+    for key, option_name in q_option_for_key.items():
+        default = DEFAULT_CONFIG["order"][key]
+        if option_name not in explicit_unsupported and order.get(key, default) != default:
+            errors.append(f"order.{key} is not supported in mode cpp")
+    for key, default in DEFAULT_CONFIG["hydrate_order"].items():
+        if config.get("hydrate_order", {}).get(key, default) != default:
+            errors.append(f"hydrate_order.{key} is not supported in mode cpp")
+
+    output = config.setdefault("output", {})
+    output_source = getattr(args, "output_type", None)
+    if output_source is None:
+        output_source = output.get("types", CPP_DEFAULT_OUTPUT_TYPES)
+    try:
+        output["types"] = list(normalize_cpp_output_types(output_source))
+    except ValueError as exc:
+        errors.append(str(exc))
+    default_detail_dir = DEFAULT_CONFIG["output"]["summary_detail_dir"]
+    if output.get("summary_detail_dir", default_detail_dir) != default_detail_dir:
+        errors.append("output.summary_detail_dir is not supported in mode cpp")
+
+    parallel_backend = str(config.get("parallel", {}).get("backend", "process"))
+    if parallel_backend.strip().lower() == "thread":
+        errors.append("--parallel-backend thread is not supported in mode cpp")
+    if errors:
+        raise ValueError("; ".join(dict.fromkeys(errors)))
+
+
+def _normalize_cpp_ring_sizes(value: Any) -> list[int]:
+    if isinstance(value, str):
+        raw = [item.strip() for item in value.split(",") if item.strip()]
+    else:
+        raw = list(value)
+    sizes = sorted({int(item) for item in raw})
+    if not sizes:
+        raise ValueError("mode cpp requires at least one ring size from 4, 5, and 6")
+    unsupported = [size for size in sizes if size not in {4, 5, 6}]
+    if unsupported:
+        names = ", ".join(str(size) for size in unsupported)
+        raise ValueError(f"ring size(s) {names} are not supported in mode cpp")
+    return sizes
+
+
+def _cpp_requested_on(value: Any) -> bool:
+    if isinstance(value, str):
+        return value.strip().lower() not in {"", "0", "false", "no", "off", "none"}
+    return bool(value)
 
 

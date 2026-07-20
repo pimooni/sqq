@@ -2,5 +2,5 @@
 
 __all__ = ["__release_date__", "__version__"]
 
-__version__ = "0.2.10"
+__version__ = "0.3.1"
 __release_date__ = "Jul 19, 2026"

@@ -137,7 +137,13 @@ def aggregate_patch_atoms(frame: Frame, patches: list[CagePatch], water_lookup: 
     return [atom_indices[idx] for idx in sorted(atom_indices)] + centers
 
 
-def write_cage_gro_files(result: FrameResult, frame_dir: Path, write_empty: bool = False, layout: str = "grouped") -> None:
+def write_cage_gro_files(
+    result: FrameResult,
+    frame_dir: Path,
+    write_empty: bool = False,
+    layout: str = "grouped",
+    include_centers: bool = True,
+) -> None:
     """Write cage GRO files by type and occupancy state."""
     if not result.cages and not write_empty:
         return
@@ -156,7 +162,13 @@ def write_cage_gro_files(result: FrameResult, frame_dir: Path, write_empty: bool
                 groups.setdefault((cage.cage_type, "multi"), []).append(cage)
 
     for (cage_type, suffix), cages in sorted(groups.items()):
-        atoms = aggregate_cage_atoms(result.frame, cages, water_lookup, guests_by_id)
+        atoms = aggregate_cage_atoms(
+            result.frame,
+            cages,
+            water_lookup,
+            guests_by_id,
+            include_centers=include_centers,
+        )
         if atoms or write_empty:
             grouped_label = ascii_gro_text(cage_file_label(cage_type))
             display_label = f"{grouped_label}{'_' + suffix if suffix else ''}"
@@ -172,8 +184,10 @@ def aggregate_cage_atoms(
     cages: list[Cage],
     water_lookup: dict[int, Water],
     guest_lookup: dict[str, Guest],
+    *,
+    include_centers: bool = True,
 ) -> list[Atom]:
-    """Collect cage waters, assigned guests, and one CNT atom per cage."""
+    """Collect cage waters, assigned guests, and optional center atoms."""
     atom_indices: dict[int, Atom] = {}
     centers: list[Atom] = []
     for serial, cage in enumerate(cages, start=1):
@@ -187,6 +201,8 @@ def aggregate_cage_atoms(
             if guest is not None:
                 for atom_idx in guest.atoms:
                     atom_indices[atom_idx] = frame.atoms[atom_idx]
+        if not include_centers:
+            continue
         centers.append(
             Atom(
                 index=-200000 - serial,

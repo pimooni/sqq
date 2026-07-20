@@ -35,16 +35,20 @@ except ImportError:  # pragma: no cover - exercised in minimal source-tree runs.
 from . import __version__
 from .banner import SQQ_BANNER
 from .config import (
+    is_cpp_mode,
     load_config,
-    mode_label,
+    mode_display,
     mode_worker_fraction,
+    normalize_cpp_output_types,
     normalize_order_parameters,
     normalize_output_types,
     order_parameter_display,
     output_enabled,
     output_type_display,
     q_degrees_from_order_parameters,
+    validate_cpp_cli,
 )
+from .core.cpp_backend import analyze_frame_cpp
 from .core.cage import (
     CAGE_REPORT_GROUPS,
     TARGET_FACE_COUNTS,
@@ -115,6 +119,7 @@ def analyze(args: Namespace) -> None:
     started_at = perf_counter()
     config = load_config(Path(args.config) if args.config else None, mode=getattr(args, "mode", None))
     apply_cli_overrides(config, args)
+    validate_cpp_cli(args, config)
     normalize_analysis_scopes(config)
 
     # Directory inputs use one file per frame.
@@ -252,7 +257,7 @@ def analyze(args: Namespace) -> None:
             rows,
             outdir,
             config,
-            write_xlsx=output_enabled(config, "xlsx"),
+            write_xlsx=output_enabled(config, "summary-xlsx"),
             run_info=run_info,
         )
         # Rewrite once final write timing is known.
@@ -312,7 +317,7 @@ def build_run_info(
         "time_zone": format_time_zone(started_at_wall),
         "config_file": args.config or "<built-in defaults>",
         "sqq_version": __version__,
-        "mode": f"{config.get('mode', '50')} ({mode_label(config.get('mode', '50'))})",
+        "mode": mode_display(config.get("mode", "50")),
         "worker_policy": worker_policy_text(config),
         "topology": str(topology) if topology else "<none>",
         "matched_files": len(paths),
@@ -347,17 +352,35 @@ def build_run_info(
         "q_neighbor_mode": config["order"].get("q_neighbor_mode", "graph"),
         "q_cutoff_nm": config["order"].get("q_cutoff_nm", 0.35),
         "q_n_neighbor": config["order"].get("q_n_neighbor", None),
-        "output_types": output_type_display(output_types),
+        "output_types": output_type_display(
+            output_types,
+            cpp_mode=is_cpp_mode(config.get("mode", "50")),
+        ),
         "output_layout": config["output"].get("structure_layout", "grouped"),
         "workers": workers,
         "parallel_backend": parallel_backend,
         "math_threads": int(config.get("parallel", {}).get("math_threads", 1)),
         "summary_xlsx": (
             str((outdir / "summary.xlsx").resolve())
-            if output_enabled(config, "xlsx")
+            if output_enabled(config, "summary-xlsx")
             else "<disabled>"
         ),
-        "summary_detail": (
+        "summary_csv": (
+            str(
+                (
+                    outdir
+                    / str(
+                        config.get("output", {}).get(
+                            "summary_csv_dir",
+                            "summary_csv",
+                        )
+                    )
+                ).resolve()
+            )
+            if output_enabled(config, "summary-csv")
+            else "<disabled>"
+        ),
+        "summary_detail_csv": (
             str(
                 (
                     outdir
@@ -370,7 +393,7 @@ def build_run_info(
                 ).resolve()
             )
             if (
-                output_enabled(config, "summary-detail")
+                output_enabled(config, "summary-detail-csv")
                 or output_enabled(config, "cluster-detail")
             )
             else "<disabled>"
@@ -407,28 +430,34 @@ def print_run_header(
     print("")
     print("Configuration")
     print_terminal_field("SQQ version", __version__)
+    print_terminal_field("Mode", mode_display(config.get("mode", "50")))
     print_terminal_field("Config file", args.config or "<built-in defaults>")
     print_terminal_field("Topology", topology or "<none>")
-    print_terminal_field("Mode", f"{config.get('mode', '50')} ({mode_label(config.get('mode', '50'))})")
     print_terminal_field("Graph mode", graph_mode_display(config["graph"]["bond_mode"]))
     print_terminal_field("Search sizes", config["ring"]["sizes"])
-    print_terminal_field("Ring report sizes", config["ring"]["report_sizes"])
     print_terminal_field("Ring definition", config["ring"].get("definition", "chordless"))
-    print_terminal_field("Quasi-cage sizes", f"{config['quasi_cage'].get('base_sizes', 'auto')} / {config['quasi_cage'].get('side_sizes', 'auto')}")
-    print_terminal_field("Quasi max layer", config["quasi_cage"].get("max_layers", ""))
-    print_terminal_field("Quasi search policy", config["quasi_cage"].get("search_policy", "bounded"))
+    if not is_cpp_mode(config.get("mode")):
+        print_terminal_field("Ring report sizes", config["ring"]["report_sizes"])
+        print_terminal_field("Quasi-cage sizes", f"{config['quasi_cage'].get('base_sizes', 'auto')} / {config['quasi_cage'].get('side_sizes', 'auto')}")
+        print_terminal_field("Quasi max layer", config["quasi_cage"].get("max_layers", ""))
+        print_terminal_field("Quasi search policy", config["quasi_cage"].get("search_policy", "bounded"))
     print_terminal_field("Cage report types", dashboard_cage_targets(config))
     print_terminal_field("Maximum cage face", config["cage"].get("max_faces", 20))
-    print_terminal_field("Cage fast closure", on_off_text(config["cage"].get("fast_closure", True)))
+    if not is_cpp_mode(config.get("mode")):
+        print_terminal_field("Cage fast closure", on_off_text(config["cage"].get("fast_closure", True)))
     print_terminal_field("Scientific validation", on_off_text(config["cage"].get("scientific_validation", False)))
-    print_terminal_field("Find cluster", on_off_text(config.get("hydrate_cluster", {}).get("enabled", False)))
-    print_terminal_field("Cluster min cage", config.get("hydrate_cluster", {}).get("min_cage", 2))
+    if not is_cpp_mode(config.get("mode")):
+        print_terminal_field("Find cluster", on_off_text(config.get("hydrate_cluster", {}).get("enabled", False)))
+        print_terminal_field("Cluster min cage", config.get("hydrate_cluster", {}).get("min_cage", 2))
     print_terminal_field("Order parameters", order_parameter_config_text(config))
     if q_degrees_from_order_parameters(config.get("order", {}).get("parameters")):
         print_terminal_field("Q_l settings", q_config_text(config))
     print_terminal_field(
         "Output types",
-        output_type_display(config.get("output", {}).get("types")),
+        output_type_display(
+            config.get("output", {}).get("types"),
+            cpp_mode=is_cpp_mode(config.get("mode", "50")),
+        ),
     )
     print_terminal_field("Output layout", config["output"].get("structure_layout", "grouped"))
     print_terminal_field("Worker policy", worker_policy_text(config))
@@ -453,9 +482,11 @@ def print_run_summary(run_info: dict[str, Any]) -> None:
     print_terminal_field("Finish time", run_info.get("finish_time", ""))
     print_terminal_field("Duration (s)", run_info.get("elapsed_seconds", ""))
     print_terminal_field("SQQ version", run_info.get("sqq_version", __version__))
+    print_terminal_field("Mode", run_info.get("mode", ""))
     print_terminal_field("Graph mode", run_info.get("graph_mode_display", run_info.get("graph_mode", "")))
     print_terminal_field("Order parameters", run_info.get("order_parameters", ""))
-    print_terminal_field("Find cluster", run_info.get("find_cluster", "off"))
+    if str(run_info.get("mode", "")).strip().lower() != "sqq-cpp":
+        print_terminal_field("Find cluster", run_info.get("find_cluster", "off"))
     print_terminal_field("Output types", run_info.get("output_types", "none"))
     print_terminal_field("Worker policy", run_info.get("worker_policy", ""))
     print_terminal_field("Parallel backend", run_info.get("parallel_backend", "serial"))
@@ -611,6 +642,22 @@ STAGE_GROUPS = (
         ("writing outputs", "output"),
     ),
 )
+CPP_STAGE_GROUPS = (
+    (
+        ("reading frame", "reading"),
+        ("resolving settings", "settings"),
+        ("selecting molecules", "selecting"),
+    ),
+    (
+        ("building water graph", "graph"),
+        ("searching rings", "ring"),
+        ("searching cage", "cage"),
+    ),
+    (
+        ("computing order parameters", "order"),
+        ("writing outputs", "output"),
+    ),
+)
 STAGE_LABEL_BY_NAME = {
     stage: label
     for group in STAGE_GROUPS
@@ -618,15 +665,19 @@ STAGE_LABEL_BY_NAME = {
 }
 
 
-def configured_stage_groups(include_cluster_stage: bool) -> list[list[tuple[str, str]]]:
+def configured_stage_groups(
+    include_cluster_stage: bool,
+    cpp_mode: bool = False,
+) -> list[list[tuple[str, str]]]:
     """Return progress stages, hiding hydrate cluster when it is not enabled."""
+    groups = CPP_STAGE_GROUPS if cpp_mode else STAGE_GROUPS
     return [
         [
             (stage, label)
             for stage, label in group
             if include_cluster_stage or label != "cluster"
         ]
-        for group in STAGE_GROUPS
+        for group in groups
     ]
 
 
@@ -654,10 +705,16 @@ def format_stage_label(label: str, width: int, *, active: bool, bold: bool) -> s
 class RunProgressDisplay:
     """Render per-run progress with current stage, frame, and total timings."""
 
-    def __init__(self, total: int, total_started_at: float, include_cluster_stage: bool) -> None:
+    def __init__(
+        self,
+        total: int,
+        total_started_at: float,
+        include_cluster_stage: bool,
+        cpp_mode: bool = False,
+    ) -> None:
         self.total = total
         self.total_started_at = total_started_at
-        self.stage_groups = configured_stage_groups(include_cluster_stage)
+        self.stage_groups = configured_stage_groups(include_cluster_stage, cpp_mode)
         self.completed = 0
         self.failed = 0
         self.current_index: int | None = None
@@ -822,11 +879,18 @@ PROGRESS_RENDER_INTERVAL_SECONDS = 0.10
 class ParallelRunProgressDisplay:
     """Render aggregate and per-file progress for concurrent frame analysis."""
 
-    def __init__(self, total: int, workers: int, total_started_at: float, include_cluster_stage: bool) -> None:
+    def __init__(
+        self,
+        total: int,
+        workers: int,
+        total_started_at: float,
+        include_cluster_stage: bool,
+        cpp_mode: bool = False,
+    ) -> None:
         self.total = total
         self.workers = workers
         self.total_started_at = total_started_at
-        self.stage_groups = configured_stage_groups(include_cluster_stage)
+        self.stage_groups = configured_stage_groups(include_cluster_stage, cpp_mode)
         self.completed = 0
         self.failed = 0
         self._active: dict[int, dict[str, Any]] = {}
@@ -1026,6 +1090,7 @@ def analyze_paths_serial(
         total=int(total_frames if total_frames is not None else len(paths)),
         total_started_at=total_started_at,
         include_cluster_stage=bool(config.get("hydrate_cluster", {}).get("enabled", False)),
+        cpp_mode=is_cpp_mode(config.get("mode")),
     )
     try:
         standalone_paths = (
@@ -1138,6 +1203,7 @@ def analyze_paths_threaded(
         workers=workers,
         total_started_at=total_started_at,
         include_cluster_stage=bool(config.get("hydrate_cluster", {}).get("enabled", False)),
+        cpp_mode=is_cpp_mode(config.get("mode")),
     )
     try:
         with ThreadPoolExecutor(max_workers=workers) as executor:
@@ -1197,6 +1263,7 @@ def analyze_paths_processes(
         workers=workers,
         total_started_at=total_started_at,
         include_cluster_stage=bool(config.get("hydrate_cluster", {}).get("enabled", False)),
+        cpp_mode=is_cpp_mode(config.get("mode")),
     )
     context = get_context("spawn")
     stage_queue = context.Queue()
@@ -1265,6 +1332,7 @@ def analyze_trajectory_processes(
         workers=workers,
         total_started_at=total_started_at,
         include_cluster_stage=bool(config.get("hydrate_cluster", {}).get("enabled", False)),
+        cpp_mode=is_cpp_mode(config.get("mode")),
     )
     context = get_context("spawn")
     stage_queue = context.Queue()
@@ -1427,6 +1495,7 @@ def write_frame_outputs(result: FrameResult, frame_dir: Path, config: dict[str, 
     """Write all configured per-frame output files."""
     output = config.get("output", {})
     order_parameters = config.get("order", {}).get("parameters", ["f3", "f4"])
+    cpp_mode = is_cpp_mode(config.get("mode"))
     if output_enabled(config, "info"):
         write_frame_info(
             result,
@@ -1439,7 +1508,7 @@ def write_frame_outputs(result: FrameResult, frame_dir: Path, config: dict[str, 
     else:
         remove_optional_info_output(result, frame_dir)
 
-    if output_enabled(config, "membership-tsv"):
+    if not cpp_mode and output_enabled(config, "membership-tsv"):
         write_membership(result, frame_dir)
     else:
         remove_optional_tsv_outputs(
@@ -1448,7 +1517,7 @@ def write_frame_outputs(result: FrameResult, frame_dir: Path, config: dict[str, 
             remove_membership=True,
             remove_order=False,
         )
-    if output_enabled(config, "order-tsv"):
+    if not cpp_mode and output_enabled(config, "order-tsv"):
         write_order_parameter(result, frame_dir, order_parameters=order_parameters)
     else:
         remove_optional_tsv_outputs(
@@ -1458,7 +1527,7 @@ def write_frame_outputs(result: FrameResult, frame_dir: Path, config: dict[str, 
             remove_order=True,
         )
 
-    if output_enabled(config, "vmd"):
+    if not cpp_mode and output_enabled(config, "vmd"):
         write_vmd_script(result, frame_dir)
     else:
         remove_optional_vmd_output(result, frame_dir)
@@ -1466,7 +1535,7 @@ def write_frame_outputs(result: FrameResult, frame_dir: Path, config: dict[str, 
     layout = str(output.get("structure_layout", "grouped"))
     write_empty = bool(output.get("write_empty_files", False))
     remove_generated_gro_outputs(result, frame_dir, "ring-gro", layout)
-    if output_enabled(config, "ring-gro"):
+    if not cpp_mode and output_enabled(config, "ring-gro"):
         write_ring_gro_files(
             result,
             frame_dir,
@@ -1475,7 +1544,7 @@ def write_frame_outputs(result: FrameResult, frame_dir: Path, config: dict[str, 
             sizes=set(result.ring_report_sizes),
         )
     remove_generated_gro_outputs(result, frame_dir, "half-gro", layout)
-    if output_enabled(config, "half-gro"):
+    if not cpp_mode and output_enabled(config, "half-gro"):
         write_half_cage_gro_files(
             result,
             frame_dir,
@@ -1483,7 +1552,7 @@ def write_frame_outputs(result: FrameResult, frame_dir: Path, config: dict[str, 
             layout=layout,
         )
     remove_generated_gro_outputs(result, frame_dir, "quasi-gro", layout)
-    if output_enabled(config, "quasi-gro"):
+    if not cpp_mode and output_enabled(config, "quasi-gro"):
         write_quasi_cage_gro_files(
             result,
             frame_dir,
@@ -1497,9 +1566,10 @@ def write_frame_outputs(result: FrameResult, frame_dir: Path, config: dict[str, 
             frame_dir,
             write_empty=write_empty,
             layout=layout,
+            include_centers=not cpp_mode,
         )
     remove_generated_gro_outputs(result, frame_dir, "cluster-gro", layout)
-    if result.hydrate_cluster_enabled and output_enabled(config, "cluster-gro"):
+    if not cpp_mode and result.hydrate_cluster_enabled and output_enabled(config, "cluster-gro"):
         write_hydrate_cluster_gro_files(
             result,
             frame_dir,
@@ -1507,7 +1577,7 @@ def write_frame_outputs(result: FrameResult, frame_dir: Path, config: dict[str, 
             layout=layout,
         )
     remove_generated_gro_outputs(result, frame_dir, "ice-gro", layout)
-    if output_enabled(config, "ice-gro"):
+    if not cpp_mode and output_enabled(config, "ice-gro"):
         write_ice_gro_file(
             result,
             frame_dir,
@@ -2075,7 +2145,12 @@ def normalize_analysis_scopes(config: dict[str, Any]) -> None:
         and len(raw_output_types) == 1
         and str(next(iter(raw_output_types))).strip().lower() == "all"
     )
-    output_types = list(normalize_output_types(raw_output_types))
+    output_normalizer = (
+        normalize_cpp_output_types
+        if is_cpp_mode(config.get("mode", "50"))
+        else normalize_output_types
+    )
+    output_types = list(output_normalizer(raw_output_types))
     if not hydrate_cluster["enabled"]:
         conditional_cluster_outputs = {
             "cluster-gro",
@@ -2094,26 +2169,32 @@ def normalize_analysis_scopes(config: dict[str, Any]) -> None:
             )
     if hydrate_cluster["enabled"] and "cluster-gro" not in output_types:
         output_types = list(normalize_output_types([*output_types, "cluster-gro"]))
-        print(
-            "Note: cluster-gro was enabled because cluster search is on.",
-            file=sys.stderr,
-        )
-    if hydrate_cluster["enabled"] and "xlsx" not in output_types:
-        output_types = list(normalize_output_types([*output_types, "xlsx"]))
-        print(
-            "Note: xlsx was enabled because cluster search is on.",
-            file=sys.stderr,
-        )
+    if (
+        hydrate_cluster["enabled"]
+        and not {"summary-xlsx", "summary-csv"}.intersection(output_types)
+    ):
+        output_types = list(normalize_output_types([*output_types, "summary-xlsx"]))
     output["types"] = output_types
     output["write_empty_files"] = parse_on_off(
         output.get("write_empty_files", False),
         "output.write_empty_files",
     )
-    detail_dir = str(output.get("summary_detail_dir", "summary_detail")).strip() or "summary_detail"
-    detail_path = Path(detail_dir)
-    if detail_path.is_absolute() or ".." in detail_path.parts:
-        raise ValueError("output.summary_detail_dir must be a relative directory inside the output folder.")
-    output["summary_detail_dir"] = detail_dir
+    for key, default in (
+        ("summary_csv_dir", "summary_csv"),
+        ("summary_detail_dir", "summary_detail"),
+    ):
+        directory = str(output.get(key, default)).strip() or default
+        directory_path = Path(directory)
+        if directory_path.is_absolute() or ".." in directory_path.parts:
+            raise ValueError(f"output.{key} must be a relative directory inside the output folder.")
+        output[key] = directory
+    if (
+        Path(output["summary_csv_dir"]).as_posix().casefold()
+        == Path(output["summary_detail_dir"]).as_posix().casefold()
+    ):
+        raise ValueError(
+            "output.summary_csv_dir and output.summary_detail_dir must be different."
+        )
     cage_isomer_rows = str(output.get("cage_isomer_rows", "nonzero")).strip().lower()
     if cage_isomer_rows not in {"nonzero", "all"}:
         raise ValueError("output.cage_isomer_rows / --cage-isomer-rows must be nonzero or all.")
@@ -2354,6 +2435,20 @@ def analyze_frame(
         center_atoms=config["guest"].get("center_atoms", {}),
         center_mode=str(config["guest"].get("center_mode", "center_atom")),
     )
+    if is_cpp_mode(config.get("mode")):
+        report_stage(stage_callback, "building water graph")
+        report_stage(stage_callback, "searching rings")
+        report_stage(stage_callback, "searching cage")
+        result = analyze_frame_cpp(
+            frame,
+            waters,
+            guests,
+            config,
+            cage_report_types=cage_report_types,
+            ring_report_sizes=tuple(ring_report_sizes),
+        )
+        report_stage(stage_callback, "computing order parameters")
+        return result
     # All structure classifiers use this graph.
     report_stage(stage_callback, "building water graph")
     graph = build_water_graph(

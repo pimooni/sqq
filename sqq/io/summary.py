@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-"""Markdown, TSV, VMD, and XLSX summary writers."""
+"""Markdown, CSV, TSV, VMD, and XLSX summary writers."""
 
 from collections import Counter, defaultdict
 from copy import deepcopy
@@ -21,8 +21,8 @@ from .. import __version__
 from ..banner import SQQ_BANNER
 from ..config import (
     dump_config,
-    mode_label,
-    normalize_mode,
+    is_cpp_mode,
+    mode_display,
     normalize_order_parameters,
     order_parameter_display,
     output_enabled,
@@ -156,6 +156,28 @@ SUMMARY_DETAIL_TABLE_NAMES = (
     "quasi_cage_isomer",
     "hydrate_domain",
     "hydrate_cluster_detail",
+)
+
+# Main summary CSV filenames mirror the workbook sheet names. Keeping the
+# allow-list explicit prevents cleanup from touching unrelated files.
+SUMMARY_MAIN_TABLE_NAMES = (
+    "summary",
+    "failures",
+    "connection",
+    "hbond",
+    "oo_connection",
+    "pair_connection",
+    "ring",
+    "half_cage",
+    "quasi_cage",
+    "cage",
+    "cage_occupancy",
+    "cage_isomer",
+    "hydrate_cluster",
+    "order_parameter",
+    "ice",
+    "detail_index",
+    "config",
 )
 
 TREE_MIDDLE = "\u251c"
@@ -997,55 +1019,56 @@ def write_frame_info(
     cage_types = [cage_type for cage_type in ordered_cage_types(cage_values) if cage_type in cage_values]
     default_ring_sizes = result.ring_report_sizes or tuple(result.rings)
     enabled_ring_sizes = sorted(set(ring_sizes if ring_sizes is not None else default_ring_sizes))
-    mode_code = normalize_mode(analysis_mode)
-    lines = [        f"# SQQ Frame Report: {result.frame.name}",
-        "",
+    cpp_mode = is_cpp_mode(analysis_mode)
+    frame_information_rows = [
+        ["sqq version", __version__],
+        ["mode", mode_display(analysis_mode)],
+        ["date & time", report_datetime_label()],
+        ["source", source_label(result.frame.source)],
+        ["frame", result.frame.name],
+        ["time_ps", result.frame.time_ps],
+        ["graph_mode", graph_mode_display(requested_bond_mode or row["connection_mode"], [row["connection_mode"]])],
+        ["bond_mode", row["connection_mode"]],
+        ["ring_sizes", ", ".join(str(size) for size in enabled_ring_sizes)],
     ]
-
-    lines.extend(
-        section_table(
-            "Frame Information",
-            ["item", "value"],
-            [
-                ["sqq version", __version__],
-                ["date & time", report_datetime_label()],
-                ["source", source_label(result.frame.source)],
-                ["frame", result.frame.name],
-                ["time_ps", result.frame.time_ps],
-                ["mode", f"{mode_code} ({mode_label(mode_code)})"],                ["graph_mode", graph_mode_display(requested_bond_mode or row["connection_mode"], [row["connection_mode"]])],
-                ["bond_mode", row["connection_mode"]],
-                ["ring_sizes", ", ".join(str(size) for size in enabled_ring_sizes)],
-                ["find_cluster", "on" if result.hydrate_cluster_enabled else "off"],
-                ["status", "ok"],
-                ["n_atoms", len(result.frame.atoms)],
-                ["n_waters", len(result.waters)],
-                ["n_guests", len(result.guests)],
-            ],
-        )
-    )
+    if not cpp_mode:
+        frame_information_rows.append(["find_cluster", "on" if result.hydrate_cluster_enabled else "off"])
+    frame_information_rows.extend([
+        ["status", "ok"],
+        ["n_atoms", len(result.frame.atoms)],
+        ["n_waters", len(result.waters)],
+        ["n_guests", len(result.guests)],
+    ])
+    lines = [
+        f"# SQQ Frame Report: {result.frame.name}",
+        "",
+        *section_table("Frame Information", ["item", "value"], frame_information_rows),
+    ]
     lines.extend(section_table("Molecules", ["resname", "molecules", "atoms"], molecule_count_rows(result)))
     lines.extend(connection_info_section(result, row))
 
-    ring_rows = [
-        [size, row.get(f"ring{size}", 0), row.get(f"free_ring{size}", 0)]
-        for size in enabled_ring_sizes
-    ]
-    ring_rows.append(
-        [
-            "total",
-            sum(int(item[1]) for item in ring_rows),
-            sum(int(item[2]) for item in ring_rows),
+    if not cpp_mode:
+        ring_rows = [
+            [size, row.get(f"ring{size}", 0), row.get(f"free_ring{size}", 0)]
+            for size in enabled_ring_sizes
         ]
-    )
-    lines.extend(section_table("Ring", ["ring size", "total", "free"], ring_rows))
-    lines.extend(patch_info_section("Half Cage", result.half_cages))
-    lines.extend(patch_info_section("Quasi Cage", result.quasi_cages))
-    lines.extend(patch_isomer_description_section("Quasi Cage Isomer Description", result.quasi_cages))
+        ring_rows.append(
+            [
+                "total",
+                sum(int(item[1]) for item in ring_rows),
+                sum(int(item[2]) for item in ring_rows),
+            ]
+        )
+        lines.extend(section_table("Ring", ["ring size", "total", "free"], ring_rows))
+        lines.extend(patch_info_section("Half Cage", result.half_cages))
+        lines.extend(patch_info_section("Quasi Cage", result.quasi_cages))
+        lines.extend(patch_isomer_description_section("Quasi Cage Isomer Description", result.quasi_cages))
 
     lines.extend(cage_info_section(result, cage_types))
     lines.extend(cage_isomer_description_section(result, cage_types))
-    lines.extend(cage_occupancy_section(result, cage_types))
-    lines.extend(hydrate_cluster_info_section(result))
+    lines.extend(cage_occupancy_section(result, cage_types, evaluated=not cpp_mode or bool(result.guests)))
+    if not cpp_mode:
+        lines.extend(hydrate_cluster_info_section(result))
     has_focus = result.f3f4 is not None and bool(result.f3f4.focus_resids)
     order_headers = ["metric", "count", "mean"]
     if has_focus:
@@ -1066,7 +1089,7 @@ def write_frame_info(
                 ]
             )
         order_rows.append(metric_row)
-    for degree in q_degrees_from_order_parameters(selected_order_parameters):
+    for degree in (() if cpp_mode else q_degrees_from_order_parameters(selected_order_parameters)):
         prefix = f"q{degree}"
         metric_row = [
             f"Q{degree}",
@@ -1083,7 +1106,7 @@ def write_frame_info(
         order_rows.append(metric_row)
     lines.extend(section_table("Order Parameters", order_headers, order_rows))
 
-    if result.hydrate_order is not None:
+    if not cpp_mode and result.hydrate_order is not None:
         hydrate_order_rows: list[list[Any]] = []
         if "mcg1" in selected_order_set:
             hydrate_order_rows.append(
@@ -1105,12 +1128,13 @@ def write_frame_info(
             )
         )
 
-    ice_rows = [
-        ["ice_like_waters", row["ice_like_waters"]],
-        ["ice_i_waters", row["ice_i_waters"]],
-        ["interfacial_ice_waters", row["interfacial_ice_waters"]],
-    ]
-    lines.extend(section_table("Ice", ["structure", "water molecules"], ice_rows))
+    if not cpp_mode:
+        ice_rows = [
+            ["ice_like_waters", row["ice_like_waters"]],
+            ["ice_i_waters", row["ice_i_waters"]],
+            ["interfacial_ice_waters", row["interfacial_ice_waters"]],
+        ]
+        lines.extend(section_table("Ice", ["structure", "water molecules"], ice_rows))
     if result.warnings:
         lines.extend(["", "## Warnings", ""])
         lines.extend(f"- {warning}" for warning in result.warnings)
@@ -1352,8 +1376,15 @@ def cage_display_label(cage_type: str) -> str:
     return "".join(f"{size}{superscript_number(count)}" for size, count in sorted(counts.items()) if count > 0)
 
 
-def cage_occupancy_section(result: FrameResult, cage_types: list[str]) -> list[str]:
+def cage_occupancy_section(
+    result: FrameResult,
+    cage_types: list[str],
+    *,
+    evaluated: bool = True,
+) -> list[str]:
     """Show one cage type per row with dynamic guest-composition columns."""
+    if not evaluated:
+        return section_table("Cage Occupancy", ["status"], [["not evaluated (no selected guests)"]])
     guests_by_id = build_guest_lookup(result.guests)
     guest_order = guest_resname_order(result)
     counts: dict[str, dict[str, int]] = {
@@ -1689,6 +1720,7 @@ def write_summary(
         "run_config_initial_seconds": 0.0,
         "detail_table_build_seconds": 0.0,
         "detail_csv": {"enabled": False, "total_seconds": 0.0, "tables": []},
+        "summary_csv": {"enabled": False, "total_seconds": 0.0, "tables": []},
         "xlsx": {"enabled": False, "total_seconds": 0.0, "sheets": []},
     }
 
@@ -1712,7 +1744,7 @@ def write_summary(
 
     detail_index = pd.DataFrame()
     if (
-        output_enabled(config, "summary-detail")
+        output_enabled(config, "summary-detail-csv")
         or output_enabled(config, "cluster-detail")
     ):
         detail_build_started = perf_counter()
@@ -1728,8 +1760,27 @@ def write_summary(
     else:
         remove_summary_detail_csvs(outdir, config)
 
+    write_summary_csv = output_enabled(config, "summary-csv")
+    write_summary_xlsx = bool(write_xlsx) and output_enabled(config, "summary-xlsx")
+    summary_tables: list[tuple[str, pd.DataFrame, bool]] = []
+    if write_summary_csv or write_summary_xlsx:
+        summary_tables = summary_output_tables(
+            data,
+            config,
+            run_info or {},
+            config_for_dump,
+            detail_index,
+        )
+
+    if write_summary_csv:
+        metrics["summary_csv"] = write_summary_csvs(
+            outdir, summary_tables, config, return_metrics=True
+        )
+    else:
+        remove_summary_csvs(outdir, config)
+
     summary_xlsx = outdir / "summary.xlsx"
-    if bool(write_xlsx) and output_enabled(config, "xlsx"):
+    if write_summary_xlsx:
         xlsx_started = perf_counter()
         xlsx_metrics: dict[str, Any] = {
             "enabled": True,
@@ -1744,16 +1795,7 @@ def write_summary(
         writer: pd.ExcelWriter | None = None
         try:
             writer = pd.ExcelWriter(temp_path, engine="openpyxl")
-            tables: list[tuple[str, pd.DataFrame, bool]] = [
-                ("summary", summary_dashboard_table(data, run_info or {}, config), False),
-            ]
-            tables.extend(
-                (sheet_name, table, True)
-                for sheet_name, table in summary_sheet_tables(data, config).items()
-            )
-            if not detail_index.empty:
-                tables.append(("detail_index", detail_index, True))
-            tables.append(("config", pd.DataFrame(flatten_config(config_for_dump)), True))
+            tables = summary_tables
 
             for sheet_name, table, include_header in tables:
                 ensure_excel_table_size(table, sheet_name, include_header=include_header)
@@ -1808,6 +1850,102 @@ def write_summary(
     return metrics
 
 
+def summary_output_tables(
+    data: pd.DataFrame,
+    config: dict[str, Any],
+    run_info: dict[str, Any],
+    config_for_dump: dict[str, Any],
+    detail_index: pd.DataFrame,
+) -> list[tuple[str, pd.DataFrame, bool]]:
+    """Build the shared table list for summary XLSX and CSV outputs."""
+    tables: list[tuple[str, pd.DataFrame, bool]] = [
+        ("summary", summary_dashboard_table(data, run_info, config), False),
+    ]
+    tables.extend(
+        (sheet_name, table, True)
+        for sheet_name, table in summary_sheet_tables(data, config).items()
+    )
+    if not is_cpp_mode(config.get("mode", "50")) and not detail_index.empty:
+        tables.append(("detail_index", detail_index, True))
+    tables.append(("config", pd.DataFrame(flatten_config(config_for_dump)), True))
+    return tables
+
+
+def write_summary_csvs(
+    outdir: Path,
+    tables: list[tuple[str, pd.DataFrame, bool]],
+    config: dict[str, Any],
+    *,
+    return_metrics: bool = False,
+) -> dict[str, Any] | None:
+    """Atomically write one main-summary CSV per workbook-equivalent table."""
+    started = perf_counter()
+    dir_name = (
+        str(config.get("output", {}).get("summary_csv_dir", "summary_csv")).strip()
+        or "summary_csv"
+    )
+    summary_dir = outdir / dir_name
+    summary_dir.mkdir(parents=True, exist_ok=True)
+    metrics: dict[str, Any] = {
+        "enabled": True,
+        "total_seconds": 0.0,
+        "tables": [],
+    }
+    pending: list[tuple[Path, Path]] = []
+    written_names: set[str] = set()
+    try:
+        for name, table, include_header in tables:
+            target = summary_dir / f"{name}.csv"
+            temp_path = temporary_output_path(target)
+            pending.append((temp_path, target))
+            write_started = perf_counter()
+            table.to_csv(
+                temp_path,
+                index=False,
+                header=include_header,
+                encoding="utf-8-sig",
+            )
+            elapsed = perf_counter() - write_started
+            written_names.add(name)
+            metric = table_metric(name, table, write_seconds=elapsed)
+            metric["bytes"] = temp_path.stat().st_size
+            metrics["tables"].append(metric)
+
+        stale_paths = [
+            summary_dir / f"{name}.csv"
+            for name in SUMMARY_MAIN_TABLE_NAMES
+            if name not in written_names
+        ]
+        commit_output_bundle(pending, stale_paths)
+    finally:
+        for temp_path, _ in pending:
+            temp_path.unlink(missing_ok=True)
+
+    metrics["total_seconds"] = round(perf_counter() - started, 6)
+    if return_metrics:
+        return metrics
+    return None
+
+
+def remove_summary_csvs(outdir: Path, config: dict[str, Any]) -> None:
+    """Remove known main-summary CSVs while preserving unrelated files."""
+    dir_name = (
+        str(config.get("output", {}).get("summary_csv_dir", "summary_csv")).strip()
+        or "summary_csv"
+    )
+    summary_dir = outdir / dir_name
+    if not summary_dir.exists():
+        return
+    commit_output_bundle(
+        [],
+        [summary_dir / f"{name}.csv" for name in SUMMARY_MAIN_TABLE_NAMES],
+    )
+    try:
+        summary_dir.rmdir()
+    except OSError:
+        pass
+
+
 def temporary_output_path(target: Path) -> Path:
     """Create a same-directory temporary path suitable for atomic replacement."""
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -1834,7 +1972,7 @@ def ensure_excel_table_size(
             f"Summary sheet {sheet_name!r} is too large for Excel "
             f"({rows} rows x {columns} columns; limits are "
             f"{EXCEL_MAX_ROWS} rows x {EXCEL_MAX_COLUMNS} columns). "
-            "Use the CSV files in summary_detail for high-cardinality detail data."
+            "Use summary-detail-csv for high-cardinality detail data."
         )
 
 
@@ -1924,7 +2062,10 @@ def config_with_run_metadata(config: dict[str, Any], run_info: dict[str, Any]) -
         ),
         "output_types": run_info.get(
             "output_types",
-            output_type_display(config.get("output", {}).get("types")),
+            output_type_display(
+                config.get("output", {}).get("types"),
+                cpp_mode=is_cpp_mode(config.get("mode", "50")),
+            ),
         ),
         "frames_total": run_info.get("frames_total", ""),
         "frames_ok": run_info.get("frames_ok", ""),
@@ -1963,10 +2104,10 @@ def write_summary_detail_csvs(
                 continue
             path = detail_dir / f"{name}.csv"
             temp_path = temporary_output_path(path)
+            pending.append((temp_path, path))
             write_started = perf_counter()
             table.to_csv(temp_path, index=False, encoding="utf-8-sig")
             elapsed = perf_counter() - write_started
-            pending.append((temp_path, path))
             written_names.add(name)
             relative_dir = detail_dir_name.rstrip("/\\")
             relative_file = f"{relative_dir}/{name}.csv".replace("\\", "/")
@@ -1998,7 +2139,7 @@ def write_summary_detail_csvs(
 
 
 def remove_summary_detail_csvs(outdir: Path, config: dict[str, Any]) -> None:
-    """Remove known stale detail CSVs when summary-detail output is disabled."""
+    """Remove known stale detail CSVs when summary-detail-csv is disabled."""
     detail_dir_name = str(
         config.get("output", {}).get("summary_detail_dir", "summary_detail")
     ).strip() or "summary_detail"
@@ -2017,6 +2158,7 @@ def remove_summary_detail_csvs(outdir: Path, config: dict[str, Any]) -> None:
 
 def summary_dashboard_table(data: pd.DataFrame, run_info: dict[str, Any], config: dict[str, Any]) -> pd.DataFrame:
     """Build a compact human-facing dashboard for the summary sheet."""
+    cpp_mode = is_cpp_mode(config.get("mode", "50"))
     banner_lines = [line.strip("| ") for line in SQQ_BANNER.splitlines() if line.startswith("|")]
     title = banner_lines[0] if banner_lines else "Shell  Quant  Qualifier"
     author = banner_lines[1] if len(banner_lines) > 1 else "by J. PANG & Q. SUN"
@@ -2059,39 +2201,49 @@ def summary_dashboard_table(data: pd.DataFrame, run_info: dict[str, Any], config
     rows.extend([
         ["Output directory", run_info.get("output_dir", "")],
         ["summary.xlsx", run_info.get("summary_xlsx", "")],
-        ["summary_detail", run_info.get("summary_detail", "")],
+        ["summary_csv", run_info.get("summary_csv", "")],
+        ["summary_detail_csv", run_info.get("summary_detail_csv", "")],
         ["run_config.yaml", run_info.get("run_config", "")],
         ["", ""],
         ["Configuration", ""],
         ["SQQ version", run_info.get("sqq_version", __version__)],
+        ["Mode", mode_display(config.get("mode", "50"))],
         ["Config file", run_info.get("config_file", "<built-in defaults>")],
         ["Topology", run_info.get("topology", "<none>")],
-        ["Mode", run_info.get("mode", "")],
         ["Graph mode", graph_mode_value],
         ["Search sizes", excel_scalar(config.get("ring", {}).get("sizes", ""))],
-        ["Ring report sizes", excel_scalar(configured_ring_report_sizes(config))],
-        ["Ring definition", config.get("ring", {}).get("definition", "chordless")],
-        ["Quasi-cage sizes", f"{excel_scalar(config.get('quasi_cage', {}).get('base_sizes', 'auto'))} / {excel_scalar(config.get('quasi_cage', {}).get('side_sizes', 'auto'))}"],
-        ["Quasi max layer", config.get("quasi_cage", {}).get("max_layers", "")],
-        ["Quasi search policy", config.get("quasi_cage", {}).get("search_policy", "bounded")],
+    ])
+    if not cpp_mode:
+        rows.append(["Ring report sizes", excel_scalar(configured_ring_report_sizes(config))])
+    rows.append(["Ring definition", config.get("ring", {}).get("definition", "chordless")])
+    if not cpp_mode:
+        rows.extend([
+            ["Quasi-cage sizes", f"{excel_scalar(config.get('quasi_cage', {}).get('base_sizes', 'auto'))} / {excel_scalar(config.get('quasi_cage', {}).get('side_sizes', 'auto'))}"],
+            ["Quasi max layer", config.get("quasi_cage", {}).get("max_layers", "")],
+            ["Quasi search policy", config.get("quasi_cage", {}).get("search_policy", "bounded")],
+        ])
+    rows.extend([
         ["Cage report types", dashboard_cage_targets(config)],
         ["Maximum cage face", config.get("cage", {}).get("max_faces", 20)],
-        ["Find cluster", "on" if config.get("hydrate_cluster", {}).get("enabled", False) else "off"],
-        ["Cluster min cage", config.get("hydrate_cluster", {}).get("min_cage", 2)],
-        ["Order parameters", order_parameter_display(selected_order_parameters)],
     ])
-    if selected_order_set & {"mcg1", "mcg3"}:
+    if not cpp_mode:
+        rows.extend([
+            ["Find cluster", "on" if config.get("hydrate_cluster", {}).get("enabled", False) else "off"],
+            ["Cluster min cage", config.get("hydrate_cluster", {}).get("min_cage", 2)],
+        ])
+    rows.append(["Order parameters", order_parameter_display(selected_order_parameters)])
+    if not cpp_mode and selected_order_set & {"mcg1", "mcg3"}:
         rows.append([
             "MCG guest / water cutoff (nm)",
             f"{config.get('hydrate_order', {}).get('mcg_guest_cutoff_nm', 0.90)} / "
             f"{config.get('hydrate_order', {}).get('mcg_water_cutoff_nm', 0.60)}",
         ])
-    if selected_order_set & {"dhop35", "dhop30"}:
+    if not cpp_mode and selected_order_set & {"dhop35", "dhop30"}:
         rows.append([
             "DHOP O-O cutoff (nm)",
             config.get("hydrate_order", {}).get("dhop_neighbor_cutoff_nm", 0.35),
         ])
-    if q_degrees:
+    if not cpp_mode and q_degrees:
         rows.extend([
             ["Q_l degree", excel_scalar(q_degrees)],
             ["Q_l neighbor mode", config.get("order", {}).get("q_neighbor_mode", "graph")],
@@ -2102,7 +2254,10 @@ def summary_dashboard_table(data: pd.DataFrame, run_info: dict[str, Any], config
         [
             "Output types",
             run_info.get("output_types")
-            or output_type_display(config.get("output", {}).get("types")),
+            or output_type_display(
+                config.get("output", {}).get("types"),
+                cpp_mode=cpp_mode,
+            ),
         ],
         ["Output layout", run_info.get("output_layout", "")],
         ["Worker policy", run_info.get("worker_policy", "")],
@@ -2116,21 +2271,28 @@ def summary_dashboard_table(data: pd.DataFrame, run_info: dict[str, Any], config
         ["Guest molecules", min_mean_max_column(data, "n_guests")],
         ["Connections", min_mean_max_column(data, "connection_count")],
     ])
-    for size in configured_ring_report_sizes(config):
-        rows.append([f"Ring{size}", min_mean_max_column(data, f"ring{size}")])
-    rows.extend([
-        ["Half cage", min_mean_max_column(data, "half_cage_total")],
-        ["Quasi cage", min_mean_max_column(data, "quasi_cage_total")],
-        ["Cage total", min_mean_max_column(data, "cage_total")],
-        ["Empty cage", min_mean_max_column(data, "cage_empty")],
-        ["Occupied cage", min_mean_max_column(data, "cage_occupied")],
-    ])
-    if config.get("hydrate_cluster", {}).get("enabled", False):
+    if not cpp_mode:
+        for size in configured_ring_report_sizes(config):
+            rows.append([f"Ring{size}", min_mean_max_column(data, f"ring{size}")])
+        rows.extend([
+            ["Half cage", min_mean_max_column(data, "half_cage_total")],
+            ["Quasi cage", min_mean_max_column(data, "quasi_cage_total")],
+        ])
+    rows.append(["Cage total", min_mean_max_column(data, "cage_total")])
+    if cpp_mode and not has_selected_guests(data):
+        rows.append(["Cage occupancy", "not evaluated"])
+    else:
+        rows.extend([
+            ["Empty cage", min_mean_max_column(data, "cage_empty")],
+            ["Occupied cage", min_mean_max_column(data, "cage_occupied")],
+        ])
+    if not cpp_mode and config.get("hydrate_cluster", {}).get("enabled", False):
         rows.extend([
             ["Hydrate cluster", min_mean_max_column(data, "hydrate_cluster_count")],
             ["Isolated cage", min_mean_max_column(data, "isolated_cage_count")],
         ])
-    rows.append(["Ice-like waters", min_mean_max_column(data, "ice_like_waters")])
+    if not cpp_mode:
+        rows.append(["Ice-like waters", min_mean_max_column(data, "ice_like_waters")])
     return pd.DataFrame(rows)
 
 
@@ -2142,6 +2304,13 @@ def frames_ok_count(data: pd.DataFrame) -> int:
 def frames_failed_count(data: pd.DataFrame) -> int:
     """Count failed frames."""
     return int((data.get("status") == "failed").sum()) if "status" in data else 0
+
+
+def has_selected_guests(data: pd.DataFrame) -> bool:
+    """Return whether any analyzed frame contains a selected guest molecule."""
+    if "n_guests" not in data.columns:
+        return False
+    return bool((pd.to_numeric(data["n_guests"], errors="coerce").fillna(0) > 0).any())
 
 
 def first_data_value(data: pd.DataFrame, column: str, fallback: Any = "") -> Any:
@@ -2415,7 +2584,36 @@ def summary_markdown_tables(data: pd.DataFrame) -> list[tuple[str, pd.DataFrame]
 
 
 def summary_sheet_tables(data: pd.DataFrame, config: dict[str, Any]) -> dict[str, pd.DataFrame]:
-    """Build lightweight XLSX sheets using the configured report scopes."""
+    """Build lightweight main-summary tables using the configured scopes."""
+    if is_cpp_mode(config.get("mode", "50")):
+        include_zero_isomers = (
+            str(config.get("output", {}).get("cage_isomer_rows", "nonzero")).lower()
+            == "all"
+        )
+        tables: dict[str, pd.DataFrame] = {
+            "failures": failure_summary_table(data),
+            "cage": cage_summary_table(data),
+        }
+        if has_selected_guests(data):
+            tables["cage_occupancy"] = cage_occupancy_summary_table(
+                data,
+                markdown_style=False,
+            )
+        tables.update(
+            {
+                "cage_isomer": cage_isomer_summary_table(
+                    data,
+                    include_zero_rows=include_zero_isomers,
+                ),
+                "order_parameter": order_parameter_summary_table(
+                    data,
+                    config.get("order", {}).get("parameters", ["f3", "f4"]),
+                    include_focus=bool(config.get("order", {}).get("focus_waters", [])),
+                ),
+            }
+        )
+        return {name: table for name, table in tables.items() if not table.empty}
+
     ring_sizes = configured_ring_report_sizes(config)
     ring_columns = ["frame", "time_ps"]
     for size in ring_sizes:
@@ -2460,10 +2658,10 @@ def summary_detail_tables(
     *,
     raw_rows: list[dict[str, Any]] | None = None,
 ) -> dict[str, pd.DataFrame]:
-    """Build potentially large multi-row detail tables for summary_detail CSV output."""
+    """Build potentially large multi-row tables for summary-detail-csv output."""
     include_zero_isomers = str(config.get("output", {}).get("cage_isomer_rows", "nonzero")).lower() == "all"
     tables: dict[str, pd.DataFrame] = {}
-    if output_enabled(config, "summary-detail"):
+    if output_enabled(config, "summary-detail-csv"):
         tables.update(
             {
                 "failures": failure_summary_table(data),
@@ -3102,7 +3300,7 @@ def excel_scalar(value: Any) -> Any:
 
 
 def flatten_config(config: dict[str, Any], prefix: str = "") -> list[dict[str, str]]:
-    """Flatten nested config keys for the XLSX config sheet."""
+    """Flatten nested config keys for the main summary config table."""
     rows = []
     for key, value in config.items():
         name = f"{prefix}.{key}" if prefix else str(key)
