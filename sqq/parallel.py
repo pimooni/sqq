@@ -11,6 +11,15 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any, Iterator
 
+from .io.lammps import (
+    LAMMPS_TRAJECTORY_SUFFIXES,
+    LammpsInputConfig,
+    close_lammps_universe,
+    frame_from_lammps_universe,
+    lammps_atom_metadata,
+    normalize_lammps_config,
+    open_lammps_universe,
+)
 from .io.summary import failed_row
 from .io.trajectory import (
     close_mdanalysis_universe,
@@ -30,6 +39,7 @@ _WORKER_STAGE_QUEUE: Any = None
 _WORKER_TRAJECTORY_PATH: Path | None = None
 _WORKER_UNIVERSE: Any = None
 _WORKER_TRAJECTORY_METADATA: tuple[tuple[int, int, str, str, int], ...] | None = None
+_WORKER_LAMMPS_CONFIG: LammpsInputConfig | None = None
 
 
 def initialize_file_worker(
@@ -53,13 +63,29 @@ def initialize_trajectory_worker(
     stage_queue: Any,
     trajectory_path: str,
     topology_path: str,
+    lammps_config: dict[str, Any] | None = None,
 ) -> None:
     """Open one private trajectory handle in every spawned worker."""
     initialize_file_worker(config, outdir, strict, stage_queue)
-    global _WORKER_TRAJECTORY_PATH, _WORKER_UNIVERSE, _WORKER_TRAJECTORY_METADATA
+    global _WORKER_TRAJECTORY_PATH, _WORKER_UNIVERSE
+    global _WORKER_TRAJECTORY_METADATA, _WORKER_LAMMPS_CONFIG
     _WORKER_TRAJECTORY_PATH = Path(trajectory_path)
-    _WORKER_UNIVERSE = open_mdanalysis_universe(_WORKER_TRAJECTORY_PATH, Path(topology_path))
-    _WORKER_TRAJECTORY_METADATA = trajectory_atom_metadata(_WORKER_UNIVERSE)
+    if _WORKER_TRAJECTORY_PATH.suffix.lower() in LAMMPS_TRAJECTORY_SUFFIXES:
+        _WORKER_LAMMPS_CONFIG = normalize_lammps_config(lammps_config)
+        _WORKER_UNIVERSE = open_lammps_universe(
+            _WORKER_TRAJECTORY_PATH, Path(topology_path), _WORKER_LAMMPS_CONFIG
+        )
+        _WORKER_TRAJECTORY_METADATA = lammps_atom_metadata(
+            _WORKER_UNIVERSE, _WORKER_LAMMPS_CONFIG
+        )
+    else:
+        _WORKER_LAMMPS_CONFIG = None
+        _WORKER_UNIVERSE = open_mdanalysis_universe(
+            _WORKER_TRAJECTORY_PATH, Path(topology_path)
+        )
+        _WORKER_TRAJECTORY_METADATA = trajectory_atom_metadata(
+            _WORKER_UNIVERSE
+        )
     atexit.register(close_trajectory_worker)
 
 
@@ -77,12 +103,21 @@ def process_trajectory_frame_task(frame_index: int, raw_frame_index: int) -> tup
         _emit_stage("stage", frame_index, stage, perf_counter())
 
     try:
-        frame = frame_from_mdanalysis_universe(
-            _WORKER_UNIVERSE,
-            _WORKER_TRAJECTORY_PATH,
-            raw_frame_index,
-            atom_metadata=_WORKER_TRAJECTORY_METADATA,
-        )
+        if _WORKER_LAMMPS_CONFIG is not None:
+            frame = frame_from_lammps_universe(
+                _WORKER_UNIVERSE,
+                _WORKER_TRAJECTORY_PATH,
+                raw_frame_index,
+                _WORKER_LAMMPS_CONFIG,
+                atom_metadata=_WORKER_TRAJECTORY_METADATA,
+            )
+        else:
+            frame = frame_from_mdanalysis_universe(
+                _WORKER_UNIVERSE,
+                _WORKER_TRAJECTORY_PATH,
+                raw_frame_index,
+                atom_metadata=_WORKER_TRAJECTORY_METADATA,
+            )
         row = process_frame(
             frame_index,
             frame,
@@ -119,11 +154,15 @@ def process_trajectory_batch_task(
 
 def close_trajectory_worker() -> None:
     """Close the private MDAnalysis reader before a worker exits."""
-    global _WORKER_UNIVERSE, _WORKER_TRAJECTORY_METADATA
+    global _WORKER_UNIVERSE, _WORKER_TRAJECTORY_METADATA, _WORKER_LAMMPS_CONFIG
     if _WORKER_UNIVERSE is not None:
-        close_mdanalysis_universe(_WORKER_UNIVERSE)
+        if _WORKER_LAMMPS_CONFIG is None:
+            close_mdanalysis_universe(_WORKER_UNIVERSE)
+        else:
+            close_lammps_universe(_WORKER_UNIVERSE)
         _WORKER_UNIVERSE = None
     _WORKER_TRAJECTORY_METADATA = None
+    _WORKER_LAMMPS_CONFIG = None
 
 
 def process_file_task(frame_index: int, path_text: str) -> tuple[int, dict[str, Any]]:

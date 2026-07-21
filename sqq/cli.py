@@ -51,23 +51,23 @@ Examples:
   sqq analyze -i "./gro/*.gro" -o ./result_sqq
   sqq analyze -i traj.xtc --top topol.gro -c config.yaml -o ./result_sqq
   sqq analyze -i ./gro -m 00 -b hbond -w 4 --order-parameter f3,f4,q6 -o ./result_sqq
+  sqq analyze -i traj.lammpstrj --top system.data -c lammps.yaml -o ./result_sqq
   sqq analyze -i md.gro --output-type info,cage-gro,summary-xlsx -o ./result_sqq
   sqq analyze -i md.gro -s 4,5,6 --cage-size H -o ./result_sqq_h
   sqq analyze -i md.gro -s 4,5,6 --find-cluster on -o ./result_sqq_cluster
   sqq analyze -m cpp -i md.gro --output-type info,cage-gro,summary-csv -o ./result_sqq_cpp
 
 Analysis modes:
-  -m 00  Rigorous: hbond, 4/5/6 search, 25% workers, find cluster on
-  -m 09  Rigorous performance: hbond, 4/5/6 search, 90% workers, find cluster on
-  -m 50  Standard: auto graph, 5/6 search, 50% workers, find cluster off
-  -m 99  Performance: O-O graph, 5/6 search, 90% workers, find cluster off
-  -m cpp Native C++17 cage/F3/F4 backend: auto graph, 4/5/6 search, 90% workers
+  -m 00  SQQ-Py: hbond, 4/5/6 search, 100% workers, find cluster on
+  -m 50  SQQ-Py: auto graph, 4/5/6 search, 50% workers, find cluster off
+  -m 99  SQQ-CPP: hbond, internal 4/5/6 search, 100% workers
+  -m cpp SQQ-CPP: auto graph, internal 4/5/6 search, 50% workers
 
-Numeric modes do not change quasi_cage.max_layers or order.parameters.
-Mode cpp disables quasi-cage, cluster, and ice analysis and supports only F3/F4.
-Its default compact outputs are info, cage-gro, and summary-csv.
+Modes 99 and cpp use the C++17 cage/F3/F4 backend without quasi-cage,
+cluster, or ice analysis. Automatic 100% workers still reserve one physical
+core. Explicit -w/--worker overrides the mode fraction.
 -b/--bond-mode overrides the graph setting supplied by the selected mode.
---find-cluster overrides the cluster setting supplied by the selected mode.
+--find-cluster overrides modes 00/50; SQQ-CPP rejects cluster search.
 
 Output layout:
   grouped: frame/ring/, frame/half_cage/<type>/,
@@ -95,17 +95,34 @@ def build_parser() -> argparse.ArgumentParser:
         epilog=ANALYZE_EPILOG,
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    analyze_parser.add_argument("-i", "--input", metavar="INPUT", required=True, help="Input file or directory (.gro/.xyz/.xtc/.trr).")
+    analyze_parser.add_argument("-i", "--input", metavar="INPUT", required=True, help="Input file or directory (.gro/.xyz/.xtc/.trr/.dump/.lammpstrj/.dcd).")
     analyze_parser.add_argument("--pattern", metavar="PATTERN", help='Input pattern when --input is a directory; default "*.gro".')
-    analyze_parser.add_argument("--top", "--topology", metavar="TOPOLOGY.gro", dest="topology", help="Topology/structure file for .xtc/.trr input.")
+    analyze_parser.add_argument("--top", "--topology", metavar="TOPOLOGY", dest="topology", help="GRO topology for XTC/TRR or LAMMPS DATA topology for dump/DCD input.")
     analyze_parser.add_argument("--xyz-scale", metavar="SCALE", type=float, help="Multiply XYZ coordinates by SCALE to obtain nm; default 0.1 assumes angstrom input.")
+    analyze_parser.add_argument("--trajectory-stride", metavar="N", type=int, help="Read every Nth trajectory frame; default 1.")
+    analyze_parser.add_argument(
+        "--lammps-units",
+        choices=("real", "metal", "nano"),
+        help="LAMMPS physical unit style; default real.",
+    )
+    analyze_parser.add_argument(
+        "--lammps-timestep",
+        metavar="DT",
+        type=float,
+        help="LAMMPS integration timestep in the selected native time unit.",
+    )
+    analyze_parser.add_argument(
+        "--lammps-atom-style",
+        choices=("full", "molecular", "bond", "angle"),
+        help="LAMMPS DATA atom style; default full.",
+    )
     analyze_parser.add_argument("-c", "--config", metavar="CONFIG.yaml", help="YAML/JSON config file, e.g. config.yaml.")
     analyze_parser.add_argument("-o", "--output", metavar="RESULT_DIR", default="result_sqq", help="Output directory.")
     analyze_parser.add_argument(
         "-m",
         "--mode",
-        choices=("00", "09", "50", "99", "cpp"),
-        help="Analysis mode: numeric sqq-py preset or the native C++17 cpp backend.",
+        choices=("00", "50", "99", "cpp"),
+        help="Analysis mode: SQQ-Py 00/50 or native SQQ-CPP 99/cpp.",
     )
     analyze_parser.add_argument(
         "-b",
@@ -148,7 +165,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     analyze_parser.add_argument("--max-cage-face", metavar="N", type=int, help="Maximum face count searched for Euler-compatible cages; default 20.")
     analyze_parser.add_argument("--cage-fast-closure", choices=("on", "off"), help="Enable or disable indexed 2-4 half-cage fast closure; default on.")
-    analyze_parser.add_argument("--cage-scientific-validation", choices=("on", "off"), help="Enable or disable strict face/manifold/volume cage validation and volume centroids; default off.")
+    analyze_parser.add_argument("--cage-scientific-validation", choices=("on", "off"), help="Enable or disable optional cage face-quality/volume validation; topology validation is always on; default off.")
     analyze_parser.add_argument("--find-cluster", choices=("on", "off"), help="Override the mode preset for hydrate-cluster search; the overall default mode 50 is off.")
     analyze_parser.add_argument("--cluster-min-cage", metavar="N", type=int, help="Minimum connected cage count required for a hydrate_cluster; default 2.")
     analyze_parser.add_argument("--recursive", action="store_true", help="Read input directory recursively.")
@@ -163,10 +180,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--output-type",
         metavar="TYPE[,TYPE...]",
         help=(
-            "Select outputs: info, membership-tsv, order-tsv, vmd, gro, "
-            "ring-gro, half-gro, quasi-gro, cage-gro, ice-gro, cluster-gro, "
+            "Select outputs: info, membership-tsv, order-tsv, vmd, "
+            "sqq-cage-gro, sqq-render, gro, ring-gro, half-gro, quasi-gro, "
+            "cage-gro, ice-gro, cluster-gro, "
             "summary-xlsx, summary-csv, summary-detail-csv, cluster-detail, all, or none. "
-            "SQQ-Py default: info,gro,summary-xlsx; SQQ-CPP default: info,cage-gro,summary-csv."
+            "Defaults come from the selected mode; sqq-render implies sqq-cage-gro."
         ),
     )
     analyze_parser.add_argument(

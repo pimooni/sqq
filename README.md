@@ -2,21 +2,21 @@
 
 **SQQ: Python Joint Toolkit for Water-Shell Topology Analysis.**
 
-Current release: **0.3.1**
+Current release: **0.3.2**
 
-SQQ builds a water network, reports coordination diagnostics, and finds rings, standard half-cages, quasi-cages, closed cages, topology-wide hydrate clusters, per-frame phase domains and boundaries, cage guest occupancy, F3/F4/Q_l order parameters, MCG/DHOP hydrate-nucleation order parameters, and ice-like waters. The default numeric modes use the complete Python backend. Version 0.3.1 also adds the focused C++17 backend selected by `-m cpp` for graph, internal ring, cage, occupancy, and F3/F4 analysis. Detailed algorithms are documented in `docs/design.md`; version notes are documented in `docs/update.md`.
+SQQ provides the complete SQQ-Py water-shell topology workflow plus the focused SQQ-CPP cage engine. Modes `00` and `50` use SQQ-Py; modes `99` and `cpp` use C++17 for graph, internal ring, cage, occupancy, and F3/F4 analysis. Algorithms are documented in `docs/design.md` and release notes in `docs/update.md`.
 
-## Changed in 0.3.1
+## Changed in 0.3.2
 
-- Added `sqq analyze -m cpp`, a C++17 native backend for water-graph construction, internal chordless 4/5/6-ring search, generic cage topology and cage isomers, automatic guest occupancy, and F3/F4.
-- Python continues to own the CLI, input/topology readers, configuration, scheduling, structure writers, Markdown, summary CSV, and optional XLSX generation. The native extension releases the GIL while one frame is analyzed.
-- Mode `cpp` defaults to `auto` graph selection, internal 4/5/6 rings, `f3,f4`, approximately 90% of physical cores with one reserved, and `info,cage-gro,summary-csv` output. It therefore avoids XLSX generation unless `summary-xlsx` is selected explicitly.
-- C++ reports are intentionally compact: no public ring, half/quasi, cluster, ice, Q_l/MCG/DHOP, VMD, TSV, or detail-CSV output is generated. Occupancy is marked not evaluated when no selected guests exist.
-- Output names are explicit in 0.3.1: `xlsx` is replaced by `summary-xlsx`, `summary-detail` by `summary-detail-csv`, and the new `summary-csv` writes one main-result CSV per applicable workbook sheet. The removed names have no compatibility aliases. SQQ-Py now defaults to `info,gro,summary-xlsx`, so detail CSV is opt-in.
-- Unsupported explicit C++ options fail before analysis, and an unavailable or failed native extension never falls back silently to SQQ-Py.
-- Release automation builds platform wheels for CPython 3.10-3.14 on Windows x86_64, Linux x86_64, macOS x86_64, and macOS arm64, plus a source distribution. This describes the release workflow; it does not claim that 0.3.1 has already been published to PyPI.
-- Numeric modes `00`, `09`, `50`, and `99` retain their complete SQQ-Py behavior and scientific output.
-- Package and native-core versions are `0.3.1`, released Jul 19, 2026.
+- The modes are now `00`, `50`, `99`, and `cpp`; `09` was removed. Mode `00` is SQQ-Py rigorous (`hbond`, 4/5/6, 100% workers, cluster on); `50` remains the default SQQ-Py mode (`auto`, 4/5/6, 50%, cluster off).
+- Modes `99` and `cpp` select SQQ-CPP. Mode `99` uses `hbond` and 100% workers; `cpp` uses `auto` and 50%. Both reserve one physical core and reject cluster search.
+- Default outputs are mode-specific: `00` uses `info,gro,sqq-cage-gro,sqq-render,summary-xlsx,cluster-gro`; `50` uses `info,sqq-cage-gro,sqq-render,summary-xlsx`; `99` uses `info,gro,sqq-cage-gro,sqq-render,summary-csv`; and `cpp` uses `info,sqq-cage-gro,sqq-render,summary-csv`. Mode `cpp` therefore does **not** write classified `cage-gro` by default.
+- `auto` now selects hydrogen-bond connectivity only when every selected water has usable hydrogen coordinates; partially mapped water topologies resolve to O-O connectivity consistently in both engines.
+- Added strict orthorhombic LAMMPS input through a DATA topology plus dump/lammpstrj or LAMMPS DCD. `real`, `metal`, and `nano` units are normalized to nm/ps, dump rows are restored to DATA atom-ID order, and both engines consume the same normalized frames.
+- Added the run-level `sqq-cage.gro` and `sqq-render.vmd.tcl`. The GRO concatenates complete frames, preserves source atom order, coordinates, box and optional velocities, and stores compact cage/phase/domain/cluster annotations after column 68. VMD defaults to cage rendering; use `sqq cage`, `sqq phase`, `sqq cluster`, or `sqq domain`.
+- Requested `auto` graph mode is shown after resolution as `auto -> hbond`, `auto -> oo`, or `auto -> mixed (hbond: N, oo: N)`.
+- Both engines now always require a connected, closed, trivalent manifold shell before accepting a cage. `--cage-scientific-validation` remains optional and now controls only the additional geometric checks.
+- Package and native-core versions are `0.3.2`, released Jul 20, 2026.
 
 ## Install
 
@@ -83,108 +83,80 @@ XTC/TRR trajectory with a topology file:
 sqq analyze -i traj.xtc --top topol.gro -c config.yaml -o ./result_sqq
 ```
 
+LAMMPS dump or DCD with a DATA topology and type mapping in YAML:
+
+```bash
+sqq analyze -i traj.lammpstrj --top system.data -c lammps.yaml -o ./result_sqq
+```
+
 ### Input Units and Boxes
 
 GRO and MDAnalysis trajectory coordinates are interpreted in nm. GRO accepts exactly one frame per file and rejects truncated atom blocks, missing or malformed box lines, extra non-empty records, and non-finite coordinates. Trajectory frames also require finite coordinates. XYZ coordinates are multiplied by `input.xyz_scale` / `--xyz-scale`; the default `0.1` assumes angstrom input, while `1.0` keeps nm values. SQQ accepts exactly one declared XYZ frame per file and rejects truncated, extra, malformed, or non-finite atom records. XYZ has no periodic box unless converted through another format.
 
-GRO atom counts and the mandatory box line are validated. A three-value positive box is orthorhombic; an all-zero box is treated as non-periodic. Nine-value GRO boxes with nonzero tilt terms and trajectory frames with non-90-degree angles are rejected because triclinic minimum-image calculations are not implemented. Molecules are formed from contiguous residue blocks in source order, preventing wrapped or repeated residue IDs from merging distinct molecules.
+GRO atom counts and the mandatory box line are validated. A three-value positive box is orthorhombic; an all-zero box is treated as non-periodic. Nine-value GRO boxes with nonzero tilt terms and trajectory frames with non-90-degree angles are rejected because triclinic minimum-image calculations are not implemented. GRO molecules are formed from contiguous residue blocks in source order, preventing wrapped or repeated residue IDs from merging distinct molecules. LAMMPS molecules instead use explicit DATA molecule IDs, so atom rows may be interleaved.
+
+LAMMPS trajectories require `--top system.data` and a non-empty `input.lammps.type_map` mapping every numeric atom type to `resname`/`atomname` or explicit `ignore`. Supported inputs are LAMMPS DATA with `full`, `molecular`, `bond`, or `angle` atom style, fully periodic `pp pp pp` orthorhombic dump boxes, and LAMMPS DCD. Tilted boxes, nonperiodic dump boundaries, `units lj`, missing molecule IDs, incomplete type maps, duplicate IDs, and topology/trajectory ID mismatches fail before analysis. `input.trajectory_stride` applies to XTC, TRR, LAMMPS dump, and LAMMPS DCD.
 
 ## Analysis Modes
 
-`-m` / `--mode` selects one of four complete SQQ-Py presets or the focused SQQ-CPP backend. The default remains numeric mode `50`:
+`-m` / `--mode` selects one of four presets; the default remains `50`:
 
-| Mode | Purpose | Water graph | Search sizes | Automatic workers | Find cluster |
-| --- | --- | --- | --- | --- | --- |
-| `00` | Rigorous | Hydrogen bond | 4, 5, 6 | 25% of physical cores | on |
-| `09` | Rigorous, high parallelism | Hydrogen bond | 4, 5, 6 | 90% of physical cores | on |
-| `50` | Standard (default) | Auto | 5, 6 | 50% of physical cores | off |
-| `99` | Performance screening | O-O connectivity | 5, 6 | 90% of physical cores | off |
-| `cpp` | Focused native cage analysis | Auto | 4, 5, 6 (internal) | 90% of physical cores | unsupported |
+| Mode | Engine | Water graph | Ring search | Automatic workers | Find cluster | Default output types |
+| --- | --- | --- | --- | --- | --- | --- |
+| `00` | SQQ-Py | `hbond` | 4/5/6 | 100% | on | `info,gro,sqq-cage-gro,sqq-render,summary-xlsx,cluster-gro` |
+| `50` | SQQ-Py | `auto` | 4/5/6 | 50% | off | `info,sqq-cage-gro,sqq-render,summary-xlsx` |
+| `99` | SQQ-CPP | `hbond` | internal 4/5/6 | 100% | unsupported | `info,gro,sqq-cage-gro,sqq-render,summary-csv` |
+| `cpp` | SQQ-CPP | `auto` | internal 4/5/6 | 50% | unsupported | `info,sqq-cage-gro,sqq-render,summary-csv` |
 
 ```bash
 sqq analyze -i ./gro -m 00 -o ./result_rigorous
-sqq analyze -i ./gro -m 09 -o ./result_rigorous_fast
 sqq analyze -i ./gro -m 50 -o ./result_standard
-sqq analyze -i ./gro -m 99 -o ./result_performance
-sqq analyze -i ./gro -m cpp -o ./result_cpp
+sqq analyze -i ./gro -m 99 -o ./result_cpp_hbond
+sqq analyze -i ./gro -m cpp -o ./result_cpp_auto
 ```
 
-Cluster-search precedence is independent of the other preset fields:
+For SQQ-Py, `--find-cluster` overrides YAML, which overrides the mode preset. Mode `00` includes `cluster-gro`; enabling search explicitly in mode `50` adds cluster data to selected info/main-summary outputs but does not add split `cluster-gro`. Modes `99` and `cpp` reject `--find-cluster on`.
 
-```text
---find-cluster > hydrate_cluster.enabled in config.yaml > mode preset
-```
-
-```bash
-sqq analyze -i ./gro -m 09 --find-cluster off -o ./result_no_cluster
-sqq analyze -i ./gro -m 50 --find-cluster on -o ./result_with_cluster
-```
-
-Numeric modes do not change `quasi_cage.max_layers`, `order.parameters`, or the initially selected output types; L1, `f3,f4`, and `info,gro,summary-xlsx` remain their defaults. Resolved cluster search always forces `cluster-gro`. It adds `summary-xlsx` only when neither `summary-csv` nor `summary-xlsx` is already selected, and never forces `info`. Thus a selected `summary-csv` remains CSV-only during cluster analysis. When `info` remains selected, every `*_info.md` report includes the compact `Hydrate Cluster` hierarchy; an output selection without `info` creates no Markdown report. Use `--quasi-max-layer` explicitly for L2/L3 and `--order-parameter` for another descriptor set. Automatic workers use the mode fraction of detected physical cores, reserve one physical core for the system, and are capped by the number of independent GRO/XYZ files or selected trajectory frames. Multiple standalone files use spawned processes by default; a single indexed XTC/TRR trajectory can also distribute frames across spawned workers. `--worker N` / `-w N` overrides the mode percentage; integer text such as `1` or `4` is a worker count, while decimal text such as `0.5` or `1.0` and percentages such as `50%` or `100%` are physical-core fractions. The old `--workers` spelling is retained as a compatibility alias.
-
-SQQ uses process-based parallelism for independent GRO/XYZ files and selected XTC/TRR frames, so CPU-bound ring, quasi-cage, and cage searches can run on multiple cores. The main process alone owns the terminal panel and final summary outputs; process workers report stage events through a process queue, analyze one file or a small trajectory-frame batch, write frame directories, and return summary rows. At most `3 * workers` process or compatibility-thread tasks are kept in flight; this bounds Future and serialization overhead without reducing the worker count. `parallel.math_threads: 1` prevents nested BLAS/OpenMP oversubscription.
+Automatic workers use the mode fraction of detected physical cores, reserve one physical core, and are capped by independent files or selected trajectory frames. `-w` / `--worker` overrides the preset: integer text is a worker count, while `0.5`, `1.0`, `50%`, and `100%` are physical-core fractions. Process parallelism supports independent GRO/XYZ files and indexed XTC/TRR/LAMMPS trajectories. At most `3 * workers` tasks are submitted at once.
 
 The default `chordless`/`bounded` path preserves the established scientific definitions while accelerating neighbor generation, incremental chord pruning, L1 forward checking, cached layer growth, integer-mask subset ownership, and cage target/edge state pruning. Cage DFS also applies exact remaining-edge incidence and parity conditions before expansion. MDAnalysis supplies orthorhombic cutoff candidates when available, but SQQ still rechecks every distance and hydrogen-bond angle with its established float64 logic. F3 and graph-mode Q_l share one graph-vector cache; all Q_l degrees share candidate lists and spherical-angle work. Optional `ring.definition: shortest_path` applies the Franzblau shortest-path criterion and reuses bounded-BFS distance maps. Optional `quasi_cage.search_policy: exact` preserves distinct frontiers and enumerates connected L2/L3 subsets; these opt-in modes can change or add results. Candidate and state truncation is reported through frame warnings.
 
-Optional scientific cage validation adds PBC-aware face planarity and edge-variation limits, manifold vertex-link checks, positive-volume validation, and volume-centroid cage centers. It remains disabled by default. SQQ uses an orthorhombic box representation and now rejects non-orthogonal/triclinic input explicitly.
+Every cage now passes the same mandatory topology validation in SQQ-Py and SQQ-CPP: each edge belongs to exactly two faces, `V - E + F = 2`, the face shell is connected, every vertex link is one cycle, and every shell vertex is trivalent. Optional scientific cage validation adds PBC-aware face-planarity and edge-variation limits, nonzero projected area, positive-volume validation, and volume-centroid cage centers. It remains disabled by default, but disabling it no longer bypasses topology validation. SQQ uses an orthorhombic box representation and rejects non-orthogonal/triclinic input explicitly.
 
 The current release uses the same compact three-row stage model for serial and parallel progress: file preparation (`reading`, `settings`, `selecting`), core topology search (`graph`, `ring`, `half/quasi`, `cage`, and optional `cluster`), and post-processing (`filtering`, `order`, `ice`, `output`). In interactive single-file runs, the active stage is highlighted with bold bright-blue ANSI text. The `cluster` stage appears only when hydrate-cluster analysis is enabled. Parallel runs also show aggregate stage counts and up to six active files with per-stage and per-file timings.
 
 ### Native SQQ-CPP Backend
 
-`-m cpp` selects a separate native engine, not a fifth SQQ-Py scientific preset. Python still parses inputs and pair maps, selects molecules, normalizes configuration, schedules independent files/frames, and writes every report. The C++17 extension receives one normalized frame, performs the supported calculations while the GIL is released, and returns graph, internal ring, cage, occupancy, and F3/F4 records through the Python adapter.
+Modes `99` and `cpp` select the focused native engine. Python owns input normalization, molecule selection, scheduling, annotated GRO/VMD output, Markdown, summary CSV, and optional XLSX; C++17 performs graph construction, internal chordless 4/5/6 rings, cage topology/isomers, occupancy, and F3/F4 while releasing the GIL.
 
-| Setting | SQQ-CPP default |
-| --- | --- |
-| Graph | `auto` (`hbond` when usable water hydrogens exist, otherwise `oo`) |
-| Rings | Internal chordless 4/5/6 search; no public ring output |
-| Order parameters | `f3,f4` |
-| Workers | Approximately 90% of detected physical cores, with one core reserved |
-| Output | `info,cage-gro,summary-csv` |
-| Occupancy | Automatic when selected guests exist; otherwise not evaluated |
-| Periodicity | Orthorhombic or non-periodic only |
+| Mode | Graph | Workers | Default output |
+| --- | --- | --- | --- |
+| `99` | `hbond` | 100%, one physical core reserved | `info,gro,sqq-cage-gro,sqq-render,summary-csv` |
+| `cpp` | `auto` | 50%, one physical core reserved | `info,sqq-cage-gro,sqq-render,summary-csv` |
 
-The native scope is deliberately small: generic Euler-compatible 4/5/6-face cage topology, the same cage labels/report groups, hexagonal-face cage isomers, polyhedron occupancy, and F3/F4. Ring detection is an internal cage prerequisite and is not exposed as a result.
+Both accept orthorhombic GROMACS/LAMMPS inputs, compatible graph/pair settings, `-s` within 4/5/6, cage report/validation settings, `f3`/`f4`, process or serial scheduling, and `info`, `gro`, `cage-gro`, `sqq-cage-gro`, `sqq-render`, `summary-csv`, or `summary-xlsx`. `sqq-render` implies `sqq-cage-gro`. `gro` enables the supported classified cage GRO output, but `cpp` does not select it by default.
 
-Mode `cpp` accepts the compatible CLI subset:
+Unsupported requests fail before analysis: public ring output, size 7, shortest-path rings, half/quasi cages, cluster, ice, Q_l/MCG/DHOP, membership/order TSV, legacy per-frame `vmd`, detail CSV, Python fast closure, thread scheduling, and triclinic boxes. A failed native extension never falls back to Python.
 
-- Input and run control: `-i`, `--top`, `-o`, `-c`, directory/glob controls, trajectory/input controls, `--strict`, and `--output-layout`.
-- Graph: `-b auto|hbond|oo|pairs`, `--pairs`, and `--pair-id`.
-- Topology: `-s` with a nonempty subset of `4,5,6`, `--cage-size`, `--max-cage-face`, and `--cage-scientific-validation`.
-- Order: `--order-parameter f3`, `f4`, `f3,f4`, `all` (the supported pair), or `none`.
-- Execution: `-w` / `--worker` and `--parallel-backend process|serial`.
-- Output: `--output-type info|gro|cage-gro|summary-csv|summary-xlsx|all|none`, comma-separated where applicable; `--output-layout grouped|flat`; and `--cage-isomer-rows nonzero|all`. In this mode `gro` expands only to `cage-gro`, and `all` expands to `info,cage-gro,summary-csv,summary-xlsx`.
-
-Unsupported in mode `cpp`:
-
-- public ring tables/files, `--ring-size`, `ring-gro`, ring size 7, and `shortest_path` rings;
-- half-cages, quasi-cages, and their settings or files;
-- hydrate-cluster search/detail/GRO output;
-- ice, Q_l, MCG, and DHOP analysis;
-- VMD, membership/order TSV, `summary-detail-csv`, `cluster-detail`, and other detailed exports;
-- the Python fast-closure option, thread backend, and triclinic boxes.
-
-An explicit incompatible CLI or nondefault configuration request fails before analysis. A missing or failing native extension raises an error and never falls back to SQQ-Py.
-
-The default compact layout is:
+The mode-`cpp` default layout is:
 
 ```text
 result/
+  sqq-cage.gro
+  sqq-render.vmd.tcl
   summary_csv/
     summary.csv
     cage.csv
-    cage_occupancy.csv        # only when selected guests exist
+    cage_occupancy.csv
     cage_isomer.csv
-    order_parameter.csv       # only when F3/F4 is selected
+    order_parameter.csv
     config.csv
-    failures.csv              # only when frames fail
   run_config.yaml
   frame_name/
     frame_name_info.md
-    cage/<type>/frame_name_cage_<type>.gro
 ```
 
-The default `summary_csv/` directory contains one UTF-8-SIG CSV for each applicable compact summary table. These files preserve the same columns and row order as the corresponding optional `summary.xlsx` sheets but are independent files rather than workbook tabs. Explicit `summary-xlsx` writes the dashboard, `cage`, `cage_isomer`, selected F3/F4 `order_parameter`, and `config` sheets; `failures` appears only when needed and `cage_occupancy` appears only when selected guests exist. The per-frame info report keeps frame/mode settings, molecules and connection diagnostics, cage topology/isomers, occupancy status, selected F3/F4, and warnings. It omits Ring, Half Cage, Quasi Cage, Hydrate Cluster, Hydrate Nucleation, and Ice sections. With no selected guests, occupancy is explicitly reported as not evaluated rather than empty. Native cage GRO files contain cage waters and assigned guests but do not add the synthetic `CNT` cage-center pseudoatom used by the full Python output.
+Mode `99` additionally selects `gro`; mode `cpp` writes classified cage GRO only when `gro` or `cage-gro` is selected explicitly.
 
 Release CI is configured to build and test precompiled wheels for CPython 3.10-3.14 on Windows x86_64, Linux x86_64, macOS x86_64, and macOS arm64, plus a source distribution. A wheel already contains the platform-native extension; end users installing such a wheel do not compile C++. A source install instead invokes the CMake/scikit-build-core build and therefore needs CMake 3.20 or newer and a local C++17 toolchain.
 
@@ -253,7 +225,7 @@ sqq analyze -i md.gro --output-type info,cage-gro,summary-xlsx -o ./result_sqq_r
 sqq analyze -i md.gro --output-type none -o ./result_sqq_config_only
 ```
 
-For SQQ-Py, `--output-type` defaults to `info,gro,summary-xlsx`. SQQ-CPP defaults to `info,cage-gro,summary-csv`. The mandatory `run_config.yaml` remains with every selection, including `none`.
+Default outputs come from the selected mode. Mode `50` uses `info,sqq-cage-gro,sqq-render,summary-xlsx`, while mode `cpp` uses `info,sqq-cage-gro,sqq-render,summary-csv` and does not include `cage-gro`. `run_config.yaml` remains mandatory.
 
 Parallelize independent GRO/XYZ files with spawned processes (the default backend):
 
@@ -276,8 +248,14 @@ mode: "50"
 
 input:
   pattern: "*.gro"
-  xtc_stride: 1
+  trajectory_stride: 1
   xyz_scale: 0.1
+  lammps:
+    units: real
+    timestep: 1.0
+    atom_style: full
+    coordinate_convention: auto
+    type_map: {}
 
 graph:
   bond_mode: auto
@@ -286,7 +264,7 @@ graph:
   hbond_angle_deg: 30.0
 
 ring:
-  sizes: [5, 6]
+  sizes: [4, 5, 6]
   report_sizes: auto
   chordless: true
   definition: chordless
@@ -333,7 +311,7 @@ order:
   q_n_neighbor: null
 
 output:
-  types: [info, gro, summary-xlsx]
+  types: [info, sqq-cage-gro, sqq-render, summary-xlsx]
   summary_csv_dir: summary_csv
   summary_detail_dir: summary_detail
   cage_isomer_rows: nonzero
@@ -358,7 +336,7 @@ built-in defaults < mode preset < config.yaml < explicit command-line options
 
 Automatic workers use the mode fraction of detected physical cores, then reserve one physical core for the operating system and cap the result by the number of files or selected trajectory frames. Physical-core detection prefers optional `psutil`, then platform probes such as Windows CIM, macOS `sysctl`, or Linux `/proc/cpuinfo`; if physical cores cannot be detected, SQQ falls back to the CPU count visible to the process. `--worker` / `-w` accepts either a fraction (`50%`, `0.5`, or `1.0` for 100%) or an explicit positive integer worker count (`1` means one worker). Windows `ProcessPoolExecutor` runs are capped at 61 workers; Linux workstations can use larger explicit values such as `-w 100`, subject to the reserve-one-core rule, task count, memory, and storage throughput.
 
-One XTC/TRR file with `--top` is frame-parallel when the process backend resolves to more than one worker. Every worker opens a private MDAnalysis Universe once and seeks small contiguous batches of selected raw frame indexes; batch size is automatically bounded from 1 to 8, and complete coordinate arrays are not serialized between processes. Parent and worker trajectory readers are explicitly closed. Multiple trajectory files and the compatibility thread backend use the serial trajectory reader.
+One XTC/TRR or supported LAMMPS trajectory with `--top` is frame-parallel when the process backend resolves to more than one worker. Every worker opens a private MDAnalysis Universe once and seeks small contiguous batches of selected raw frame indexes; batch size is automatically bounded from 1 to 8, and complete coordinate arrays are not serialized between processes. Parent and worker trajectory readers are explicitly closed. Multiple trajectory files and the compatibility thread backend use the serial trajectory reader.
 
 Process submission uses a bounded rolling queue of at most `3 * workers` tasks. This is a queue-depth limit, not a CPU limit: with 100 effective workers SQQ may keep up to 300 tasks submitted while still running as many as 100 workers concurrently. Results are restored to original file/frame order before main-summary writing.
 
@@ -406,7 +384,9 @@ One frame-local ring topology index stores `ring_by_id`, ring centers, `edge_to_
 
 `cage.fast_closure: true` is the default. Only when generic grow reaches a configured state limit, SQQ uses an indexed half-cage overlap graph to assemble connected combinations of two to four standard half-cage patches. Every candidate must still match one generated face composition and pass the ordinary closed-polyhedron test. Existing grow detections are retained first, so exhaustive grow output and object ids remain unchanged; fast closure only adds a cage when the bounded grow path missed it. `--cage-fast-closure off` disables this supplement for exact comparison.
 
-`cage.scientific_validation: false` is the default. When enabled with `--cage-scientific-validation on`, every accepted cage must additionally satisfy the configured PBC-aware face-planarity RMS and edge-length coefficient-of-variation limits, an edge-connected face shell, a single cyclic face link around every vertex, and a positive minimum triangulated volume. Accepted cages then use the volume centroid instead of the mean cage-water position. Enabling it can therefore remove distorted cages and can change guest occupancy or geometry-resolved hydrate-cluster edges. Raw ring and half/quasi searches, order parameters, and ice classification are unchanged; ownership-filtered free-ring and free-patch outputs can increase when a rejected cage no longer consumes them.
+Topology validation is always enabled. Every candidate must use each edge exactly twice, satisfy `V - E + F = 2`, form one edge-connected face shell, have one cyclic face link around every vertex, and have only trivalent shell vertices. These inexpensive checks reject disconnected, pinched, branched, and non-manifold false cages before type/isomer assignment in both engines.
+
+`cage.scientific_validation: false` is the default. When enabled with `--cage-scientific-validation on`, a topologically valid cage must additionally satisfy the configured PBC-aware face-planarity RMS and edge-length coefficient-of-variation limits, nonzero projected face area, and positive minimum triangulated volume. Accepted cages then use the volume centroid instead of the mean cage-water position. Enabling it can therefore remove geometrically distorted cages and can change guest occupancy or geometry-resolved hydrate-cluster edges. The mandatory topology checks can reduce cage, isomer, occupancy, and cluster results relative to earlier 0.3.2 builds that accepted non-manifold shells. Raw ring and half/quasi searches remain unchanged; ownership-filtered free-ring and free-patch outputs can increase when a rejected cage no longer consumes them.
 
 Guest occupancy uses the configured center atom when available. Otherwise, guest atoms are PBC-unwrapped around one molecular anchor before calculating the centroid; the same helper is used by MCG. This correction can intentionally change occupancy counts relative to 0.2.6 or early 0.2.7 results for multi-atom guests crossing a periodic boundary.
 
@@ -424,9 +404,9 @@ After the exclusive sI/sII/sH domains are finalized, SQQ partitions the remainin
 
 The resulting `classified_cage_ids`, `boundary_cage_ids`, `ambiguous_cage_ids`, and `unclassified_cage_ids` are mutually exclusive and together cover every cage in a reported cluster. Competing phase claims without boundary membership remain ambiguous; all other residual cages are unclassified. There are no `sI-boundary`, `sII-boundary`, `sH-boundary`, transition, or boundary-context categories. Neighboring cages can still share face-water coordinates in structure views, so cage ownership should be verified from cage IDs or detected cage/ring edges rather than coordinate-set overlap.
 
-The default command uses mode `50`, so cluster search is off unless it is enabled by mode `00`/`09`, `hydrate_cluster.enabled` in the configuration, or an explicit `--find-cluster on`. Explicit `--find-cluster on|off` has highest priority. Cluster search does not alter ring, patch, cage, occupancy, order-parameter, or ice results. Classification is per-frame and independent of the cage reporting filter; temporal grain tracking and crystallographic orientation matching are not implemented.
+The default command uses mode `50`, so cluster search is off unless enabled by mode `00`, `hydrate_cluster.enabled`, or explicit `--find-cluster on`. Modes `99` and `cpp` do not support cluster search. Explicit `--find-cluster on|off` has highest priority. Cluster search does not alter ring, patch, cage, occupancy, order-parameter, or ice results. Classification is per-frame and independent of the cage reporting filter; temporal grain tracking and crystallographic orientation matching are not implemented.
 
-Enabling cluster search always forces `cluster-gro`. If neither `summary-csv` nor `summary-xlsx` is selected, it also adds `summary-xlsx`; an existing `summary-csv` selection stays CSV-only. The selected main summary output gains its per-frame `hydrate_cluster` table, while native category structures are written under grouped layout as `<frame>/hydrate_cluster/<frame>_cluster_sI.gro`, `<frame>_cluster_sII.gro`, `<frame>_cluster_sH.gro`, and `<frame>_cluster_boundary.gro`. Flat layout places the same filenames directly in the frame directory. All same-category domains and clusters are aggregated into one file per frame. An absent category is omitted unless `output.write_empty_files: true`.
+Cluster search populates every selected `info` and main-summary output. Split category structures are written only when `cluster-gro` is selected; mode `00` selects it by default, while `50 --find-cluster on` does not. The selected main summary output gains its per-frame `hydrate_cluster` table, while native category structures are written under grouped layout as `<frame>/hydrate_cluster/<frame>_cluster_sI.gro`, `<frame>_cluster_sII.gro`, `<frame>_cluster_sH.gro`, and `<frame>_cluster_boundary.gro`. Flat layout places the same filenames directly in the frame directory. All same-category domains and clusters are aggregated into one file per frame. An absent category is omitted unless `output.write_empty_files: true`.
 
 Cluster GRO files contain only complete water molecules belonging to the selected cage IDs; guests and CNT atoms are excluded. Ambiguous, unclassified, and isolated cages are not exported. Every atom keeps the exact wrapped coordinate from the analyzed frame, and every file keeps the original box; categories are never moved or unwrapped independently. Periodic or percolating networks may therefore still show bonds crossing a box face because no single-copy GRO representation can remove every periodic seam.
 
@@ -471,22 +451,26 @@ References: Barnes et al., MCG ([DOI 10.1063/1.4871898](https://doi.org/10.1063/
 
 | Option | Possible values | Meaning |
 | --- | --- | --- |
-| `-i, --input INPUT` | `.gro`, `.xyz`, `.xtc`, or `.trr` file; directory; or glob | Input coordinate file or trajectory source |
+| `-i, --input INPUT` | `.gro`, `.xyz`, `.xtc`, `.trr`, `.dump`, `.lammpstrj`, or LAMMPS `.dcd`; directory; or glob | Input source |
 | `-c, --config FILE` | YAML or JSON file | User configuration file |
 | `-o, --output DIR` | Directory path; default `result_sqq` | Output directory |
-| `-m, --mode MODE` | `00`, `09`, `50`, `99`, `cpp`; default `50` | Select a complete Python preset or the focused C++17 backend |
+| `-m, --mode MODE` | `00`, `50`, `99`, `cpp`; default `50` | Select SQQ-Py (`00`, `50`) or SQQ-CPP (`99`, `cpp`) |
 | `-b, --bond-mode MODE` | `auto`, `hbond`, `oo`, `pairs` | Override the water-graph connection mode |
 | `-s, --size SIZES` | Comma-separated subset of `4,5,6,7` | Set ring and quasi-cage search sizes; cage search uses the selected `4,5,6` sizes |
 | `--ring-size SIZES` | `auto` or a comma-separated subset of `--size` | Report only these searched ring sizes |
 | `--cage-size GROUPS` | `auto`, `all`, `I`, `II`, `H`, `HS-I`, `TS-I`, `I2II`; groups may be comma-separated | Restrict cage reporting; default `auto` follows `--size` |
 | `--max-cage-face N` | Positive integer; default `20` | Limit generated cage search compositions |
 | `--cage-fast-closure VALUE` | `on`, `off`; default `on` | Enable indexed two-to-four half-cage closure after generic grow |
-| `--cage-scientific-validation VALUE` | `on`, `off`; default `off` | Enable strict face/manifold/volume validation and volume centroids |
-| `--find-cluster VALUE` | `on`, `off`; default follows mode/config | Override all-detected-cage cluster search; `on` forces native cluster GRO and ensures at least one main summary format |
+| `--cage-scientific-validation VALUE` | `on`, `off`; default `off` | Enable additional geometric face/volume validation and volume centroids; basic topology validation is always on |
+| `--find-cluster VALUE` | `on`, `off` | Override SQQ-Py cluster search; split GRO still requires `cluster-gro` |
 | `--cluster-min-cage N` | Positive integer; default `2` | Minimum connected cage count required for one hydrate_cluster |
 | `--pattern PATTERN` | Glob; default `*.gro` | Select files when `--input` is a directory |
-| `--top, --topology FILE.gro` | GRO topology file | Supply topology/structure data for XTC/TRR input |
+| `--top, --topology FILE` | GRO for XTC/TRR; LAMMPS DATA for dump/DCD | Supply trajectory topology |
 | `--xyz-scale SCALE` | Positive float; default `0.1` | Multiply XYZ coordinates by this value to obtain nm; use `1.0` for XYZ already in nm |
+| `--trajectory-stride N` | Positive integer; default `1` | Read every Nth trajectory frame |
+| `--lammps-units STYLE` | `real`, `metal`, `nano` | Select LAMMPS units |
+| `--lammps-timestep DT` | Positive number | Convert LAMMPS steps to ps |
+| `--lammps-atom-style STYLE` | `full`, `molecular`, `bond`, `angle` | Interpret LAMMPS DATA |
 | `--recursive` | Flag; default off | Search input directories recursively |
 | `--quasi-size SIZES` | `auto` or a comma-separated subset of searched `4,5,6,7` | Override quasi-cage base and side size lists together |
 | `--quasi-base-size SIZES` | `auto` or a comma-separated subset of searched `4,5,6,7` | Override quasi-cage base-ring size list |
@@ -504,7 +488,7 @@ References: Barnes et al., MCG ([DOI 10.1063/1.4871898](https://doi.org/10.1063/
 | `--worker, -w N` | `auto`, a fraction (`50%`, `0.5`, `1.0`), or a positive integer (`1`, `4`) | Override the mode-based worker count; one physical core is reserved. Integer `1` means one worker, while `1.0` / `100%` means all physical cores before clamping. `--workers` remains a hidden compatibility alias |
 | `--strict` | Flag; default off | Stop on the first failed frame |
 | `--output-layout LAYOUT` | `grouped`, `flat`; default `grouped` | Select the per-frame structure-file layout |
-| `--output-type TYPES` | Comma-separated `info`, `membership-tsv`, `order-tsv`, `vmd`, `gro`, `ring-gro`, `half-gro`, `quasi-gro`, `cage-gro`, `ice-gro`, `cluster-gro`, `summary-xlsx`, `summary-csv`, `summary-detail-csv`, `cluster-detail`, `all`, or `none` | Select the complete output set; SQQ-Py defaults to `info,gro,summary-xlsx`, while SQQ-CPP defaults to `info,cage-gro,summary-csv` |
+| `--output-type TYPES` | Established outputs plus `sqq-cage-gro` and `sqq-render`; comma-separated, or `all`/`none` | Replace the complete mode-specific output set |
 | `--cage-isomer-rows MODE` | `nonzero`, `all`; default `nonzero` | SQQ-Py: control `summary_detail/cage_isomer.csv` when `summary-detail-csv` is selected; SQQ-CPP: control `summary_csv/cage_isomer.csv` and the optional `summary-xlsx` sheet |
 
 ### Bond Mode
@@ -522,18 +506,16 @@ Available values are `auto`, `hbond`, `oo`, and `pairs`. `--pairs PAIRS.txt` use
 
 ### Output Selection
 
-`--output-type TYPE[,TYPE...]` replaces the complete configured output list. Its SQQ-Py default is `info,gro,summary-xlsx`, equivalent to:
+`--output-type TYPE[,TYPE...]` replaces the configured list. Mode `50` defaults to:
 
 ```yaml
 output:
-  types: [info, gro, summary-xlsx]
-  summary_csv_dir: summary_csv
-  summary_detail_dir: summary_detail
+  types: [info, sqq-cage-gro, sqq-render, summary-xlsx]
 ```
 
-The SQQ-Py canonical names are `info`, `membership-tsv`, `order-tsv`, `vmd`, `gro`, `ring-gro`, `half-gro`, `quasi-gro`, `cage-gro`, `ice-gro`, `cluster-gro`, `summary-xlsx`, `summary-csv`, `summary-detail-csv`, and `cluster-detail`. `gro` expands to the five ordinary ring/half/quasi/cage/ice GRO categories; `cluster-gro` is a separate search-dependent type. SQQ-CPP accepts only `info`, `gro`, `cage-gro`, `summary-csv`, `summary-xlsx`, `all`, and `none`; its `gro` means `cage-gro`, and `all` expands to `info,cage-gro,summary-csv,summary-xlsx`. SQQ-CPP does not support `summary-detail-csv`. `all` and `none` must appear alone. `run_config.yaml` is mandatory and is always rewritten, including with `--output-type none`.
+SQQ-Py accepts the established info/TSV/per-frame GRO/summary/detail types plus `sqq-cage-gro` and `sqq-render`. `gro` expands to ordinary ring/half/quasi/cage/ice GRO categories; `sqq-cage-gro` is a separate run-level annotated trajectory. `sqq-render` implies `sqq-cage-gro`.
 
-`summary-xlsx` writes `summary.xlsx`. `summary-csv` writes each applicable main-summary table as a separate UTF-8-SIG file under `output.summary_csv_dir` (default `summary_csv/`); these are the CSV equivalents of workbook sheets, not detail records. `summary-detail-csv` selects the ordinary multi-row CSV tables under `output.summary_detail_dir` (default `summary_detail/`). Both directory settings must be different relative paths that resolve inside the selected output directory. `cluster-detail` separately selects `hydrate_domain.csv` and `hydrate_cluster_detail.csv`; explicit `cluster-detail` and `cluster-gro` selections require cluster search. Enabling cluster search always forces `cluster-gro` and ensures a main summary: if neither `summary-csv` nor `summary-xlsx` is selected, it adds `summary-xlsx`; if `summary-csv` is already selected, no workbook is added. Disabling search writes no cluster GRO files and cleans stale SQQ-generated `hydrate_cluster` directories or flat cluster filenames.
+SQQ-CPP accepts `info`, `gro`, `cage-gro`, `sqq-cage-gro`, `sqq-render`, `summary-csv`, and `summary-xlsx`, plus `all`/`none`. Mode `cpp` does not select `gro` or `cage-gro` by default; mode `99` selects `gro`. Cluster search fills selected info/main-summary outputs but does not add unselected output types; explicit `cluster-gro` or `cluster-detail` requires search. `run_config.yaml` is always written.
 
 Explicit CLI selection has precedence:
 
@@ -547,47 +529,27 @@ When an existing output directory is reused, SQQ removes known stale files for o
 
 ## Output Structure
 
-With the SQQ-Py default `--output-type info,gro,summary-xlsx`, SQQ writes one folder per frame and a global workbook. Detail CSV files are no longer part of the default:
+The mode-`50` default is compact:
 
 ```text
 result_sqq/
+  sqq-cage.gro
+  sqq-render.vmd.tcl
   summary.xlsx
   run_config.yaml
   test1/
     test1_info.md
-    ring/
-      test1_ring_5.gro
-      test1_ring_6.gro
-    half_cage/
-      hc_5r_5^5/
-        test1_hc_5r_5^5.gro
-    quasi_cage/
-      qc_5r_5^3-6^2_55566/
-        test1_qc_5r_5^3-6^2_55566.gro
-    cage/
-      5^12/
-        test1_cage_5^12.gro
-        test1_cage_5^12_empty.gro
-        test1_cage_5^12_occupied.gro
-    ice/
-      test1_ice.gro
-    hydrate_cluster/                     # forced when cluster search is on
-      test1_cluster_sI.gro               # omitted when the category is absent
-      test1_cluster_sII.gro
-      test1_cluster_sH.gro
-      test1_cluster_boundary.gro
-    test1_order_parameter.tsv   # only with output type order-tsv
 ```
 
-Selecting `summary-csv` adds `<summary_csv_dir>/<sheet>.csv` for every applicable main-result table. Selecting `summary-detail-csv` separately adds ordinary multi-row files under `<summary_detail_dir>/`, including `failures.csv`, `cage_occupancy.csv`, `cage_isomer.csv`, and `quasi_cage_isomer.csv`; `cluster-detail` adds `hydrate_domain.csv` and `hydrate_cluster_detail.csv` there when cluster search is on.
+`sqq-cage.gro` concatenates one complete block per successful frame; atom identity/order must match. Coordinates and boxes remain wrapped exactly as analyzed. Annotations begin at column 69 as `; SQQ1 m=...` and nonmembers use `m=-`. The VMD script temporarily splits the file for loading and deletes the temporary files. Source it, then use `sqq cage`, `sqq phase`, `sqq cluster`, `sqq domain`, or `sqq help`; cage is the default.
 
-Only selected or required outputs are written. With cluster search off, `--output-type none` leaves only `run_config.yaml` and does not create empty per-frame directories. With cluster search on, the same selector forces `summary-xlsx` and grouped or flat cluster GRO files because no main summary was selected; `--output-type summary-csv` instead remains CSV-only and adds cluster GRO. Cluster search does not force `info`, so no `*_info.md` report is created unless `info` is selected. Grouped layout uses `<frame>/hydrate_cluster/`; flat layout places the four canonical filenames at the frame root. Missing categories are omitted unless `output.write_empty_files` is true.
+Ordinary per-frame GRO files are opt-in through `gro` or individual types. `cluster-gro` is separately opt-in and requires cluster search; only mode `00` includes it by default. With `--output-type none`, only `run_config.yaml` remains.
 
 Without `--strict`, standalone serial/process/thread read failures become failed summary rows and analysis continues where the reader remains usable. Failed inputs appear in `summary.xlsx/failures`, `<summary_csv_dir>/failures.csv`, and `<summary_detail_dir>/failures.csv` when their respective output types are enabled, and always in the mandatory `run_config.yaml` `run.failures` list. With `--strict`, SQQ re-raises the error after updating `run_config.yaml` to `status: failed`.
 
 GRO structure folders, filenames, and title lines use portable ASCII structure labels since version 0.2.4, for example `5^126^2` and `qc_5r_5^36^2_56566`. Markdown and main-summary scientific labels retain their readable superscript notation. This avoids Windows GBK/legacy-reader failures caused by Unicode superscript or subscript characters in generated GRO paths and titles.
 
-Each per-frame `*_info.md` report is arranged for inspection. `Frame Information` begins with `sqq version`, `mode`, `date & time`, absolute `source`, `frame`, and `time_ps`. Numeric modes display as, for example, `09 (sqq-py)`; native mode displays as `sqq-cpp`. Requested/effective `graph_mode`, effective `bond_mode`, ring sizes, status, and molecule counts follow; `find_cluster` is present only for SQQ-Py. Python reports retain the total/free Ring table, grouped half/quasi and cage-isomer sections, optional compact Hydrate Cluster hierarchy, and the other enabled analyses. SQQ-CPP omits inapplicable sections and keeps connection diagnostics, cage topology/isomers, occupancy status, selected F3/F4, and warnings.
+Each `*_info.md` report starts with SQQ version, mode/engine, date/time, source, input format, topology when applicable, trajectory stride, frame/time, requested-to-effective graph mode, effective bond mode, ring sizes, status, and molecule counts. Modes display as `00 (sqq-py)`, `50 (sqq-py)`, `99 (sqq-cpp)`, or `sqq-cpp`. LAMMPS reports also record units, timestep, atom style, and type-map source.
 
 When quasi-cage or cage isomers are present, the same report adds description tables:
 

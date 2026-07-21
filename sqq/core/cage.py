@@ -67,7 +67,7 @@ def find_cages(
     topology_index: RingTopologyIndex | None = None,
     warnings: list[str] | None = None,
 ) -> list[Cage]:
-    """Find every Euler-compatible closed cage in the configured face-size scope."""
+    """Find every valid closed cage in the configured face-size scope."""
     if not enabled:
         return []
 
@@ -1006,16 +1006,24 @@ def no_edge_overuse(face_ids: frozenset[str], ring_by_id: dict[str, Ring]) -> bo
 
 
 def is_closed_polyhedron(rings: list[Ring]) -> bool:
-    """Validate a closed shell with edge counts and Euler characteristic."""
+    """Require a connected, trivalent, manifold spherical shell."""
     edge_counts: dict[tuple[int, int], int] = defaultdict(int)
-    nodes = set()
+    nodes: set[int] = set()
+    neighbors: dict[int, set[int]] = defaultdict(set)
     for ring in rings:
         nodes.update(ring.nodes)
         for edge in ring.edges:
             edge_counts[edge] += 1
+            left, right = edge
+            neighbors[left].add(right)
+            neighbors[right].add(left)
     if not edge_counts or any(count != 2 for count in edge_counts.values()):
         return False
-    return len(nodes) - len(edge_counts) + len(rings) == 2
+    if len(nodes) - len(edge_counts) + len(rings) != 2:
+        return False
+    if any(len(neighbors[node]) != 3 for node in nodes):
+        return False
+    return face_adjacency_connected(rings) and vertex_links_are_manifold(rings)
 
 
 
@@ -1028,9 +1036,7 @@ def scientific_polyhedron_geometry(
     max_face_edge_cv: float,
     min_cage_volume_nm3: float,
 ) -> tuple[np.ndarray, float] | None:
-    """Apply opt-in manifold/face checks and return the volume centroid."""
-    if not face_adjacency_connected(rings) or not vertex_links_are_manifold(rings):
-        return None
+    """Apply opt-in face-quality and volume checks."""
     for ring in rings:
         quality = face_quality.get(ring.object_id)
         if quality is None:

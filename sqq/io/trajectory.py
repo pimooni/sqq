@@ -3,15 +3,22 @@ from __future__ import annotations
 """Trajectory and coordinate readers."""
 
 import re
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from pathlib import Path
 
 import numpy as np
 
 from ..models import Atom, Frame
+from .lammps import (
+    LAMMPS_TRAJECTORY_SUFFIXES,
+    lammps_trajectory_frame_indices,
+    read_lammps,
+)
 
 
-SUPPORTED_SUFFIXES = {".gro", ".xyz", ".xtc", ".trr"}
+SUPPORTED_SUFFIXES = {".gro", ".xyz", ".xtc", ".trr"} | set(
+    LAMMPS_TRAJECTORY_SUFFIXES
+)
 BOX_TOLERANCE = 1.0e-8
 
 
@@ -48,8 +55,15 @@ def natural_key(path: Path) -> list[object]:
     return [int(part) if part.isdigit() else part.lower() for part in re.split(r"(\d+)", path.name)]
 
 
-def read_frames(paths: list[Path], topology: Path | None = None, xyz_scale: float = 0.1, xtc_stride: int = 1) -> Iterable[Frame]:
+def read_frames(
+    paths: list[Path],
+    topology: Path | None = None,
+    xyz_scale: float = 0.1,
+    trajectory_stride: int = 1,
+    lammps_config: Mapping[str, object] | None = None,
+) -> Iterable[Frame]:
     """Yield frames from supported coordinate and trajectory formats."""
+    stride = validated_stride(trajectory_stride)
     for path in paths:
         suffix = path.suffix.lower()
         if suffix == ".gro":
@@ -57,7 +71,11 @@ def read_frames(paths: list[Path], topology: Path | None = None, xyz_scale: floa
         elif suffix == ".xyz":
             yield read_xyz(path, scale=xyz_scale)
         elif suffix in {".xtc", ".trr"}:
-            yield from read_mdanalysis(path, topology, stride=xtc_stride)
+            yield from read_mdanalysis(path, topology, stride=stride)
+        elif suffix in LAMMPS_TRAJECTORY_SUFFIXES:
+            values = dict(lammps_config or {})
+            values["stride"] = stride
+            yield from read_lammps(path, topology, values)
         else:
             raise ValueError(f"Unsupported input format: {path}")
 
@@ -122,14 +140,17 @@ def parse_gro_box(line: str, path: Path | None = None) -> np.ndarray | None:
 
 
 def _parse_gro_atom(index: int, line: str) -> Atom:
+    record = line.split(";", 1)[0].rstrip()
+    fixed_width = True
     try:
         # Accept standard fixed-width GRO records.
-        resid = int(line[0:5])
-        resname = line[5:10].strip()
-        atomname = line[10:15].strip()
-        atomid = int(line[15:20])
-        xyz = np.asarray([float(line[20:28]), float(line[28:36]), float(line[36:44])], dtype=float)
+        resid = int(record[0:5])
+        resname = record[5:10].strip()
+        atomname = record[10:15].strip()
+        atomid = int(record[15:20])
+        xyz = np.asarray([float(record[20:28]), float(record[28:36]), float(record[36:44])], dtype=float)
     except ValueError:
+        fixed_width = False
         # Also accept whitespace-separated generated records.
         parts = line.split()
         if len(parts) < 6:
@@ -143,11 +164,27 @@ def _parse_gro_atom(index: int, line: str) -> Atom:
         atomname = parts[1]
         atomid = int(parts[2])
         xyz = np.asarray([float(parts[3]), float(parts[4]), float(parts[5])], dtype=float)
+    velocity = None
+    if fixed_width and len(line) >= 68 and line[44:68].strip():
+        try:
+            velocity = np.asarray(
+                [float(line[44:52]), float(line[52:60]), float(line[60:68])],
+                dtype=float,
+            )
+        except ValueError as exc:
+            raise ValueError("Invalid GRO atom velocity fields.") from exc
+    elif not fixed_width and len(parts) >= 9:
+        try:
+            velocity = np.asarray([float(parts[6]), float(parts[7]), float(parts[8])], dtype=float)
+        except ValueError as exc:
+            raise ValueError("Invalid GRO atom velocity fields.") from exc
     if not resname or not atomname:
         raise ValueError("GRO atom records require non-empty residue and atom names.")
     if not np.all(np.isfinite(xyz)):
         raise ValueError("GRO atom coordinates must be finite.")
-    return Atom(index=index, resid=resid, resname=resname, atomname=atomname, atomid=atomid, xyz=xyz)
+    if velocity is not None and not np.all(np.isfinite(velocity)):
+        raise ValueError("GRO atom velocities must be finite.")
+    return Atom(index=index, resid=resid, resname=resname, atomname=atomname, atomid=atomid, xyz=xyz, velocity=velocity)
 
 
 def _parse_title_time_ps(title: str) -> float | None:
@@ -224,11 +261,20 @@ def close_mdanalysis_universe(universe) -> None:
         close()
 
 
-def trajectory_frame_indices(path: Path, topology: Path | None, stride: int = 1) -> list[int]:
+def trajectory_frame_indices(
+    path: Path,
+    topology: Path | None,
+    stride: int = 1,
+    lammps_config: Mapping[str, object] | None = None,
+) -> list[int]:
     """Return raw trajectory indexes selected by the configured stride."""
+    step = validated_stride(stride)
+    if path.suffix.lower() in LAMMPS_TRAJECTORY_SUFFIXES:
+        values = dict(lammps_config or {})
+        values["stride"] = step
+        return lammps_trajectory_frame_indices(path, topology, values)
     universe = open_mdanalysis_universe(path, topology)
     try:
-        step = validated_stride(stride)
         return list(range(0, len(universe.trajectory), step))
     finally:
         close_mdanalysis_universe(universe)
@@ -336,8 +382,8 @@ def validated_stride(value: int) -> int:
     try:
         stride = int(value)
     except (TypeError, ValueError) as exc:
-        raise ValueError("input.xtc_stride must be a positive integer.") from exc
+        raise ValueError("input.trajectory_stride must be a positive integer.") from exc
     if stride < 1:
-        raise ValueError("input.xtc_stride must be a positive integer.")
+        raise ValueError("input.trajectory_stride must be a positive integer.")
     return stride
 

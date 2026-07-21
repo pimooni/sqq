@@ -2,6 +2,67 @@
 
 This file records versioned update notes. New releases should be appended above older entries.
 
+## Version 0.3.2
+
+### Short Summary
+
+Version 0.3.2 reorganizes the four analysis presets, adds strict orthorhombic LAMMPS trajectory input, adds a run-level annotated cage trajectory with a reusable VMD renderer, and strengthens cage acceptance in both engines. Modes `00` and `50` use SQQ-Py; modes `99` and `cpp` use SQQ-CPP. Mode `09` is removed. Requested `auto` graph selection is now reported together with the graph actually used.
+
+The default command remains mode `50`. Mode-specific outputs are now explicit, and mode `cpp` does not generate classified `cage-gro` unless the user selects it. Package and native-core versions are `0.3.2`, released Jul 20, 2026.
+
+### Main Changes
+
+1. Modes and output presets
+   - Mode `00`: SQQ-Py, `hbond`, 4/5/6 rings, 100% worker policy, cluster search on, and `info,gro,sqq-cage-gro,sqq-render,summary-xlsx,cluster-gro`.
+   - Mode `50`: SQQ-Py, `auto`, 4/5/6 rings, 50% worker policy, cluster search off, and `info,sqq-cage-gro,sqq-render,summary-xlsx`.
+   - Mode `99`: SQQ-CPP, `hbond`, internal 4/5/6 rings, 100% worker policy, no cluster support, and `info,gro,sqq-cage-gro,sqq-render,summary-csv`.
+   - Mode `cpp`: SQQ-CPP, `auto`, internal 4/5/6 rings, 50% worker policy, no cluster support, and `info,sqq-cage-gro,sqq-render,summary-csv`.
+   - Automatic percentages continue to reserve one physical core. Explicit `-w` / `--worker` overrides the preset.
+   - `sqq-render` implies `sqq-cage-gro`. Enabling cluster search in mode `50` populates selected info/main-summary outputs but does not implicitly add split `cluster-gro`.
+
+2. Orthorhombic LAMMPS input
+   - Added LAMMPS DATA plus `.dump` / `.lammpstrj` and LAMMPS `.dcd` input through one Python adapter shared by SQQ-Py and SQQ-CPP.
+   - Added `input.trajectory_stride` / `--trajectory-stride`; legacy `input.xtc_stride` is migrated during configuration loading.
+   - Added physical `real`, `metal`, and `nano` unit conversion to the internal nm/ps representation, explicit atom-style handling, and a required YAML atom-type map.
+   - DATA molecule IDs become SQQ residue IDs, DATA atom IDs become atom IDs, and every frame is reordered into stable DATA atom-ID order.
+   - Fully periodic orthorhombic boxes are supported, including changing NPT lengths. Tilted/triclinic boxes, mixed or nonperiodic dump boundaries, `units lj`, missing molecule IDs, incomplete type maps, and topology/trajectory ID mismatches fail before analysis.
+   - Selected LAMMPS frames use the existing process scheduler; each worker owns and closes a private MDAnalysis Universe.
+
+3. Annotated cage trajectory and VMD renderer
+   - Added output types `sqq-cage-gro` and `sqq-render`; the visible files are `sqq-cage.gro` and `sqq-render.vmd.tcl` in the run root.
+   - `sqq-cage.gro` concatenates complete GRO blocks in successful frame order. It preserves source atom order, coordinates, box, and optional GRO velocities without PBC movement.
+   - Compact ASCII annotations begin at column 69 after the optional velocity fields and encode all cage memberships plus optional phase, domain, and cluster assignments. Nonmembers use `m=-`.
+   - The VMD script temporarily splits the run-level GRO for loading, removes its temporary files, and renders cage topology by default. Its public command is `sqq cage|phase|cluster|domain|help`.
+   - Split per-frame structure GRO remains controlled by `gro` / individual structure output types. `cluster-gro` remains a separate cluster-search-dependent output.
+
+4. Reporting and robustness
+   - Terminal completion, `*_info.md`, summary configuration, run metadata, and annotated GRO titles report resolved graph selection as `auto -> hbond`, `auto -> oo`, or a counted mixed result across frames.
+   - Terminal, per-frame info, and summary configuration now include normalized input format, trajectory stride, topology, and applicable LAMMPS provenance.
+   - GRO input now preserves optional velocity fields and ignores SQQ semicolon annotations after the fixed-width record.
+   - LAMMPS selection and per-frame molecule inventories use explicit DATA molecule IDs, so interleaved atom rows no longer split one molecule into several reported molecules.
+   - `auto` now chooses hydrogen bonds only when every selected water has usable hydrogen coordinates; otherwise both engines choose O-O connectivity.
+   - Fixed the mixed-graph display return path and restored worker-local XTC/TRR Universe initialization after adding the LAMMPS dispatch.
+   - Interrupted or failed bundle generation removes temporary fragments and partial visible files.
+
+5. Mandatory cage topology validation
+   - SQQ-Py and SQQ-CPP now always require every candidate shell to use each edge exactly twice, satisfy `V - E + F = 2`, form one edge-connected face shell, have one cyclic face link around every vertex, and contain only trivalent shell vertices.
+   - These checks run before cage type/isomer assignment and reject disconnected, pinched, branched, and non-manifold false cages even when `cage.scientific_validation` is `false`.
+   - `--cage-scientific-validation on|off` is retained. It now controls only the additional PBC-aware face-planarity RMS, edge-length CV, nonzero projected-area, positive-volume, and volume-centroid geometry path; its default remains `off`.
+   - Corrected false positives can reduce cage/isomer counts and their downstream occupancy, hydrate-cluster, GRO, info, and summary records. Ring and half/quasi detection are unchanged; rejected cages can return their rings/patches to ownership-filtered free outputs.
+
+6. Verification
+   - Configuration tests cover every mode's engine, graph, ring sizes, worker fraction, cluster state, exact default output order, `sqq-render` implication, and `cpp` default exclusion of `cage-gro`.
+   - Synthetic LAMMPS DATA/dump tests cover shuffled atom rows, stable atom mapping, nm/ps conversion, changing boxes, frame stride, and both serial and worker adapters.
+   - Annotated-GRO tests cover complete multi-frame blocks, column-69 comments, velocities, nonmembers, membership validation, temporary VMD loading, and resolved graph titles.
+   - Real `tests/100.gro` smoke runs cover modes `00`, `50`, `99`, and `cpp`, including default-output presence/absence and explicit CPP `cage-gro`; native version/build checks report `0.3.2`. XTC worker initialization and legacy stride migration have dedicated regression checks.
+
+### Compatibility
+
+- Ring, half/quasi, F3/F4, and ice definitions are unchanged. Mandatory topology validation can remove cage false positives and consequently reduce cage/isomer, occupancy, hydrate-cluster, GRO, info, and summary results. Complete-hydrogen and oxygen-only inputs keep their prior `auto` result; partially mapped water topologies intentionally change from a mixed-quality hydrogen-bond graph to O-O connectivity.
+- LAMMPS normalization can change only representation units/order before analysis; an equivalent physical frame is expected to produce the same scientific result within existing floating-point tolerance.
+- Mode preset changes and default output changes are intentional. Scripts using removed mode `09` must choose `00`, `50`, `99`, or `cpp`.
+- `sqq-cage.gro` requires identical atom identity and order across its successful frames. It is a visualization trajectory, while ordinary classified GRO output remains independently selectable.
+
 ## Version 0.3.1
 
 ### Short Summary

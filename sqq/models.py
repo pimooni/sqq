@@ -18,6 +18,8 @@ class Atom:
     atomname: str
     atomid: int
     xyz: np.ndarray
+    velocity: np.ndarray | None = None
+    molecule_id: int | None = None
 
 
 @dataclass

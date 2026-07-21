@@ -80,6 +80,7 @@ from .io.gro_writer import (
     write_quasi_cage_gro_files,
     write_ring_gro_files,
 )
+from .io.lammps import LAMMPS_TRAJECTORY_SUFFIXES, normalize_lammps_config
 from .io.summary import (
     dashboard_cage_targets,
     failed_row,
@@ -92,6 +93,13 @@ from .io.summary import (
     write_vmd_script,
 )
 from .io.trajectory import expand_inputs, read_frames, trajectory_frame_indices
+from .io.vmd import (
+    FRAGMENT_DIRECTORY,
+    cleanup_sqq_cage_bundle,
+    finalize_sqq_cage_bundle,
+    prepare_sqq_cage_fragments,
+    write_sqq_cage_fragment,
+)
 from .models import Cage, CagePatch, Frame, FrameResult, HydrateOrderResult
 from .parallel import (
     physical_cpu_count,
@@ -132,6 +140,12 @@ def analyze(args: Namespace) -> None:
     outdir.mkdir(parents=True, exist_ok=True)
 
     topology = Path(args.topology) if args.topology else None
+    config["input"]["format"] = input_format_label(paths)
+    config["input"]["topology"] = str(topology.resolve()) if topology else None
+    if str(config["input"]["format"]).startswith("lammps-"):
+        config["input"]["lammps"]["type_map_source"] = (
+            str(Path(args.config).resolve()) if args.config else "<configuration>"
+        )
     coordinate_parallelizable = can_parallelize_paths(paths, topology)
     trajectory_parallelizable = can_parallelize_trajectory(paths, topology)
     parallel_backend = normalize_parallel_backend(config.get("parallel", {}).get("backend", "process"))
@@ -143,7 +157,8 @@ def analyze(args: Namespace) -> None:
         trajectory_indexes = trajectory_frame_indices(
             paths[0],
             topology,
-            stride=int(config["input"].get("xtc_stride", 1)),
+            stride=int(config["input"].get("trajectory_stride", 1)),
+            lammps_config=config["input"].get("lammps", {}),
         )
         work_items = len(trajectory_indexes)
     else:
@@ -181,6 +196,12 @@ def analyze(args: Namespace) -> None:
     initial_run_info["status"] = "running"
     initial_run_info["error"] = ""
     write_run_config(outdir, config, initial_run_info)
+    bundle_gro = output_enabled(config, "sqq-cage-gro")
+    bundle_script = output_enabled(config, "sqq-render")
+    cleanup_sqq_cage_bundle(outdir)
+    if bundle_gro or bundle_script:
+        prepare_sqq_cage_fragments(outdir)
+
     try:
         if workers > 1 and coordinate_parallelizable:
             rows = analyze_paths_parallel(
@@ -213,7 +234,14 @@ def analyze(args: Namespace) -> None:
                 total_started_at=started_at,
                 total_frames=work_items if trajectory_parallelizable else None,
             )
+        if bundle_gro or bundle_script:
+            finalize_sqq_cage_bundle(
+                outdir,
+                write_gro=bundle_gro,
+                write_script=bundle_script,
+            )
     except Exception as exc:
+        cleanup_sqq_cage_bundle(outdir)
         failed_at = datetime.now().astimezone()
         failed_run_info = build_run_info(
             args,
@@ -305,9 +333,11 @@ def build_run_info(
         for row in result_rows
         if str(row.get("status", "")).lower() == "failed"
     ]
+    input_format = input_format_label(paths)
     info: dict[str, Any] = {
         "working_dir": str(Path.cwd()),
         "input": str(input_path),
+        "input_format": input_format,
         "output_dir": str(outdir.resolve()),
         "date": started_at_wall.strftime("%Y-%m-%d"),
         "start_time": started_at_wall.strftime("%H:%M:%S"),
@@ -321,6 +351,7 @@ def build_run_info(
         "worker_policy": worker_policy_text(config),
         "topology": str(topology) if topology else "<none>",
         "matched_files": len(paths),
+        "trajectory_stride": int(config["input"].get("trajectory_stride", 1)),
         "frames_total": len(result_rows),
         "frames_ok": sum(
             str(row.get("status", "")).lower() == "ok"
@@ -400,6 +431,16 @@ def build_run_info(
         ),
         "run_config": str((outdir / "run_config.yaml").resolve()),
     }
+    if input_format.startswith("lammps-"):
+        lammps = config["input"].get("lammps", {})
+        info.update(
+            {
+                "lammps_units": lammps.get("units", "real"),
+                "lammps_timestep": lammps.get("timestep", 1.0),
+                "lammps_atom_style": lammps.get("atom_style", "full"),
+                "lammps_type_map_source": lammps.get("type_map_source", "<configuration>"),
+            }
+        )
     if paths:
         info["first_file"] = str(paths[0].resolve())
         info["last_file"] = str(paths[-1].resolve())
@@ -425,6 +466,7 @@ def print_run_header(
     print_terminal_field("time_zone", format_time_zone(started_at_wall))
     print_terminal_field("working_dir", Path.cwd())
     print_terminal_field("input", input_path)
+    print_terminal_field("input_format", input_format_label(paths))
     print_terminal_field("matched_files", len(paths))
     print_terminal_field("output", outdir)
     print("")
@@ -433,6 +475,13 @@ def print_run_header(
     print_terminal_field("Mode", mode_display(config.get("mode", "50")))
     print_terminal_field("Config file", args.config or "<built-in defaults>")
     print_terminal_field("Topology", topology or "<none>")
+    print_terminal_field("Trajectory stride", config["input"].get("trajectory_stride", 1))
+    if input_format_label(paths).startswith("lammps-"):
+        lammps = config["input"].get("lammps", {})
+        print_terminal_field("LAMMPS units", lammps.get("units", "real"))
+        print_terminal_field("LAMMPS timestep", lammps.get("timestep", 1.0))
+        print_terminal_field("LAMMPS atom style", lammps.get("atom_style", "full"))
+        print_terminal_field("LAMMPS type map", lammps.get("type_map_source", "<configuration>"))
     print_terminal_field("Graph mode", graph_mode_display(config["graph"]["bond_mode"]))
     print_terminal_field("Search sizes", config["ring"]["sizes"])
     print_terminal_field("Ring definition", config["ring"].get("definition", "chordless"))
@@ -485,7 +534,7 @@ def print_run_summary(run_info: dict[str, Any]) -> None:
     print_terminal_field("Mode", run_info.get("mode", ""))
     print_terminal_field("Graph mode", run_info.get("graph_mode_display", run_info.get("graph_mode", "")))
     print_terminal_field("Order parameters", run_info.get("order_parameters", ""))
-    if str(run_info.get("mode", "")).strip().lower() != "sqq-cpp":
+    if "sqq-cpp" not in str(run_info.get("mode", "")).strip().lower():
         print_terminal_field("Find cluster", run_info.get("find_cluster", "off"))
     print_terminal_field("Output types", run_info.get("output_types", "none"))
     print_terminal_field("Worker policy", run_info.get("worker_policy", ""))
@@ -507,6 +556,42 @@ def row_effective_graph_modes(rows: list[dict[str, Any]]) -> list[str]:
         if mode:
             modes.append(mode)
     return modes
+
+
+def frame_input_metadata(config: dict[str, Any]) -> dict[str, Any]:
+    """Return normalized input provenance for one frame report."""
+    input_config = config.get("input", {})
+    metadata = {
+        "input_format": input_config.get("format", ""),
+        "topology": input_config.get("topology"),
+        "trajectory_stride": input_config.get("trajectory_stride", 1),
+    }
+    if str(metadata["input_format"]).startswith("lammps-"):
+        lammps = input_config.get("lammps", {})
+        metadata.update(
+            {
+                "lammps_units": lammps.get("units", "real"),
+                "lammps_timestep": lammps.get("timestep", 1.0),
+                "lammps_atom_style": lammps.get("atom_style", "full"),
+                "lammps_type_map_source": lammps.get("type_map_source", "<configuration>"),
+            }
+        )
+    return metadata
+
+
+def input_format_label(paths: list[Path]) -> str:
+    """Return one compact source-format label for run metadata."""
+    mapping = {".gro": "gromacs-gro", ".xyz": "xyz", ".xtc": "gromacs-xtc", ".trr": "gromacs-trr", ".dump": "lammps-dump", ".lammpstrj": "lammps-dump", ".dcd": "lammps-dcd"}
+    labels: list[str] = []
+    for path in paths:
+        label = mapping.get(path.suffix.lower(), path.suffix.lower().lstrip("."))
+        if label not in labels:
+            labels.append(label)
+    if not labels:
+        return "unknown"
+    if len(labels) == 1:
+        return labels[0]
+    return "mixed (" + ", ".join(labels) + ")"
 
 
 def bond_mode_display_name(value: Any) -> str:
@@ -1134,7 +1219,8 @@ def analyze_paths_serial(
                 paths,
                 topology=topology,
                 xyz_scale=float(config["input"].get("xyz_scale", 0.1)),
-                xtc_stride=int(config["input"].get("xtc_stride", 1)),
+                trajectory_stride=int(config["input"].get("trajectory_stride", 1)),
+                lammps_config=config["input"].get("lammps", {}),
             )
         )
         frame_index = 0
@@ -1325,7 +1411,7 @@ def analyze_trajectory_processes(
 ) -> list[dict[str, Any]]:
     """Analyze selected frames with one private MDAnalysis Universe per process."""
     if topology is None:
-        raise ValueError("XTC/TRR process analysis requires a topology file.")
+        raise ValueError("Trajectory process analysis requires --top.")
     rows_by_index: dict[int, dict[str, Any]] = {}
     progress = ParallelRunProgressDisplay(
         total=len(raw_frame_indexes),
@@ -1343,7 +1429,15 @@ def analyze_trajectory_processes(
                 max_workers=workers,
                 mp_context=context,
                 initializer=initialize_trajectory_worker,
-                initargs=(config, str(outdir), strict, stage_queue, str(trajectory), str(topology)),
+                initargs=(
+                    config,
+                    str(outdir),
+                    strict,
+                    stage_queue,
+                    str(trajectory),
+                    str(topology),
+                    config["input"].get("lammps", {}),
+                ),
             ) as executor:
                 batch_iterator = iter(trajectory_task_batches(raw_frame_indexes, workers))
                 futures: dict[Any, tuple[tuple[int, int], ...]] = {}
@@ -1477,6 +1571,13 @@ def process_frame(
         frame_dir.mkdir(parents=True, exist_ok=True)
         report_stage(stage_callback, "writing outputs")
         write_frame_outputs(result, frame_dir, config)
+        if output_enabled(config, "sqq-cage-gro"):
+            write_sqq_cage_fragment(
+                result,
+                outdir / FRAGMENT_DIRECTORY,
+                frame_index,
+                requested_graph_mode=config["graph"]["bond_mode"],
+            )
         report_stage(stage_callback, "done")
         return result_row(result)
     except Exception as exc:
@@ -1504,6 +1605,7 @@ def write_frame_outputs(result: FrameResult, frame_dir: Path, config: dict[str, 
             requested_bond_mode=config["graph"]["bond_mode"],
             order_parameters=order_parameters,
             analysis_mode=config.get("mode", "50"),
+            input_metadata=frame_input_metadata(config),
         )
     else:
         remove_optional_info_output(result, frame_dir)
@@ -1816,7 +1918,7 @@ def can_parallelize_trajectory(paths: list[Path], topology: Path | None) -> bool
     return (
         topology is not None
         and len(paths) == 1
-        and paths[0].suffix.lower() in {".xtc", ".trr"}
+        and paths[0].suffix.lower() in ({".xtc", ".trr"} | set(LAMMPS_TRAJECTORY_SUFFIXES))
     )
 
 def apply_cli_overrides(config: dict[str, Any], args: Namespace) -> None:
@@ -1829,6 +1931,15 @@ def apply_cli_overrides(config: dict[str, Any], args: Namespace) -> None:
         if not math.isfinite(args.xyz_scale) or args.xyz_scale <= 0:
             raise ValueError("--xyz-scale must be positive and finite.")
         config["input"]["xyz_scale"] = args.xyz_scale
+    if getattr(args, "trajectory_stride", None) is not None:
+        config["input"]["trajectory_stride"] = args.trajectory_stride
+    lammps = config["input"].setdefault("lammps", {})
+    if getattr(args, "lammps_units", None) is not None:
+        lammps["units"] = args.lammps_units
+    if getattr(args, "lammps_timestep", None) is not None:
+        lammps["timestep"] = args.lammps_timestep
+    if getattr(args, "lammps_atom_style", None) is not None:
+        lammps["atom_style"] = args.lammps_atom_style
     if getattr(args, "size", None):
         config["ring"]["sizes"] = args.size
         config["quasi_cage"]["base_sizes"] = args.size
@@ -1945,6 +2056,16 @@ def apply_cli_overrides(config: dict[str, Any], args: Namespace) -> None:
         config["output"]["structure_layout"] = args.output_layout
     if getattr(args, "output_type", None) is not None:
         config["output"]["types"] = args.output_type
+        if not config.get("hydrate_cluster", {}).get("enabled", False):
+            requested = {
+                item.strip().lower()
+                for item in str(args.output_type).split(",")
+            }
+            if (
+                "all" not in requested
+                and {"cluster-gro", "cluster-detail"}.intersection(requested)
+            ):
+                raise ValueError("Cluster outputs require --find-cluster on.")
     if getattr(args, "cage_isomer_rows", None):
         config["output"]["cage_isomer_rows"] = args.cage_isomer_rows
 
@@ -1976,10 +2097,31 @@ def normalize_analysis_scopes(config: dict[str, Any]) -> None:
         input_config.get("frame_time_step_ps", 100.0),
         "input.frame_time_step_ps",
     )
-    input_config["xtc_stride"] = positive_integer(
-        input_config.get("xtc_stride", 1),
-        "input.xtc_stride",
+    legacy_stride = input_config.pop("xtc_stride", None)
+    stride_value = input_config.get("trajectory_stride", legacy_stride if legacy_stride is not None else 1)
+    input_config["trajectory_stride"] = positive_integer(
+        stride_value,
+        "input.trajectory_stride / --trajectory-stride",
     )
+    raw_lammps = input_config.get("lammps", {})
+    if not isinstance(raw_lammps, dict):
+        raise ValueError("input.lammps must be a mapping.")
+    lammps_values = dict(raw_lammps)
+    lammps_values["stride"] = input_config["trajectory_stride"]
+    settings = normalize_lammps_config(lammps_values)
+    type_map: dict[str, dict[str, Any]] = {}
+    for type_id, entry in settings.type_map.items():
+        if entry.ignore:
+            type_map[type_id] = {"ignore": True}
+        else:
+            type_map[type_id] = {"resname": entry.resname, "atomname": entry.atomname}
+    input_config["lammps"] = {
+        "units": settings.units,
+        "timestep": settings.timestep,
+        "atom_style": str(raw_lammps.get("atom_style", "full")).strip().lower(),
+        "coordinate_convention": settings.coordinate_convention,
+        "type_map": type_map,
+    }
 
     graph = config.setdefault("graph", {})
     graph_mode = str(graph.get("bond_mode", "auto")).strip().lower()
@@ -2137,14 +2279,6 @@ def normalize_analysis_scopes(config: dict[str, Any]) -> None:
             f"Unsupported output configuration key(s): {names}. Use output.types."
         )
     raw_output_types = output.get("types")
-    all_requested = (
-        isinstance(raw_output_types, str)
-        and raw_output_types.strip().lower() == "all"
-    ) or (
-        isinstance(raw_output_types, (list, tuple, set))
-        and len(raw_output_types) == 1
-        and str(next(iter(raw_output_types))).strip().lower() == "all"
-    )
     output_normalizer = (
         normalize_cpp_output_types
         if is_cpp_mode(config.get("mode", "50"))
@@ -2152,28 +2286,11 @@ def normalize_analysis_scopes(config: dict[str, Any]) -> None:
     )
     output_types = list(output_normalizer(raw_output_types))
     if not hydrate_cluster["enabled"]:
-        conditional_cluster_outputs = {
-            "cluster-gro",
-            "cluster-detail",
-        }.intersection(output_types)
-        if conditional_cluster_outputs and all_requested:
-            output_types = [
-                output_type
-                for output_type in output_types
-                if output_type not in conditional_cluster_outputs
-            ]
-        elif conditional_cluster_outputs:
-            names = ", ".join(sorted(conditional_cluster_outputs))
-            raise ValueError(
-                f"output type(s) {names} require --find-cluster on."
-            )
-    if hydrate_cluster["enabled"] and "cluster-gro" not in output_types:
-        output_types = list(normalize_output_types([*output_types, "cluster-gro"]))
-    if (
-        hydrate_cluster["enabled"]
-        and not {"summary-xlsx", "summary-csv"}.intersection(output_types)
-    ):
-        output_types = list(normalize_output_types([*output_types, "summary-xlsx"]))
+        output_types = [
+            output_type
+            for output_type in output_types
+            if output_type not in {"cluster-gro", "cluster-detail"}
+        ]
     output["types"] = output_types
     output["write_empty_files"] = parse_on_off(
         output.get("write_empty_files", False),

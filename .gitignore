@@ -36,3 +36,5 @@ config.yaml
 *.docx
 sqq/example/
 tests/
+.sqq-cage-fragments/
+.sqq-vmd-*/

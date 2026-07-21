@@ -239,9 +239,11 @@ GraphInternal build_graph(const FrameInput& frame, const AnalyzeOptions& options
     GraphInternal graph;
     graph.mode = lower_ascii(options.bond_mode);
     if (graph.mode == "auto") {
-        graph.mode = std::any_of(frame.waters.begin(), frame.waters.end(), [](const WaterInput& water) {
-            return !water.hydrogens.empty();
-        }) ? "hbond" : "oo";
+        const bool complete_hydrogens = !frame.waters.empty() &&
+            std::all_of(frame.waters.begin(), frame.waters.end(), [](const WaterInput& water) {
+                return !water.hydrogens.empty();
+            });
+        graph.mode = complete_hydrogens ? "hbond" : "oo";
     }
     if (graph.mode != "hbond" && graph.mode != "oo" && graph.mode != "pairs") {
         throw std::invalid_argument("bond_mode must be auto, hbond, oo, or pairs");
@@ -856,17 +858,29 @@ std::vector<Edge> cage_edges(
     return {edges.begin(), edges.end()};
 }
 
+bool face_adjacency_connected(
+    const std::vector<RingRecord>& rings,
+    const std::vector<int>& faces
+);
+bool vertex_links_are_manifold(
+    const std::vector<RingRecord>& rings,
+    const std::vector<int>& faces
+);
+
 bool is_closed_polyhedron(
     const std::vector<RingRecord>& rings,
     const std::vector<int>& face_indices
 ) {
     std::map<Edge, int> edge_counts;
     std::set<int> nodes;
+    std::map<int, std::set<int>> vertex_neighbors;
     for (const int face : face_indices) {
         const auto& ring = rings[face];
         nodes.insert(ring.nodes.begin(), ring.nodes.end());
         for (const auto& edge : ring.edges) {
             ++edge_counts[edge];
+            vertex_neighbors[edge.first].insert(edge.second);
+            vertex_neighbors[edge.second].insert(edge.first);
         }
     }
     if (edge_counts.empty() || std::any_of(edge_counts.begin(), edge_counts.end(), [](const auto& item) {
@@ -874,8 +888,18 @@ bool is_closed_polyhedron(
         })) {
         return false;
     }
-    return static_cast<long long>(nodes.size()) - static_cast<long long>(edge_counts.size()) +
-        static_cast<long long>(face_indices.size()) == 2;
+    if (static_cast<long long>(nodes.size()) - static_cast<long long>(edge_counts.size()) +
+            static_cast<long long>(face_indices.size()) != 2) {
+        return false;
+    }
+    for (const int node : nodes) {
+        const auto found = vertex_neighbors.find(node);
+        if (found == vertex_neighbors.end() || found->second.size() != 3) {
+            return false;
+        }
+    }
+    return face_adjacency_connected(rings, face_indices) &&
+        vertex_links_are_manifold(rings, face_indices);
 }
 
 bool face_adjacency_connected(
@@ -1042,9 +1066,6 @@ std::optional<Vec3> cage_geometry(
     const Vec3 mean_center = arithmetic_mean(coordinates);
     if (!options.scientific_validation) {
         return mean_center;
-    }
-    if (!face_adjacency_connected(rings, faces) || !vertex_links_are_manifold(rings, faces)) {
-        return std::nullopt;
     }
     for (const int face : faces) {
         const auto quality = measure_face_quality(rings[face], unwrapped).first;
@@ -1670,6 +1691,6 @@ AnalysisResult analyze_frame(const FrameInput& frame, const AnalyzeOptions& opti
     return result;
 }
 
-const char* core_version() noexcept { return "0.3.1"; }
+const char* core_version() noexcept { return "0.3.2"; }
 
 }  // namespace sqq_cpp

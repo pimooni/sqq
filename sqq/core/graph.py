@@ -57,7 +57,7 @@ def resolve_bond_mode(bond_mode: str, waters: list[Water], pair_file: str | Path
     if bond_mode not in {"auto", "hbond", "oo", "pairs"}:
         raise ValueError(f"Unsupported bond_mode: {bond_mode}")
     if bond_mode == "auto":
-        return "hbond" if any(water.hydrogens for water in waters) else "oo"
+        return "hbond" if waters and all(water.hydrogens for water in waters) else "oo"
     if bond_mode == "pairs" and pair_file is None:
         raise ValueError("bond_mode=pairs requires graph.pair_file or --pairs.")
     return bond_mode

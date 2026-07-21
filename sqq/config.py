@@ -17,9 +17,23 @@ except ImportError:  # pragma: no cover - exercised in minimal source-tree runs.
 DEFAULT_MODE = "50"
 DEFAULT_ORDER_PARAMETERS = ("f3", "f4")
 CPP_MODE = "cpp"
-CPP_DEFAULT_OUTPUT_TYPES = ("info", "cage-gro", "summary-csv")
-CPP_ALL_OUTPUT_TYPES = ("info", "cage-gro", "summary-csv", "summary-xlsx")
-CPP_OUTPUT_TYPES = frozenset({"info", "gro", "cage-gro", "summary-csv", "summary-xlsx"})
+CPP_MODES = frozenset({"99", CPP_MODE})
+CPP_DEFAULT_OUTPUT_TYPES = (
+    "info",
+    "sqq-cage-gro",
+    "sqq-render",
+    "summary-csv",
+)
+CPP_ALL_OUTPUT_TYPES = (
+    "info",
+    "gro",
+    "cage-gro",
+    "sqq-cage-gro",
+    "sqq-render",
+    "summary-csv",
+    "summary-xlsx",
+)
+CPP_OUTPUT_TYPES = frozenset(CPP_ALL_OUTPUT_TYPES)
 ALL_ORDER_PARAMETERS = (
     "f3",
     "f4",
@@ -42,7 +56,8 @@ ORDER_PARAMETER_ALIASES = {
 }
 DEFAULT_OUTPUT_TYPES = (
     "info",
-    "gro",
+    "sqq-cage-gro",
+    "sqq-render",
     "summary-xlsx",
 )
 ALL_OUTPUT_TYPES = (
@@ -51,10 +66,12 @@ ALL_OUTPUT_TYPES = (
     "order-tsv",
     "vmd",
     "gro",
-    "cluster-gro",
+    "sqq-cage-gro",
+    "sqq-render",
     "summary-xlsx",
     "summary-csv",
     "summary-detail-csv",
+    "cluster-gro",
     "cluster-detail",
 )
 OUTPUT_TYPE_ORDER = (
@@ -63,15 +80,17 @@ OUTPUT_TYPE_ORDER = (
     "order-tsv",
     "vmd",
     "gro",
+    "sqq-cage-gro",
+    "sqq-render",
     "ring-gro",
     "half-gro",
     "quasi-gro",
     "cage-gro",
     "ice-gro",
-    "cluster-gro",
     "summary-xlsx",
     "summary-csv",
     "summary-detail-csv",
+    "cluster-gro",
     "cluster-detail",
 )
 GRO_OUTPUT_TYPES = {
@@ -84,38 +103,48 @@ GRO_OUTPUT_TYPES = {
 MODE_PRESETS: dict[str, dict[str, Any]] = {
     "00": {
         "label": "rigorous",
-        "worker_fraction": 0.25,
+        "worker_fraction": 1.0,
         "bond_mode": "hbond",
         "ring_sizes": [4, 5, 6],
         "find_cluster": True,
-    },
-    "09": {
-        "label": "rigorous-performance",
-        "worker_fraction": 0.90,
-        "bond_mode": "hbond",
-        "ring_sizes": [4, 5, 6],
-        "find_cluster": True,
+        "output_types": [
+            "info",
+            "gro",
+            "sqq-cage-gro",
+            "sqq-render",
+            "summary-xlsx",
+            "cluster-gro",
+        ],
     },
     "50": {
         "label": "standard",
         "worker_fraction": 0.50,
         "bond_mode": "auto",
-        "ring_sizes": [5, 6],
+        "ring_sizes": [4, 5, 6],
         "find_cluster": False,
+        "output_types": list(DEFAULT_OUTPUT_TYPES),
     },
     "99": {
-        "label": "performance",
-        "worker_fraction": 0.90,
-        "bond_mode": "oo",
-        "ring_sizes": [5, 6],
+        "label": "sqq-cpp-performance",
+        "worker_fraction": 1.0,
+        "bond_mode": "hbond",
+        "ring_sizes": [4, 5, 6],
         "find_cluster": False,
+        "output_types": [
+            "info",
+            "gro",
+            "sqq-cage-gro",
+            "sqq-render",
+            "summary-csv",
+        ],
     },
     CPP_MODE: {
         "label": "sqq-cpp",
-        "worker_fraction": 0.90,
+        "worker_fraction": 0.50,
         "bond_mode": "auto",
         "ring_sizes": [4, 5, 6],
         "find_cluster": False,
+        "output_types": list(CPP_DEFAULT_OUTPUT_TYPES),
     },
 }
 
@@ -128,8 +157,15 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "recursive": False,
         "first_file_time_ps": 0.0,
         "frame_time_step_ps": 100.0,
-        "xtc_stride": 1,
+        "trajectory_stride": 1,
         "xyz_scale": 0.1,
+        "lammps": {
+            "units": "real",
+            "timestep": 1.0,
+            "atom_style": "full",
+            "coordinate_convention": "auto",
+            "type_map": {},
+        },
     },
     "water": {
         "resnames": ["SOL", "TIP", "WAT", "HOH"],
@@ -254,13 +290,15 @@ def mode_label(mode: Any) -> str:
 
 def is_cpp_mode(mode: Any) -> bool:
     """Return whether the native C++ backend was selected."""
-    return normalize_mode(mode) == CPP_MODE
+    return normalize_mode(mode) in CPP_MODES
 
 
 def mode_display(mode: Any) -> str:
     """Return the unified public mode/engine label."""
     normalized = normalize_mode(mode)
-    return "sqq-cpp" if normalized == CPP_MODE else f"{normalized} (sqq-py)"
+    if normalized in CPP_MODES:
+        return "sqq-cpp" if normalized == CPP_MODE else f"{normalized} (sqq-cpp)"
+    return f"{normalized} (sqq-py)"
 
 
 def mode_worker_fraction(mode: Any) -> float:
@@ -403,12 +441,15 @@ def normalize_output_types(value: Any = None) -> tuple[str, ...]:
     if unknown:
         raise ValueError(
             f"Unsupported output type(s) {unknown}. Use info, membership-tsv, "
-            "order-tsv, vmd, gro, ring-gro, half-gro, quasi-gro, cage-gro, "
-            "ice-gro, cluster-gro, summary-xlsx, summary-csv, summary-detail-csv, cluster-detail, all, or none."
+            "order-tsv, vmd, sqq-cage-gro, sqq-render, gro, ring-gro, half-gro, "
+            "quasi-gro, cage-gro, ice-gro, cluster-gro, summary-xlsx, summary-csv, "
+            "summary-detail-csv, cluster-detail, all, or none."
         )
     normalized = set(cleaned)
     if "gro" in normalized:
         normalized.difference_update(GRO_OUTPUT_TYPES)
+    if "sqq-render" in normalized:
+        normalized.add("sqq-cage-gro")
     return tuple(name for name in OUTPUT_TYPE_ORDER if name in normalized)
 
 
@@ -516,11 +557,11 @@ def apply_mode_preset(config: dict[str, Any], mode: Any) -> dict[str, Any]:
     config["quasi_cage"]["base_sizes"] = "auto"
     config["quasi_cage"]["side_sizes"] = "auto"
     config["hydrate_cluster"]["enabled"] = bool(preset["find_cluster"])
-    if normalized == CPP_MODE:
+    config["output"]["types"] = list(preset["output_types"])
+    if is_cpp_mode(normalized):
         config["quasi_cage"]["enabled"] = False
         config["ice"]["enabled"] = False
         config["order"]["parameters"] = list(DEFAULT_ORDER_PARAMETERS)
-        config["output"]["types"] = list(CPP_DEFAULT_OUTPUT_TYPES)
         config["cage"]["fast_closure"] = False
     return config
 
@@ -545,6 +586,11 @@ def load_config(path: Path | None, mode: Any = None) -> dict[str, Any]:
     migrated_parameters = migrate_legacy_order_parameters(user_config)
     if migrated_parameters is not None:
         user_config.setdefault("order", {})["parameters"] = list(migrated_parameters)
+    user_input = user_config.get("input", {})
+    if isinstance(user_input, dict) and "xtc_stride" in user_input:
+        if "trajectory_stride" not in user_input:
+            user_input["trajectory_stride"] = user_input["xtc_stride"]
+        user_input.pop("xtc_stride", None)
     strip_legacy_selection_keys(user_config)
 
     selected_mode = normalize_mode(mode if mode is not None else user_config.get("mode", DEFAULT_MODE))
@@ -592,7 +638,7 @@ def normalize_cpp_output_types(value: Any = None) -> tuple[str, ...]:
             raw_items = [item for item in value if str(item).strip()]
         except TypeError as exc:
             raise ValueError(
-                "mode cpp --output-type must contain info, gro, cage-gro, summary-csv, or summary-xlsx."
+                "SQQ-CPP --output-type contains an invalid output name."
             ) from exc
     if not raw_items:
         return ()
@@ -606,13 +652,13 @@ def normalize_cpp_output_types(value: Any = None) -> tuple[str, ...]:
     if unsupported:
         names = ", ".join(unsupported)
         raise ValueError(
-            f"output type(s) {names} are not supported in mode cpp; "
-            "use info, gro, cage-gro, summary-csv, summary-xlsx, all, or none."
+            f"output type(s) {names} are not supported by SQQ-CPP; "
+            "use info, gro, cage-gro, sqq-cage-gro, sqq-render, summary-csv, "
+            "summary-xlsx, all, or none."
         )
     normalized = set(cleaned)
-    if "gro" in normalized:
-        normalized.remove("gro")
-        normalized.add("cage-gro")
+    if "sqq-render" in normalized:
+        normalized.add("sqq-cage-gro")
     return tuple(name for name in CPP_ALL_OUTPUT_TYPES if name in normalized)
 
 
@@ -637,7 +683,6 @@ def validate_cpp_cli(args: Any, config: dict[str, Any]) -> None:
         ("mcg3", "--mcg3"),
         ("dhop30", "--dhop30"),
         ("cage_fast_closure", "--cage-fast-closure"),
-        ("find_cluster", "--find-cluster"),
         ("cluster_min_cage", "--cluster-min-cage"),
     )
     for attribute, option in unsupported_args:
@@ -645,6 +690,11 @@ def validate_cpp_cli(args: Any, config: dict[str, Any]) -> None:
         if value not in (None, False):
             errors.append(f"{option} is not supported in mode cpp")
             explicit_unsupported.add(attribute)
+
+    find_cluster = getattr(args, "find_cluster", None)
+    if find_cluster not in (None, False, "off"):
+        errors.append("--find-cluster on is not supported by SQQ-CPP")
+        explicit_unsupported.add("find_cluster")
 
     ring = config.setdefault("ring", {})
     explicit_ring_definition = getattr(args, "ring_definition", None) not in (None, "chordless")

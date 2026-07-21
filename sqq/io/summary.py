@@ -1006,6 +1006,7 @@ def write_frame_info(
     requested_bond_mode: Any | None = None,
     order_parameters: Any | None = None,
     analysis_mode: Any = "50",
+    input_metadata: dict[str, Any] | None = None,
 ) -> None:
     """Write the per-frame Markdown report with inspection-oriented tables."""
     frame_dir.mkdir(parents=True, exist_ok=True)
@@ -1020,11 +1021,21 @@ def write_frame_info(
     default_ring_sizes = result.ring_report_sizes or tuple(result.rings)
     enabled_ring_sizes = sorted(set(ring_sizes if ring_sizes is not None else default_ring_sizes))
     cpp_mode = is_cpp_mode(analysis_mode)
+    metadata = input_metadata or {}
+    metadata_rows = [
+        [key, metadata[key]]
+        for key in (
+            "input_format", "topology", "trajectory_stride", "lammps_units",
+            "lammps_timestep", "lammps_atom_style", "lammps_type_map_source",
+        )
+        if metadata.get(key) not in (None, "", "<none>")
+    ]
     frame_information_rows = [
         ["sqq version", __version__],
         ["mode", mode_display(analysis_mode)],
         ["date & time", report_datetime_label()],
         ["source", source_label(result.frame.source)],
+        *metadata_rows,
         ["frame", result.frame.name],
         ["time_ps", result.frame.time_ps],
         ["graph_mode", graph_mode_display(requested_bond_mode or row["connection_mode"], [row["connection_mode"]])],
@@ -1209,15 +1220,25 @@ def pad_display(value: Any, width: int) -> str:
 
 
 def molecule_count_rows(result: FrameResult) -> list[list[Any]]:
-    """Count contiguous molecules and atoms by residue name in source order."""
+    """Count molecules and atoms by residue name using source identity."""
     atom_counts = atom_resname_counts(result)
     molecule_counts: dict[str, int] = {}
-    previous_residue: tuple[int, str] | None = None
-    for atom in result.frame.atoms:
-        residue = (atom.resid, atom.resname)
-        if residue != previous_residue:
-            molecule_counts[atom.resname] = molecule_counts.get(atom.resname, 0) + 1
-            previous_residue = residue
+    atoms = result.frame.atoms
+    explicit_ids = [atom.molecule_id for atom in atoms]
+    if any(value is not None for value in explicit_ids):
+        if any(value is None for value in explicit_ids):
+            raise ValueError("Atom records mix explicit and implicit molecule identities.")
+        for resname, _ in dict.fromkeys(
+            (atom.resname, int(atom.molecule_id)) for atom in atoms
+        ):
+            molecule_counts[resname] = molecule_counts.get(resname, 0) + 1
+    else:
+        previous_residue: tuple[int, str] | None = None
+        for atom in atoms:
+            residue = (atom.resid, atom.resname)
+            if residue != previous_residue:
+                molecule_counts[atom.resname] = molecule_counts.get(atom.resname, 0) + 1
+                previous_residue = residue
     rows = [[resname, molecule_counts.get(resname, 0), atom_counts[resname]] for resname in atom_counts]
     rows.append(["total", sum(molecule_counts.values()), len(result.frame.atoms)])
     return rows
@@ -2190,6 +2211,7 @@ def summary_dashboard_table(data: pd.DataFrame, run_info: dict[str, Any], config
         ["Working directory", run_info.get("working_dir", "")],
         ["Input", run_info.get("input", "")],
         ["Matched files", matched_files],
+        ["Input format", run_info.get("input_format", "")],
     ]
     if matched_count > 1:
         rows.extend([
@@ -2216,6 +2238,14 @@ def summary_dashboard_table(data: pd.DataFrame, run_info: dict[str, Any], config
     if not cpp_mode:
         rows.append(["Ring report sizes", excel_scalar(configured_ring_report_sizes(config))])
     rows.append(["Ring definition", config.get("ring", {}).get("definition", "chordless")])
+    rows.append(["Trajectory stride", run_info.get("trajectory_stride", 1)])
+    if str(run_info.get("input_format", "")).startswith("lammps-"):
+        rows.extend([
+            ["LAMMPS units", run_info.get("lammps_units", "")],
+            ["LAMMPS timestep", run_info.get("lammps_timestep", "")],
+            ["LAMMPS atom style", run_info.get("lammps_atom_style", "")],
+            ["LAMMPS type map", run_info.get("lammps_type_map_source", "")],
+        ])
     if not cpp_mode:
         rows.extend([
             ["Quasi-cage sizes", f"{excel_scalar(config.get('quasi_cage', {}).get('base_sizes', 'auto'))} / {excel_scalar(config.get('quasi_cage', {}).get('side_sizes', 'auto'))}"],

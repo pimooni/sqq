@@ -21,8 +21,23 @@ def selected_residue_groups(
     atoms: list[Atom],
     resnames: set[str],
 ) -> list[tuple[str, int, list[int]]]:
-    """Group contiguous selected residues without merging wrapped residue ids."""
+    """Group selected residues using source-specific molecule identity."""
     selected = normalize_names(resnames)
+    molecule_ids = [atom.molecule_id for atom in atoms]
+    if any(value is not None for value in molecule_ids):
+        if any(value is None for value in molecule_ids):
+            raise ValueError("Atom records mix explicit and implicit molecule identities.")
+        grouped: dict[tuple[str, int], list[int]] = {}
+        for atom in atoms:
+            key = (normalize_name(atom.resname), int(atom.molecule_id))
+            if key[0] in selected:
+                grouped.setdefault(key, []).append(atom.index)
+        return [
+            (resname, molecule_id, indices)
+            for (resname, molecule_id), indices in grouped.items()
+        ]
+
+    # GRO residue ids can wrap, so implicit molecules remain contiguous blocks.
     groups: list[tuple[str, int, list[int]]] = []
     current_key: tuple[str, int] | None = None
     current_indices: list[int] = []
