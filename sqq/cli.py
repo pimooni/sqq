@@ -51,7 +51,7 @@ Examples:
   sqq analyze -i "./gro/*.gro" -o ./result_sqq
   sqq analyze -i traj.xtc --top topol.gro -c config.yaml -o ./result_sqq
   sqq analyze -i ./gro -m 00 -b hbond -w 4 --order-parameter f3,f4,q6 -o ./result_sqq
-  sqq analyze -i traj.lammpstrj --top system.data -c lammps.yaml -o ./result_sqq
+  sqq analyze -i traj.lammpstrj -t system.data -o ./result_sqq
   sqq analyze -i md.gro --output-type info,cage-gro,summary-xlsx -o ./result_sqq
   sqq analyze -i md.gro -s 4,5,6 --cage-size H -o ./result_sqq_h
   sqq analyze -i md.gro -s 4,5,6 --find-cluster on -o ./result_sqq_cluster
@@ -97,7 +97,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     analyze_parser.add_argument("-i", "--input", metavar="INPUT", required=True, help="Input file or directory (.gro/.xyz/.xtc/.trr/.dump/.lammpstrj/.dcd).")
     analyze_parser.add_argument("--pattern", metavar="PATTERN", help='Input pattern when --input is a directory; default "*.gro".')
-    analyze_parser.add_argument("--top", "--topology", metavar="TOPOLOGY", dest="topology", help="GRO topology for XTC/TRR or LAMMPS DATA topology for dump/DCD input.")
+    analyze_parser.add_argument("-t", "--top", "--topology", metavar="TOPOLOGY", dest="topology", help="GRO topology for XTC/TRR or LAMMPS DATA topology for dump/DCD input.")
     analyze_parser.add_argument("--xyz-scale", metavar="SCALE", type=float, help="Multiply XYZ coordinates by SCALE to obtain nm; default 0.1 assumes angstrom input.")
     analyze_parser.add_argument("--trajectory-stride", metavar="N", type=int, help="Read every Nth trajectory frame; default 1.")
     analyze_parser.add_argument(

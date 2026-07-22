@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
+import re
 from typing import Any
 
 import numpy as np
@@ -459,52 +460,435 @@ def close_lammps_universe(universe) -> None:
         close()
 
 
+def inspect_lammps_topology_mapping(
+    topology: Path,
+    config: Mapping[str, Any] | LammpsInputConfig,
+) -> tuple[dict[str, LammpsTypeMapEntry], bool]:
+    """Resolve the explicit or inferred DATA mapping for run provenance."""
+    settings = normalize_lammps_config(config)
+    if settings.type_map:
+        return dict(settings.type_map), False
+    topology_path = _required_topology(topology)
+    validate_lammps_data_box(topology_path, settings)
+    try:
+        import MDAnalysis as mda
+    except ImportError as exc:
+        raise RuntimeError("Reading LAMMPS trajectories requires MDAnalysis.") from exc
+    universe = mda.Universe(
+        str(topology_path),
+        topology_format="DATA",
+        atom_style=settings.atom_style,
+    )
+    try:
+        lammps_atom_metadata(universe, settings)
+        resolved = getattr(universe, "_sqq_lammps_resolved_type_map", None)
+        if not isinstance(resolved, dict) or not resolved:
+            raise RuntimeError("Automatic LAMMPS type inference produced no mapping.")
+        rebuilt = bool(getattr(universe, "_sqq_lammps_rebuilt_molecules", False))
+        return dict(resolved), rebuilt
+    finally:
+        close_lammps_universe(universe)
+
+
 def lammps_atom_metadata(
     universe,
     config: Mapping[str, Any] | LammpsInputConfig,
 ) -> tuple[tuple[int, int, str, str, int], ...]:
     """Build immutable SQQ metadata in sorted LAMMPS atom-ID order."""
     settings = normalize_lammps_config(config)
-    if not settings.type_map:
-        raise ValueError(
-            "LAMMPS input requires a non-empty type_map; every numeric atom type "
-            "must map to resname/atomname or explicit ignore."
-        )
-    raw: list[tuple[int, int, str]] = []
+    raw: list[tuple[int, int, int, str, float]] = []
     for atom in universe.atoms:
-        raw.append((int(atom.id), int(atom.resid), _numeric_type_key(atom.type)))
-    raw.sort(key=lambda item: item[0])
-    atom_ids = [item[0] for item in raw]
+        try:
+            mass = float(atom.mass)
+        except (AttributeError, TypeError, ValueError):
+            mass = float("nan")
+        raw.append(
+            (
+                int(atom.index),
+                int(atom.id),
+                int(atom.resid),
+                _numeric_type_key(atom.type),
+                mass,
+            )
+        )
+    raw.sort(key=lambda item: item[1])
+    atom_ids = [item[1] for item in raw]
     if any(item < 1 for item in atom_ids) or len(atom_ids) != len(set(atom_ids)):
         raise ValueError("LAMMPS DATA atom IDs must be positive and unique.")
-    missing = sorted(
-        {type_id for _, _, type_id in raw if type_id not in settings.type_map}, key=int
-    )
+
+    if settings.type_map:
+        metadata = _explicit_lammps_atom_metadata(raw, settings.type_map)
+        setattr(universe, "_sqq_lammps_resolved_type_map", dict(settings.type_map))
+        setattr(universe, "_sqq_lammps_rebuilt_molecules", False)
+        return metadata
+
+    metadata, resolved, rebuilt = _infer_lammps_atom_metadata(universe, raw)
+    setattr(universe, "_sqq_lammps_resolved_type_map", resolved)
+    setattr(universe, "_sqq_lammps_rebuilt_molecules", rebuilt)
+    return metadata
+
+
+def _explicit_lammps_atom_metadata(
+    raw: list[tuple[int, int, int, str, float]],
+    type_map: Mapping[str, LammpsTypeMapEntry],
+) -> tuple[tuple[int, int, str, str, int], ...]:
+    """Apply one complete user-supplied numeric atom-type mapping."""
+    missing = sorted({item[3] for item in raw if item[3] not in type_map}, key=int)
     if missing:
         raise ValueError(f"LAMMPS type_map is missing atom type(s): {', '.join(missing)}.")
     molecule_resnames: dict[int, set[str]] = {}
-    for _, resid, type_id in raw:
-        entry = settings.type_map[type_id]
+    for _, _, resid, type_id, _ in raw:
+        entry = type_map[type_id]
         if entry.ignore:
             continue
         if resid < 1:
             raise ValueError("Mapped LAMMPS atoms require positive molecule IDs.")
         molecule_resnames.setdefault(resid, set()).add(entry.resname)
-    conflicts = sorted(str(resid) for resid, names in molecule_resnames.items() if len(names) > 1)
+    conflicts = sorted(
+        str(resid) for resid, names in molecule_resnames.items() if len(names) > 1
+    )
     if conflicts:
-        raise ValueError("LAMMPS molecule IDs map to multiple residue names: " + ", ".join(conflicts))
-
+        raise ValueError(
+            "LAMMPS molecule IDs map to multiple residue names: " + ", ".join(conflicts)
+        )
     return tuple(
         (
             index,
             resid,
-            settings.type_map[type_id].resname,
-            settings.type_map[type_id].atomname,
+            type_map[type_id].resname,
+            type_map[type_id].atomname,
             atom_id,
         )
-        for index, (atom_id, resid, type_id) in enumerate(raw)
+        for index, (_, atom_id, resid, type_id, _) in enumerate(raw)
     )
 
+
+def _infer_lammps_atom_metadata(
+    universe,
+    raw: list[tuple[int, int, int, str, float]],
+) -> tuple[
+    tuple[tuple[int, int, str, str, int], ...],
+    dict[str, LammpsTypeMapEntry],
+    bool,
+]:
+    """Infer strict H2O/CH4 roles from DATA masses, labels, and Bonds."""
+    record_by_index = {item[0]: item for item in raw}
+    if len(record_by_index) != len(raw):
+        raise ValueError("LAMMPS topology contains duplicate internal atom indexes.")
+    elements = _infer_lammps_type_elements(universe, raw)
+    adjacency = _lammps_bond_adjacency(universe, set(record_by_index))
+
+    molecule_groups: dict[int, list[int]] = {}
+    valid_molecule_ids = True
+    for atom_index, _, resid, _, _ in raw:
+        if resid < 1:
+            valid_molecule_ids = False
+            break
+        molecule_groups.setdefault(resid, []).append(atom_index)
+
+    assignment: dict[int, tuple[int, str, str]] | None = None
+    molecule_error = "missing positive molecule IDs"
+    if valid_molecule_ids:
+        try:
+            ordered_molecule_ids = sorted(molecule_groups)
+            assignment = _classify_lammps_partition(
+                [molecule_groups[molecule_id] for molecule_id in ordered_molecule_ids],
+                record_by_index,
+                elements,
+                adjacency,
+                molecule_ids=ordered_molecule_ids,
+            )
+        except ValueError as exc:
+            molecule_error = str(exc)
+
+    rebuilt = assignment is None
+    if assignment is None:
+        components = _lammps_bond_components(record_by_index, adjacency)
+        try:
+            assignment = _classify_lammps_partition(
+                components,
+                record_by_index,
+                elements,
+                adjacency,
+                molecule_ids=list(range(1, len(components) + 1)),
+            )
+        except ValueError as exc:
+            raise ValueError(
+                "Cannot infer LAMMPS water/methane atom roles from DATA topology. "
+                f"Molecule-ID partition failed ({molecule_error}); Bonds partition "
+                f"failed ({exc}). Provide input.lammps.type_map explicitly."
+            ) from exc
+
+    roles_by_type: dict[str, set[tuple[str, str]]] = {}
+    for atom_index, (_, resname, atomname) in assignment.items():
+        type_id = record_by_index[atom_index][3]
+        roles_by_type.setdefault(type_id, set()).add((resname, atomname))
+    conflicts = {
+        type_id: sorted(roles)
+        for type_id, roles in roles_by_type.items()
+        if len(roles) != 1
+    }
+    if conflicts:
+        details = "; ".join(
+            f"type {type_id}: "
+            + ", ".join(f"{resname}/{atomname}" for resname, atomname in roles)
+            for type_id, roles in sorted(conflicts.items(), key=lambda item: int(item[0]))
+        )
+        raise ValueError(
+            "Automatic LAMMPS mapping is ambiguous because one numeric atom type "
+            f"has multiple molecular roles ({details}). Split the atom types or "
+            "provide input.lammps.type_map explicitly."
+        )
+    resolved = {
+        type_id: LammpsTypeMapEntry(resname=next(iter(roles))[0], atomname=next(iter(roles))[1])
+        for type_id, roles in sorted(roles_by_type.items(), key=lambda item: int(item[0]))
+    }
+    metadata = tuple(
+        (
+            index,
+            assignment[atom_index][0],
+            assignment[atom_index][1],
+            assignment[atom_index][2],
+            atom_id,
+        )
+        for index, (atom_index, atom_id, _, _, _) in enumerate(raw)
+    )
+    return metadata, resolved, rebuilt
+
+
+def _infer_lammps_type_elements(
+    universe,
+    raw: list[tuple[int, int, int, str, float]],
+) -> dict[str, str]:
+    """Resolve H/O/C element roles by type, using DATA labels before masses."""
+    labels = _lammps_data_type_labels(Path(str(universe.filename)))
+    masses: dict[str, set[float]] = {}
+    for _, _, _, type_id, mass in raw:
+        if np.isfinite(mass):
+            masses.setdefault(type_id, set()).add(round(mass, 8))
+    elements: dict[str, str] = {}
+    for type_id in sorted({item[3] for item in raw}, key=int):
+        label_element = _element_from_lammps_label(labels.get(type_id, ""))
+        if label_element is not None:
+            elements[type_id] = label_element
+            continue
+        values = masses.get(type_id, set())
+        if len(values) != 1:
+            raise ValueError(
+                f"LAMMPS atom type {type_id} lacks one finite DATA mass; "
+                "provide input.lammps.type_map explicitly."
+            )
+        mass = next(iter(values))
+        candidates = [
+            element
+            for element, reference, tolerance in (
+                ("H", 1.008, 0.35),
+                ("C", 12.011, 0.75),
+                ("O", 15.9994, 0.75),
+            )
+            if abs(mass - reference) <= tolerance
+        ]
+        if len(candidates) != 1:
+            raise ValueError(
+                f"LAMMPS atom type {type_id} with mass {mass:g} is not an "
+                "unambiguous H/O/C type; provide input.lammps.type_map explicitly."
+            )
+        elements[type_id] = candidates[0]
+    return elements
+
+
+def _lammps_data_type_labels(path: Path) -> dict[str, str]:
+    """Read optional Masses/Atoms comments used to disambiguate DATA types."""
+    if not path.exists():
+        return {}
+    labels: dict[str, set[str]] = {}
+    section = ""
+    with path.open("r", encoding="utf-8-sig", errors="replace") as handle:
+        for raw_line in handle:
+            stripped = raw_line.strip()
+            if stripped.startswith("Masses"):
+                section = "masses"
+                continue
+            if stripped.startswith("Atoms"):
+                section = "atoms"
+                continue
+            if section and stripped and stripped[0].isalpha():
+                section = ""
+            if section not in {"masses", "atoms"} or "#" not in raw_line:
+                continue
+            body, comment = raw_line.split("#", 1)
+            fields = body.split()
+            if section == "masses" and len(fields) >= 2:
+                type_id = _optional_numeric_type_key(fields[0])
+            elif section == "atoms" and len(fields) >= 3:
+                type_id = _optional_numeric_type_key(fields[2])
+            else:
+                continue
+            if type_id is None:
+                continue
+            label = comment.lstrip("#").strip().split()
+            if label:
+                labels.setdefault(type_id, set()).add(label[0])
+    result: dict[str, str] = {}
+    for type_id, values in labels.items():
+        elements = {_element_from_lammps_label(value) for value in values}
+        elements.discard(None)
+        if len(elements) == 1:
+            result[type_id] = next(iter(values))
+        elif len(elements) > 1:
+            raise ValueError(
+                f"LAMMPS DATA comments assign conflicting elements to atom type {type_id}."
+            )
+    return result
+
+
+def _optional_numeric_type_key(value: Any) -> str | None:
+    try:
+        return _numeric_type_key(value)
+    except ValueError:
+        return None
+
+
+def _element_from_lammps_label(value: str) -> str | None:
+    token = re.sub(r"[^a-z0-9]+", "", str(value).strip().lower())
+    if token in {"h", "hw", "h1", "h2", "htip", "mhc", "hydrogen"}:
+        return "H"
+    if token in {"c", "ct", "mch", "ch4", "methane", "carbon"}:
+        return "C"
+    if token in {"o", "ow", "oh2", "otip", "oxygen"}:
+        return "O"
+    return None
+
+
+def _lammps_bond_adjacency(
+    universe,
+    atom_indexes: set[int],
+) -> dict[int, set[int]]:
+    adjacency = {index: set() for index in atom_indexes}
+    from MDAnalysis.exceptions import NoDataError
+
+    try:
+        bond_indexes = np.asarray(universe.bonds.indices, dtype=int)
+    except (AttributeError, NoDataError):
+        bond_indexes = np.empty((0, 2), dtype=int)
+    for pair in bond_indexes:
+        if len(pair) != 2:
+            raise ValueError("LAMMPS DATA contains an invalid bond record.")
+        left, right = int(pair[0]), int(pair[1])
+        if left == right or left not in adjacency or right not in adjacency:
+            raise ValueError("LAMMPS DATA contains an invalid bond atom reference.")
+        adjacency[left].add(right)
+        adjacency[right].add(left)
+    return adjacency
+
+
+def _lammps_bond_components(
+    record_by_index: Mapping[int, tuple[int, int, int, str, float]],
+    adjacency: Mapping[int, set[int]],
+) -> list[list[int]]:
+    components: list[list[int]] = []
+    visited: set[int] = set()
+    atom_id = {index: record[1] for index, record in record_by_index.items()}
+    for start in sorted(record_by_index, key=atom_id.get):
+        if start in visited:
+            continue
+        stack = [start]
+        visited.add(start)
+        component: list[int] = []
+        while stack:
+            current = stack.pop()
+            component.append(current)
+            for neighbor in adjacency[current]:
+                if neighbor not in visited:
+                    visited.add(neighbor)
+                    stack.append(neighbor)
+        components.append(sorted(component, key=atom_id.get))
+    return components
+
+
+def _classify_lammps_partition(
+    groups: list[list[int]],
+    record_by_index: Mapping[int, tuple[int, int, int, str, float]],
+    elements_by_type: Mapping[str, str],
+    adjacency: Mapping[int, set[int]],
+    *,
+    molecule_ids: list[int],
+) -> dict[int, tuple[int, str, str]]:
+    if len(groups) != len(molecule_ids):
+        raise ValueError("internal molecule partition length mismatch")
+    atom_id = {index: record[1] for index, record in record_by_index.items()}
+    paired = sorted(
+        zip(groups, molecule_ids, strict=True),
+        key=lambda item: min(atom_id[index] for index in item[0]),
+    )
+    assignment: dict[int, tuple[int, str, str]] = {}
+    for group, molecule_id in paired:
+        if not group:
+            raise ValueError("empty molecule group")
+        roles = _classify_lammps_component(
+            group,
+            record_by_index,
+            elements_by_type,
+            adjacency,
+        )
+        for atom_index, (resname, atomname) in roles.items():
+            assignment[atom_index] = (int(molecule_id), resname, atomname)
+    if len(assignment) != len(record_by_index):
+        raise ValueError("molecule partition does not cover every DATA atom")
+    return assignment
+
+
+def _classify_lammps_component(
+    group: list[int],
+    record_by_index: Mapping[int, tuple[int, int, int, str, float]],
+    elements_by_type: Mapping[str, str],
+    adjacency: Mapping[int, set[int]],
+) -> dict[int, tuple[str, str]]:
+    nodes = set(group)
+    for node in nodes:
+        if any(neighbor not in nodes for neighbor in adjacency[node]):
+            raise ValueError("a DATA bond crosses molecule IDs")
+    by_element: dict[str, list[int]] = {}
+    for node in group:
+        element = elements_by_type[record_by_index[node][3]]
+        by_element.setdefault(element, []).append(node)
+    edges = {
+        tuple(sorted((left, right)))
+        for left in nodes
+        for right in adjacency[left]
+        if left < right and right in nodes
+    }
+
+    if len(group) == 3 and len(by_element.get("O", ())) == 1 and len(by_element.get("H", ())) == 2:
+        oxygen = by_element["O"][0]
+        expected = {tuple(sorted((oxygen, hydrogen))) for hydrogen in by_element["H"]}
+        if edges != expected:
+            raise ValueError("a candidate H2O molecule does not contain exactly two O-H bonds")
+        return {
+            node: ("SOL", "OW" if node == oxygen else "HW")
+            for node in group
+        }
+
+    if len(group) == 5 and len(by_element.get("C", ())) == 1 and len(by_element.get("H", ())) == 4:
+        carbon = by_element["C"][0]
+        expected = {tuple(sorted((carbon, hydrogen))) for hydrogen in by_element["H"]}
+        if edges != expected:
+            raise ValueError("a candidate CH4 molecule does not contain exactly four C-H bonds")
+        return {
+            node: ("MET", "C" if node == carbon else "H")
+            for node in group
+        }
+
+    if len(group) == 1 and len(by_element.get("C", ())) == 1 and not edges:
+        return {group[0]: ("MET", "C")}
+
+    composition = ", ".join(
+        f"{element}:{len(indexes)}" for element, indexes in sorted(by_element.items())
+    )
+    raise ValueError(
+        f"unsupported molecule composition ({composition or 'unknown'}, "
+        f"{len(edges)} bonds)"
+    )
 
 def frame_from_lammps_universe(
     universe,

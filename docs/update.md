@@ -2,6 +2,54 @@
 
 This file records versioned update notes. New releases should be appended above older entries.
 
+## Version 0.3.3
+
+### Short Summary
+
+Version 0.3.3 adds `-t` as the short topology option, makes `input.lammps.type_map` optional for unambiguous standard water/methane DATA topologies, and replaces the generated VMD renderer's category commands with compact object-based `show` and `color` commands. The renderer starts with `sqq show all` and uses a fixed cage-topology layer priority so shared-edge colors no longer depend on argument order or VMD ColorID. Explicit LAMMPS mappings remain authoritative, and both SQQ-Py and SQQ-CPP consume the same resolved mapping. Package and native-core version metadata are synchronized at `0.3.3`, released Jul 22, 2026.
+
+### Main Changes
+
+1. Automatic LAMMPS atom-type mapping
+   - When `input.lammps.type_map` is absent or empty, SQQ derives H/O/C candidates from DATA masses and type comments, then validates molecule graphs from DATA Bonds.
+   - Automatic water recognition requires exactly one O plus two H atoms and two O-H bonds; automatic all-atom methane recognition requires exactly one C plus four H atoms and four C-H bonds. A clearly carbon-labeled unbonded singleton is accepted as a united-atom methane guest.
+   - Valid DATA molecule IDs are retained. Invalid shared IDs are rebuilt deterministically only when all Bonds components have unique supported identities; the fallback is reported explicitly.
+   - One numeric atom type must have one consistent inferred role. Ambiguous masses, conflicting roles, unsupported molecule compositions, or insufficient topology evidence fail before analysis and request an explicit map.
+   - A non-empty user `type_map` always takes priority and retains the existing strict complete-map validation.
+   - The inferred map and provenance are written to `run_config.yaml`, per-frame info, and main-summary configuration. The inference runs in the shared Python LAMMPS adapter, so SQQ-Py and SQQ-CPP receive identical normalized atoms and frames.
+   - The default `guest.center_atoms` now maps `MET` to atom name `C`. Automatically inferred single-site and all-atom LAMMPS methane therefore use the carbon atom as the guest center; multi-atom methane no longer falls back to a whole-residue centroid for cage occupancy.
+
+2. Topology CLI alias
+   - Added `-t` as the short form of `--top` / `--topology`.
+   - Unambiguous standard LAMMPS input can now run directly as `sqq analyze -i traj.lammpstrj -t system.data -m 99` without `-c`.
+
+3. Version metadata
+   - Updated the Python package and native-core version to `0.3.3`.
+   - Updated root help and `sqq -v` / `sqq --version` to report `Release date: Jul 22, 2026`.
+   - Updated CMake and wheel-publish native-version checks to require `0.3.3`.
+
+4. VMD object commands
+   - Replaced the former `sqq cage`, `sqq phase`, `sqq cluster`, and `sqq domain` commands in newly generated render scripts with `sqq show <object...>`. `sqq show all` is the startup all-cage view; `phase`, `cluster`, and `domain` remain whole-category targets, while `sqq show cage` is rejected.
+   - Added automatic object recognition for registered cage labels, delimiter-free generic-cage aliases such as `4151062`, full frame-local cage IDs, phase labels, cluster IDs, and domain IDs. Multiple explicit selections are accepted within one family.
+   - Added `sqq color <object> <color>`, accepting a VMD color name, ColorID, or `default`. Overrides do not depend on the current selection and remain active across show and frame changes in the current VMD session.
+   - Reconstructed `51262_00053`, `cluster_00001`, and `domain_00001` names from compact GRO annotations. Such numeric IDs remain frame-local rather than tracked physical identities.
+   - Cage objects are grouped by topology layer and effective ColorID. Nonstandard cages render below the fixed standard priority `512 < 51262 < 51263 < 51264 < 435663 < 51268`; explicit or recolored cage IDs render as final highlight layers. Reversing `show` arguments or changing colors does not change this order.
+   - Kept a single layer at a 0.125 angstrom DynamicBonds radius (0.250 angstrom diameter) and distributed multi-type layers over 0.125–0.130 angstrom, preventing coincident higher-priority cage edges from being hidden.
+   - Removed the duplicate cage-type atom-membership lists from Tcl state and deduplicated phase/cluster/domain atom lists per frame, reducing renderer memory without changing selected atoms.
+   - Added a trajectory-wide object registry so misspelled cage, cage-ID, cluster-ID, and domain-ID targets fail instead of silently selecting nothing.
+   - Coalesced rapid frame callbacks, preserved user-created VMD representations by tracking only SQQ-owned stable representation names, and reset pending/color state when a script is sourced again.
+   - Retained color-override specificity for phase/cluster/domain objects while separating cage color choice from cage topology priority.
+   - Kept the annotation format and scientific cage/cluster results unchanged.
+   - Focused Tcl tests cover `show all`, rejection of `show cage`, argument-order invariance, fixed standard cage order, bounded layer radii, exact-ID highlights, generic-cage aliases, object parsing, mixed-family rejection, and named/numeric/default colors.
+
+### Compatibility
+
+- Existing explicit LAMMPS type maps and the long `--top` / `--topology` options retain their behavior.
+- Automatic inference changes input setup only; a successfully inferred map represents the same atoms as the equivalent explicit map and does not alter cage algorithms, mode presets, or output defaults.
+- Non-water/methane, ambiguous, or incomplete DATA topologies still require an explicit YAML mapping.
+- Newly generated `sqq-render.vmd.tcl` files use the new object command interface. Automation written for the 0.3.2 direct category commands must use `sqq show all`, `sqq show phase`, `sqq show cluster`, or `sqq show domain`; `sqq show cage` is not retained as an alias.
+- The Tcl command change affects visualization control only; GRO annotations, cage detection, classification, counts, and other scientific outputs are unchanged.
+
 ## Version 0.3.2
 
 ### Short Summary

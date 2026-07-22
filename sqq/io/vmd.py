@@ -585,20 +585,34 @@ def _atomic_write_text(path: Path, text: str, *, encoding: str) -> None:
 
 _VMD_SCRIPT = r'''# SQQ annotated cage renderer for VMD.
 namespace eval ::SQQ {
+    catch {trace remove variable ::vmd_frame write ::SQQ::frame_changed}
+    if {[info exists frame_after_id] && $frame_after_id ne ""} {
+        catch {after cancel $frame_after_id}
+    }
     variable molid -1
     variable gro_path ""
-    variable current_mode cage
+    variable current_family cage
+    variable current_targets {{cage cage *}}
+    variable representation_names {}
+    variable frame_after_id ""
     variable group_keys
     variable group_atoms
     variable graph_mode
-    array set group_keys {}
-    array set group_atoms {}
-    array set graph_mode {}
+    variable color_overrides
+    variable known_objects
+    variable object_aliases
+    variable cage_types
+    foreach name {group_keys group_atoms graph_mode color_overrides known_objects object_aliases cage_types} {
+        catch {array unset $name}
+        array set $name {}
+    }
 }
 
 proc ::SQQ::add_member {frame mode key atom_index} {
     variable group_keys
     variable group_atoms
+    variable known_objects
+    set known_objects($mode,$key) 1
     set group_key "$frame,$mode"
     set atom_key "$frame,$mode,$key"
     if {![info exists group_atoms($atom_key)]} {
@@ -608,15 +622,80 @@ proc ::SQQ::add_member {frame mode key atom_index} {
     lappend group_atoms($atom_key) $atom_index
 }
 
+proc ::SQQ::register_object {mode key} {
+    variable known_objects
+    set known_objects($mode,$key) 1
+}
+
+proc ::SQQ::register_cage {cage_type object_id} {
+    variable object_aliases
+    variable cage_types
+    ::SQQ::register_object cage $cage_type
+    ::SQQ::register_object cage-id $object_id
+    set cage_types($object_id) $cage_type
+    set compact [string map [list "^" "" "-" "" "_" ""] $cage_type]
+    if {$compact ne $cage_type} {
+        set object_aliases(cage,$compact) $cage_type
+        set suffix [string range $object_id [string length $cage_type] end]
+        set object_aliases(cage-id,${compact}${suffix}) $object_id
+    }
+}
+
+proc ::SQQ::deduplicate_frame_memberships {frame} {
+    variable group_keys
+    variable group_atoms
+    foreach mode {phase cluster domain} {
+        set group_key "$frame,$mode"
+        if {![info exists group_keys($group_key)]} { continue }
+        foreach key $group_keys($group_key) {
+            set atom_key "$frame,$mode,$key"
+            set group_atoms($atom_key) [lsort -integer -unique $group_atoms($atom_key)]
+        }
+    }
+}
+
+proc ::SQQ::numbered_id {prefix value} {
+    if {[regexp {^[0-9]+$} $value]} {
+        scan $value %d number
+        return [format "%s_%05d" $prefix $number]
+    }
+    return [string tolower $value]
+}
+
+proc ::SQQ::cage_object_id {cage_type cage_id} {
+    if {[regexp {^[0-9]+$} $cage_id]} {
+        scan $cage_id %d number
+        return [format "%s_%05d" $cage_type $number]
+    }
+    return "${cage_type}_$cage_id"
+}
+
+proc ::SQQ::cage_type_from_object_id {object_id} {
+    variable cage_types
+    if {[info exists cage_types($object_id)]} {
+        return $cage_types($object_id)
+    }
+    if {[regexp {^(.+)_([0-9]+)$} $object_id -> cage_type number]} {
+        return $cage_type
+    }
+    return ""
+}
+
 proc ::SQQ::read_annotations {path} {
     variable group_keys
     variable group_atoms
     variable graph_mode
+    variable known_objects
+    variable object_aliases
+    variable cage_types
     array unset group_keys
     array unset group_atoms
     array unset graph_mode
+    array unset known_objects
+    array unset object_aliases
+    array unset cage_types
     set handle [open $path r]
-    fconfigure $handle -encoding ascii -translation lf
+    fconfigure $handle -encoding ascii -translation auto
     set frame 0
     while {[gets $handle title] >= 0} {
         if {[regexp {graph=(.*)$} $title -> graph_value]} {
@@ -649,16 +728,20 @@ proc ::SQQ::read_annotations {path} {
                 }
                 lassign $fields cage_id cage_type phase domain_id cluster_id
                 if {$cage_type ne "-"} {
-                    ::SQQ::add_member $frame cage $cage_type $atom_index
+                    set object_id [::SQQ::cage_object_id $cage_type $cage_id]
+                    ::SQQ::register_cage $cage_type $object_id
+                    ::SQQ::add_member $frame cage-id $object_id $atom_index
                 }
                 if {$phase ne "-"} {
                     ::SQQ::add_member $frame phase $phase $atom_index
                 }
                 if {$cluster_id ne "-"} {
-                    ::SQQ::add_member $frame cluster $cluster_id $atom_index
+                    set key [::SQQ::numbered_id cluster $cluster_id]
+                    ::SQQ::add_member $frame cluster $key $atom_index
                 }
                 if {$domain_id ne "-"} {
-                    ::SQQ::add_member $frame domain $domain_id $atom_index
+                    set key [::SQQ::numbered_id domain $domain_id]
+                    ::SQQ::add_member $frame domain $key $atom_index
                 }
             }
         }
@@ -666,6 +749,7 @@ proc ::SQQ::read_annotations {path} {
             close $handle
             error "Missing box record in sqq-cage.gro frame $frame"
         }
+        ::SQQ::deduplicate_frame_memberships $frame
         incr frame
     }
     close $handle
@@ -674,7 +758,7 @@ proc ::SQQ::read_annotations {path} {
 
 proc ::SQQ::key_rank {mode key} {
     if {$mode eq "cage"} {
-        set order {512 51262 51263 51264 51268 435663}
+        set order {512 51262 51263 51264 435663 51268}
         set position [lsearch -exact $order $key]
         if {$position >= 0} { return $position }
         return 100
@@ -698,6 +782,74 @@ proc ::SQQ::ordered_keys {mode keys} {
         lappend output [lindex $item 1]
     }
     return $output
+}
+
+proc ::SQQ::standard_cage_rank {cage_type} {
+    set order {512 51262 51263 51264 435663 51268}
+    set position [lsearch -exact $order $cage_type]
+    if {$position < 0} { return 0 }
+    return [expr {$position + 1}]
+}
+
+proc ::SQQ::generic_cage_rank {cage_type} {
+    set total_faces 0
+    set ring_kinds 0
+    set fields [regexp -all -inline {([0-9]+)\^([0-9]+)} $cage_type]
+    for {set index 0} {$index < [llength $fields]} {incr index 3} {
+        set count [lindex $fields [expr {$index + 2}]]
+        if {[string is integer -strict $count]} {
+            set total_faces [expr {$total_faces + $count}]
+            incr ring_kinds
+        }
+    }
+    return [list $total_faces $ring_kinds]
+}
+
+proc ::SQQ::cage_render_key {object_id color_priority color_id explicit} {
+    set cage_type [::SQQ::cage_type_from_object_id $object_id]
+    set exact [expr {$explicit || $color_priority == 3}]
+    set standard_rank [::SQQ::standard_cage_rank $cage_type]
+    if {$standard_rank > 0} {
+        set standard 1
+        set primary $standard_rank
+        set secondary 0
+    } else {
+        set standard 0
+        lassign [::SQQ::generic_cage_rank $cage_type] primary secondary
+    }
+    set exact_id [expr {$exact ? $object_id : ""}]
+    return [list $exact $standard $primary $secondary $cage_type $exact_id $color_id]
+}
+
+proc ::SQQ::compare_cage_render_keys {left right} {
+    foreach index {0 1 2 3} {
+        set left_value [lindex $left $index]
+        set right_value [lindex $right $index]
+        if {$left_value != $right_value} {
+            return [expr {$left_value < $right_value ? -1 : 1}]
+        }
+    }
+    foreach index {4 5} {
+        set comparison [string compare [lindex $left $index] [lindex $right $index]]
+        if {$comparison != 0} { return $comparison }
+    }
+    set left_color [lindex $left 6]
+    set right_color [lindex $right 6]
+    return [expr {$left_color < $right_color ? -1 : ($left_color > $right_color)}]
+}
+
+proc ::SQQ::cage_radius_tier {render_key} {
+    if {[lindex $render_key 0]} { return 7 }
+    if {[lindex $render_key 1]} { return [lindex $render_key 2] }
+    return 0
+}
+
+proc ::SQQ::cage_layer_radius {tier tiers} {
+    set count [llength $tiers]
+    if {$count <= 1} { return 0.125 }
+    set index [lsearch -exact $tiers $tier]
+    set radius [expr {0.125 + 0.005 * $index / double($count - 1)}]
+    return [format "%.3f" $radius]
 }
 
 proc ::SQQ::stable_color {key} {
@@ -737,66 +889,396 @@ proc ::SQQ::color_id {mode key} {
     return [::SQQ::stable_color $key]
 }
 
-proc ::SQQ::clear_representations {} {
-    variable molid
-    if {$molid < 0} { return }
-    set count [molinfo $molid get numreps]
-    for {set rep [expr {$count - 1}]} {$rep >= 0} {incr rep -1} {
-        mol delrep $rep $molid
+proc ::SQQ::default_color_id {source key} {
+    if {$source eq "cage-id"} {
+        set cage_type [::SQQ::cage_type_from_object_id $key]
+        if {$cage_type ne ""} { return [::SQQ::color_id cage $cage_type] }
+        return 2
+    }
+    return [::SQQ::color_id $source $key]
+}
+
+proc ::SQQ::effective_color {source key} {
+    variable color_overrides
+    set exact "$source,$key"
+    if {[info exists color_overrides($exact)]} {
+        if {$color_overrides($exact) eq "default"} {
+            return [list [::SQQ::default_color_id $source $key] 3]
+        }
+        return [list $color_overrides($exact) 3]
+    }
+    set family $source
+    if {$source eq "cage-id"} {
+        set family cage
+        set cage_type [::SQQ::cage_type_from_object_id $key]
+        if {$cage_type ne ""} {
+            set type_key "cage,$cage_type"
+            if {[info exists color_overrides($type_key)]} {
+                if {$color_overrides($type_key) eq "default"} {
+                    return [list [::SQQ::default_color_id $source $key] 2]
+                }
+                return [list $color_overrides($type_key) 2]
+            }
+        }
+    }
+    set category_key "$family,*"
+    if {[info exists color_overrides($category_key)]} {
+        return [list $color_overrides($category_key) 1]
+    }
+    return [list [::SQQ::default_color_id $source $key] 0]
+}
+
+proc ::SQQ::effective_color_id {source key} {
+    return [lindex [::SQQ::effective_color $source $key] 0]
+}
+
+proc ::SQQ::phase_key {value} {
+    set aliases [dict create \
+        si I i I sii II ii II sh H h H \
+        boundary B b B ambiguous A a A \
+        unclassified U u U isolated X x X]
+    set key [string tolower $value]
+    if {[dict exists $aliases $key]} {
+        return [dict get $aliases $key]
+    }
+    return ""
+}
+
+proc ::SQQ::parse_target {value} {
+    variable known_objects
+    variable object_aliases
+    set token [string trim $value]
+    set lower [string tolower $token]
+    if {$lower eq "all"} {
+        return [list cage cage *]
+    }
+    if {$lower in {cage phase cluster domain}} {
+        return [list $lower $lower *]
+    }
+    set phase [::SQQ::phase_key $token]
+    if {$phase ne ""} {
+        return [list phase phase $phase]
+    }
+    foreach source {cage-id cage} {
+        if {[info exists known_objects($source,$token)]} {
+            return [list cage $source $token]
+        }
+        if {[info exists object_aliases($source,$token)]} {
+            return [list cage $source $object_aliases($source,$token)]
+        }
+    }
+    if {[regexp -nocase {^cluster_([0-9]+)$} $token -> number]} {
+        return [list cluster cluster [::SQQ::numbered_id cluster $number]]
+    }
+    if {[regexp -nocase {^domain_([0-9]+)$} $token -> number]} {
+        return [list domain domain [::SQQ::numbered_id domain $number]]
+    }
+    if {[regexp {^([0-9]+)_([0-9]+)$} $token -> cage_type number]} {
+        return [list cage cage-id [::SQQ::cage_object_id $cage_type $number]]
+    }
+    if {[regexp {^[0-9]+$} $token]} {
+        return [list cage cage $token]
+    }
+    error "Unknown SQQ object '$value'"
+}
+
+proc ::SQQ::require_known_target {target} {
+    variable known_objects
+    lassign $target family source key
+    if {$key eq "*" || $source eq "phase"} { return }
+    if {![info exists known_objects($source,$key)]} {
+        set label [::SQQ::target_label $target]
+        error "SQQ object '$label' does not exist in the loaded trajectory"
     }
 }
 
-proc ::SQQ::render {mode} {
+proc ::SQQ::phase_label {key} {
+    switch -- $key {
+        I { return sI }
+        II { return sII }
+        H { return sH }
+        B { return boundary }
+        A { return ambiguous }
+        U { return unclassified }
+        X { return isolated }
+    }
+    return $key
+}
+
+proc ::SQQ::target_label {target} {
+    lassign $target family source key
+    if {$family eq "cage" && $key eq "*"} { return all }
+    if {$key eq "*"} { return $family }
+    if {$source eq "phase"} { return [::SQQ::phase_label $key] }
+    return $key
+}
+
+proc ::SQQ::set_show {values} {
+    variable current_family
+    variable current_targets
+    if {[llength $values] == 0} {
+        error "Usage: sqq show <object> ?object ...?"
+    }
+    set family ""
+    set targets {}
+    foreach value $values {
+        if {[string equal -nocase [string trim $value] cage]} {
+            error "'cage' is not a show target; use 'sqq show all'"
+        }
+        set target [::SQQ::parse_target $value]
+        ::SQQ::require_known_target $target
+        set target_family [lindex $target 0]
+        if {$family eq ""} {
+            set family $target_family
+        } elseif {$target_family ne $family} {
+            error "sqq show cannot mix $family and $target_family objects"
+        }
+        if {$target ni $targets} { lappend targets $target }
+    }
+    if {[llength $targets] > 1} {
+        foreach target $targets {
+            if {[lindex $target 2] eq "*"} {
+                error "A category name must be used alone with sqq show"
+            }
+        }
+    }
+    set current_family $family
+    set current_targets $targets
+    ::SQQ::render_current
+}
+
+proc ::SQQ::color_value {value} {
+    if {[string equal -nocase $value default]} { return default }
+    set names [colorinfo colors]
+    if {[string is integer -strict $value]} {
+        scan $value %d color_id
+        if {$color_id < 0 || $color_id >= [llength $names]} {
+            error "VMD ColorID must be between 0 and [expr {[llength $names] - 1}]"
+        }
+        return $color_id
+    }
+    set color_id [lsearch -nocase -exact $names $value]
+    if {$color_id < 0} {
+        error "Unknown VMD color '$value'"
+    }
+    return $color_id
+}
+
+proc ::SQQ::clear_family_colors {family} {
+    variable color_overrides
+    foreach name [array names color_overrides] {
+        set source [lindex [split $name ,] 0]
+        if {$source eq $family || ($family eq "cage" && $source eq "cage-id")} {
+            unset color_overrides($name)
+        }
+    }
+}
+
+proc ::SQQ::set_color {object color} {
+    variable color_overrides
+    set target [::SQQ::parse_target $object]
+    lassign $target family source key
+    set value [::SQQ::color_value $color]
+    ::SQQ::require_known_target $target
+    if {$key eq "*"} {
+        ::SQQ::clear_family_colors $family
+        if {$value ne "default"} { set color_overrides($family,*) $value }
+    } else {
+        set color_overrides($source,$key) $value
+    }
+    ::SQQ::render_current
+    puts "SQQ color: [::SQQ::target_label $target] -> $color"
+}
+
+proc ::SQQ::track_representation {rep_index} {
     variable molid
-    variable current_mode
+    variable representation_names
+    if {[catch {mol repname $molid $rep_index} name]} { return }
+    if {$name ni $representation_names} { lappend representation_names $name }
+}
+
+proc ::SQQ::adopt_initial_representations {} {
+    variable molid
+    set count [molinfo $molid get numreps]
+    for {set rep 0} {$rep < $count} {incr rep} {
+        ::SQQ::track_representation $rep
+    }
+}
+
+proc ::SQQ::clear_representations {} {
+    variable molid
+    variable representation_names
+    if {$molid < 0} { return }
+    set indexes {}
+    foreach name $representation_names {
+        if {[catch {mol repindex $molid $name} rep]} { continue }
+        if {[string is integer -strict $rep] && $rep >= 0} { lappend indexes $rep }
+    }
+    foreach rep [lsort -integer -decreasing -unique $indexes] {
+        mol delrep $rep $molid
+    }
+    set representation_names {}
+}
+
+proc ::SQQ::expanded_targets {frame targets} {
     variable group_keys
+    set expanded {}
+    foreach target $targets {
+        lassign $target family source key
+        if {$family eq "cage" && $source ne "cage-id"} {
+            set group_key "$frame,cage-id"
+            if {![info exists group_keys($group_key)]} { continue }
+            foreach object_id [lsort -unique $group_keys($group_key)] {
+                if {$key eq "*" || [string match "${key}_*" $object_id]} {
+                    set item [list cage-id $object_id]
+                    if {$item ni $expanded} { lappend expanded $item }
+                }
+            }
+        } elseif {$key eq "*"} {
+            set group_key "$frame,$source"
+            if {![info exists group_keys($group_key)]} { continue }
+            foreach object_key [::SQQ::ordered_keys $source $group_keys($group_key)] {
+                set item [list $source $object_key]
+                if {$item ni $expanded} { lappend expanded $item }
+            }
+        } else {
+            set item [list $source $key]
+            if {$item ni $expanded} { lappend expanded $item }
+        }
+    }
+    return $expanded
+}
+
+proc ::SQQ::compare_render_keys {left right} {
+    lassign $left left_priority left_color
+    lassign $right right_priority right_color
+    if {$left_priority != $right_priority} {
+        return [expr {$left_priority < $right_priority ? -1 : 1}]
+    }
+    return [expr {$left_color < $right_color ? -1 : ($left_color > $right_color)}]
+}
+
+proc ::SQQ::add_dynamic_bonds_representation {indexes color_id radius} {
+    variable molid
+    if {[llength $indexes] == 0} { return 0 }
+    mol representation DynamicBonds 3.5 $radius 12.0
+    mol color ColorID $color_id
+    mol selection "index [join $indexes { }]"
+    mol material Opaque
+    mol addrep $molid
+    set rep_index [expr {[molinfo $molid get numreps] - 1}]
+    ::SQQ::track_representation $rep_index
+    return 1
+}
+
+proc ::SQQ::render_current {} {
+    ::SQQ::cancel_pending_render
+    variable molid
+    variable current_family
+    variable current_targets
     variable group_atoms
     variable graph_mode
-    set mode [string tolower $mode]
-    if {$mode eq "help"} {
-        puts "SQQ commands: sqq cage | phase | cluster | domain | help"
-        return
-    }
-    if {$mode ni {cage phase cluster domain}} {
-        error "Unknown SQQ render mode '$mode'; use: cage, phase, cluster, domain, help"
-    }
-    set current_mode $mode
+    if {$molid < 0 || $molid ni [molinfo list]} { return }
     set frame [molinfo $molid get frame]
     if {[info exists graph_mode($frame)]} {
         puts "SQQ graph: $graph_mode($frame)"
     }
-    set group_key "$frame,$mode"
     ::SQQ::clear_representations
-    if {![info exists group_keys($group_key)]} {
-        puts "SQQ render: no $mode memberships in frame $frame"
-        display update
-        return
-    }
-    foreach key [::SQQ::ordered_keys $mode $group_keys($group_key)] {
-        set atom_key "$frame,$mode,$key"
-        set indexes [lsort -integer -unique $group_atoms($atom_key)]
-        if {[llength $indexes] == 0} { continue }
-        mol representation DynamicBonds 3.5 0.12 12.0
-        mol color ColorID [::SQQ::color_id $mode $key]
-        mol selection "index [join $indexes { }]"
-        mol material Opaque
-        mol addrep $molid
+    set representation_count 0
+    if {$current_family eq "cage"} {
+        array set explicit_ids {}
+        foreach target $current_targets {
+            lassign $target family source key
+            if {$source eq "cage-id"} { set explicit_ids($key) 1 }
+        }
+        array set layer_atoms {}
+        set layer_keys {}
+        foreach item [::SQQ::expanded_targets $frame $current_targets] {
+            lassign $item source key
+            set atom_key "$frame,$source,$key"
+            if {![info exists group_atoms($atom_key)]} { continue }
+            lassign [::SQQ::effective_color $source $key] color_id color_priority
+            set explicit [info exists explicit_ids($key)]
+            set layer_key [::SQQ::cage_render_key $key $color_priority $color_id $explicit]
+            if {![info exists layer_atoms($layer_key)]} {
+                lappend layer_keys $layer_key
+                set layer_atoms($layer_key) {}
+            }
+            foreach atom_index $group_atoms($atom_key) {
+                lappend layer_atoms($layer_key) $atom_index
+            }
+        }
+        set layer_keys [lsort -command ::SQQ::compare_cage_render_keys $layer_keys]
+        set radius_tiers {}
+        foreach layer_key $layer_keys {
+            lappend radius_tiers [::SQQ::cage_radius_tier $layer_key]
+        }
+        set radius_tiers [lsort -integer -unique $radius_tiers]
+        foreach layer_key $layer_keys {
+            set color_id [lindex $layer_key 6]
+            set indexes [lsort -integer -unique $layer_atoms($layer_key)]
+            set tier [::SQQ::cage_radius_tier $layer_key]
+            set radius [::SQQ::cage_layer_radius $tier $radius_tiers]
+            incr representation_count [::SQQ::add_dynamic_bonds_representation $indexes $color_id $radius]
+        }
+    } else {
+        array set color_atoms {}
+        set render_keys {}
+        foreach item [::SQQ::expanded_targets $frame $current_targets] {
+            lassign $item source key
+            set atom_key "$frame,$source,$key"
+            if {![info exists group_atoms($atom_key)]} { continue }
+            lassign [::SQQ::effective_color $source $key] color_id priority
+            set render_key "$priority,$color_id"
+            if {![info exists color_atoms($render_key)]} {
+                lappend render_keys [list $priority $color_id]
+            }
+            foreach atom_index $group_atoms($atom_key) {
+                lappend color_atoms($render_key) $atom_index
+            }
+        }
+        foreach render_key [lsort -command ::SQQ::compare_render_keys $render_keys] {
+            lassign $render_key priority color_id
+            set indexes [lsort -integer -unique $color_atoms($priority,$color_id)]
+            incr representation_count [::SQQ::add_dynamic_bonds_representation $indexes $color_id 0.125]
+        }
     }
     display update
-    puts "SQQ render: $mode (frame $frame)"
+    set labels {}
+    foreach target $current_targets { lappend labels [::SQQ::target_label $target] }
+    if {$representation_count == 0} {
+        puts "SQQ show: no $current_family memberships for [join $labels { }] in frame $frame"
+    } else {
+        puts "SQQ show: [join $labels { }] (frame $frame)"
+    }
+}
+
+proc ::SQQ::cancel_pending_render {} {
+    variable frame_after_id
+    if {$frame_after_id ne ""} {
+        catch {after cancel $frame_after_id}
+        set frame_after_id ""
+    }
+}
+
+proc ::SQQ::render_pending {} {
+    variable frame_after_id
+    set frame_after_id ""
+    ::SQQ::render_current
 }
 
 proc ::SQQ::frame_changed {name1 name2 operation} {
     variable molid
-    variable current_mode
+    variable frame_after_id
     if {$name2 ne "$molid"} { return }
-    after idle [list ::SQQ::render $current_mode]
+    if {$frame_after_id ne ""} { catch {after cancel $frame_after_id} }
+    set frame_after_id [after idle [list ::SQQ::render_pending]]
 }
 
 proc ::SQQ::split_frames {path directory} {
     file mkdir $directory
     set input [open $path r]
-    fconfigure $input -encoding ascii -translation lf
+    fconfigure $input -encoding ascii -translation auto
     set files {}
     set frame 0
     while {[gets $input title] >= 0} {
@@ -836,11 +1318,38 @@ proc ::SQQ::split_frames {path directory} {
     return $files
 }
 
-proc sqq {{mode help} args} {
-    if {[llength $args] != 0} {
-        error "Usage: sqq cage|phase|cluster|domain|help"
+proc ::SQQ::help {} {
+    puts "SQQ commands:"
+    puts "  sqq show all"
+    puts "  sqq show <category>"
+    puts "    category: phase, cluster, domain"
+    puts "  sqq show <object> ?object ...?"
+    puts "  sqq color <object|category> <VMD-color|ColorID|default>"
+    puts "  sqq help"
+    puts "Examples:"
+    puts "  sqq show all"
+    puts "  sqq show 51262"
+    puts "  sqq show 512 51262"
+    puts "  sqq show 51262_00053"
+    puts "  sqq show sI boundary"
+    puts "  sqq color 51262 blue"
+}
+
+proc sqq {{command help} args} {
+    switch -- [string tolower $command] {
+        show { ::SQQ::set_show $args }
+        color {
+            if {[llength $args] != 2} {
+                error "Usage: sqq color <object|category> <VMD-color|ColorID|default>"
+            }
+            ::SQQ::set_color [lindex $args 0] [lindex $args 1]
+        }
+        help {
+            if {[llength $args] != 0} { error "Usage: sqq help" }
+            ::SQQ::help
+        }
+        default { error "Unknown SQQ command '$command'; use show, color, or help" }
     }
-    ::SQQ::render $mode
 }
 
 set ::SQQ::gro_path [file join [file dirname [file normalize [info script]]] "sqq-cage.gro"]
@@ -864,8 +1373,9 @@ set loaded_frames [molinfo $::SQQ::molid get numframes]
 if {$loaded_frames != $parsed_frames} {
     error "SQQ frame count mismatch: parsed $parsed_frames, VMD loaded $loaded_frames"
 }
+::SQQ::adopt_initial_representations
 display projection Orthographic
 catch {trace remove variable ::vmd_frame write ::SQQ::frame_changed}
 trace add variable ::vmd_frame write ::SQQ::frame_changed
-sqq cage
+sqq show all
 '''

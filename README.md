@@ -2,21 +2,17 @@
 
 **SQQ: Python Joint Toolkit for Water-Shell Topology Analysis.**
 
-Current release: **0.3.2**
+Current release: **0.3.3**
 
 SQQ provides the complete SQQ-Py water-shell topology workflow plus the focused SQQ-CPP cage engine. Modes `00` and `50` use SQQ-Py; modes `99` and `cpp` use C++17 for graph, internal ring, cage, occupancy, and F3/F4 analysis. Algorithms are documented in `docs/design.md` and release notes in `docs/update.md`.
 
-## Changed in 0.3.2
+## Changed in 0.3.3
 
-- The modes are now `00`, `50`, `99`, and `cpp`; `09` was removed. Mode `00` is SQQ-Py rigorous (`hbond`, 4/5/6, 100% workers, cluster on); `50` remains the default SQQ-Py mode (`auto`, 4/5/6, 50%, cluster off).
-- Modes `99` and `cpp` select SQQ-CPP. Mode `99` uses `hbond` and 100% workers; `cpp` uses `auto` and 50%. Both reserve one physical core and reject cluster search.
-- Default outputs are mode-specific: `00` uses `info,gro,sqq-cage-gro,sqq-render,summary-xlsx,cluster-gro`; `50` uses `info,sqq-cage-gro,sqq-render,summary-xlsx`; `99` uses `info,gro,sqq-cage-gro,sqq-render,summary-csv`; and `cpp` uses `info,sqq-cage-gro,sqq-render,summary-csv`. Mode `cpp` therefore does **not** write classified `cage-gro` by default.
-- `auto` now selects hydrogen-bond connectivity only when every selected water has usable hydrogen coordinates; partially mapped water topologies resolve to O-O connectivity consistently in both engines.
-- Added strict orthorhombic LAMMPS input through a DATA topology plus dump/lammpstrj or LAMMPS DCD. `real`, `metal`, and `nano` units are normalized to nm/ps, dump rows are restored to DATA atom-ID order, and both engines consume the same normalized frames.
-- Added the run-level `sqq-cage.gro` and `sqq-render.vmd.tcl`. The GRO concatenates complete frames, preserves source atom order, coordinates, box and optional velocities, and stores compact cage/phase/domain/cluster annotations after column 68. VMD defaults to cage rendering; use `sqq cage`, `sqq phase`, `sqq cluster`, or `sqq domain`.
-- Requested `auto` graph mode is shown after resolution as `auto -> hbond`, `auto -> oo`, or `auto -> mixed (hbond: N, oo: N)`.
-- Both engines now always require a connected, closed, trivalent manifold shell before accepting a cage. `--cage-scientific-validation` remains optional and now controls only the additional geometric checks.
-- Package and native-core versions are `0.3.2`, released Jul 20, 2026.
+- Package and native-core versions are synchronized at `0.3.3`, released Jul 22, 2026.
+- Added `-t` as the short form of `--top` / `--topology`.
+- A LAMMPS DATA `type_map` is now optional. When it is absent or empty, SQQ infers only unambiguous standard water, all-atom methane, and labeled single-site methane roles from DATA masses, type comments, and Bonds; invalid shared molecule IDs are rebuilt only when Bonds provide one unique molecular partition. An explicit map remains authoritative, and ambiguous or unsupported topology still fails before analysis.
+- Automatically mapped `MET` guests now use atom name `C` as their default center, preventing multi-atom methane from falling back to a whole-residue centroid for cage occupancy.
+- The generated VMD renderer now uses compact object commands: `sqq show all` is the default all-cage view, `sqq show <object...>` selects cage, phase, cluster, or domain objects automatically, and `sqq color <object> <color>` applies persistent session-local color overrides. Cage-type layers follow one topology-based priority independent of argument order and use bounded `0.125–0.130 Å` radii to keep higher-priority shared edges visible.
 
 ## Install
 
@@ -83,19 +79,19 @@ XTC/TRR trajectory with a topology file:
 sqq analyze -i traj.xtc --top topol.gro -c config.yaml -o ./result_sqq
 ```
 
-LAMMPS dump or DCD with a DATA topology and type mapping in YAML:
+LAMMPS dump or DCD with a DATA topology; standard water/methane types are inferred automatically:
 
 ```bash
-sqq analyze -i traj.lammpstrj --top system.data -c lammps.yaml -o ./result_sqq
+sqq analyze -i traj.lammpstrj -t system.data -o ./result_sqq
 ```
 
 ### Input Units and Boxes
 
 GRO and MDAnalysis trajectory coordinates are interpreted in nm. GRO accepts exactly one frame per file and rejects truncated atom blocks, missing or malformed box lines, extra non-empty records, and non-finite coordinates. Trajectory frames also require finite coordinates. XYZ coordinates are multiplied by `input.xyz_scale` / `--xyz-scale`; the default `0.1` assumes angstrom input, while `1.0` keeps nm values. SQQ accepts exactly one declared XYZ frame per file and rejects truncated, extra, malformed, or non-finite atom records. XYZ has no periodic box unless converted through another format.
 
-GRO atom counts and the mandatory box line are validated. A three-value positive box is orthorhombic; an all-zero box is treated as non-periodic. Nine-value GRO boxes with nonzero tilt terms and trajectory frames with non-90-degree angles are rejected because triclinic minimum-image calculations are not implemented. GRO molecules are formed from contiguous residue blocks in source order, preventing wrapped or repeated residue IDs from merging distinct molecules. LAMMPS molecules instead use explicit DATA molecule IDs, so atom rows may be interleaved.
+GRO atom counts and the mandatory box line are validated. A three-value positive box is orthorhombic; an all-zero box is treated as non-periodic. Nine-value GRO boxes with nonzero tilt terms and trajectory frames with non-90-degree angles are rejected because triclinic minimum-image calculations are not implemented. GRO molecules are formed from contiguous residue blocks in source order, preventing wrapped or repeated residue IDs from merging distinct molecules. LAMMPS normally uses DATA molecule IDs; automatic inference can rebuild them from unambiguous Bonds components, and dump atom rows may be interleaved.
 
-LAMMPS trajectories require `--top system.data` and a non-empty `input.lammps.type_map` mapping every numeric atom type to `resname`/`atomname` or explicit `ignore`. Supported inputs are LAMMPS DATA with `full`, `molecular`, `bond`, or `angle` atom style, fully periodic `pp pp pp` orthorhombic dump boxes, and LAMMPS DCD. Tilted boxes, nonperiodic dump boundaries, `units lj`, missing molecule IDs, incomplete type maps, duplicate IDs, and topology/trajectory ID mismatches fail before analysis. `input.trajectory_stride` applies to XTC, TRR, LAMMPS dump, and LAMMPS DCD.
+LAMMPS trajectories require `-t system.data` (equivalent to `--top` / `--topology`). A non-empty `input.lammps.type_map` explicitly maps every numeric atom type to `resname`/`atomname` or `ignore` and always takes priority. If the map is absent or empty, SQQ uses DATA masses, type comments, and Bonds to infer only unambiguous standard water (`1 O + 2 H`, two O-H bonds), all-atom methane (`1 C + 4 H`, four C-H bonds), and labeled single-site methane mappings. If molecule IDs do not define valid molecules but Bonds do, SQQ rebuilds deterministic molecule IDs and reports that decision. Ambiguous masses, inconsistent reuse of one numeric type, unsupported molecular topology, or insufficient topology evidence fail with a request for an explicit map. The resolved mapping is recorded in `run_config.yaml`, per-frame info, and main-summary configuration. This normalization is shared by SQQ-Py and SQQ-CPP. Supported inputs are LAMMPS DATA with `full`, `molecular`, `bond`, or `angle` atom style, fully periodic `pp pp pp` orthorhombic dump boxes, and LAMMPS DCD. Tilted boxes, nonperiodic dump boundaries, `units lj`, duplicate atom IDs, ambiguous molecule reconstruction, and topology/trajectory ID mismatches fail before analysis. `input.trajectory_stride` applies to XTC, TRR, LAMMPS dump, and LAMMPS DCD.
 
 ## Analysis Modes
 
@@ -255,7 +251,7 @@ input:
     timestep: 1.0
     atom_style: full
     coordinate_convention: auto
-    type_map: {}
+    type_map: {}  # optional override; empty enables strict DATA inference
 
 graph:
   bond_mode: auto
@@ -289,6 +285,14 @@ cage:
   max_face_edge_cv: 0.35
   min_cage_volume_nm3: 1.0e-6
   occupancy_mode: polyhedron
+
+guest:
+  resnames: [CH4, CO2, MET, ETH]
+  center_atoms:
+    CH4: [C]
+    CO2: [C]
+    MET: [C]
+  center_mode: center_atom
 
 hydrate_cluster:
   enabled: false
@@ -388,7 +392,7 @@ Topology validation is always enabled. Every candidate must use each edge exactl
 
 `cage.scientific_validation: false` is the default. When enabled with `--cage-scientific-validation on`, a topologically valid cage must additionally satisfy the configured PBC-aware face-planarity RMS and edge-length coefficient-of-variation limits, nonzero projected face area, and positive minimum triangulated volume. Accepted cages then use the volume centroid instead of the mean cage-water position. Enabling it can therefore remove geometrically distorted cages and can change guest occupancy or geometry-resolved hydrate-cluster edges. The mandatory topology checks can reduce cage, isomer, occupancy, and cluster results relative to earlier 0.3.2 builds that accepted non-manifold shells. Raw ring and half/quasi searches remain unchanged; ownership-filtered free-ring and free-patch outputs can increase when a rejected cage no longer consumes them.
 
-Guest occupancy uses the configured center atom when available. Otherwise, guest atoms are PBC-unwrapped around one molecular anchor before calculating the centroid; the same helper is used by MCG. This correction can intentionally change occupancy counts relative to 0.2.6 or early 0.2.7 results for multi-atom guests crossing a periodic boundary.
+Guest occupancy uses the configured center atom when available. The defaults select `CH4`, `CO2`, `MET`, and `ETH` as guests and map `CH4`, `CO2`, and `MET` to atom name `C`, so these residues use their carbon atom under the default `guest.center_mode: center_atom`. Otherwise, guest atoms are PBC-unwrapped around one molecular anchor before calculating the centroid; the same helper is used by MCG. This correction can intentionally change occupancy counts relative to 0.2.6 or early 0.2.7 results for multi-atom guests crossing a periodic boundary.
 
 ## Hydrate Cluster
 
@@ -465,7 +469,7 @@ References: Barnes et al., MCG ([DOI 10.1063/1.4871898](https://doi.org/10.1063/
 | `--find-cluster VALUE` | `on`, `off` | Override SQQ-Py cluster search; split GRO still requires `cluster-gro` |
 | `--cluster-min-cage N` | Positive integer; default `2` | Minimum connected cage count required for one hydrate_cluster |
 | `--pattern PATTERN` | Glob; default `*.gro` | Select files when `--input` is a directory |
-| `--top, --topology FILE` | GRO for XTC/TRR; LAMMPS DATA for dump/DCD | Supply trajectory topology |
+| `-t, --top, --topology FILE` | GRO for XTC/TRR; LAMMPS DATA for dump/DCD | Supply trajectory topology |
 | `--xyz-scale SCALE` | Positive float; default `0.1` | Multiply XYZ coordinates by this value to obtain nm; use `1.0` for XYZ already in nm |
 | `--trajectory-stride N` | Positive integer; default `1` | Read every Nth trajectory frame |
 | `--lammps-units STYLE` | `real`, `metal`, `nano` | Select LAMMPS units |
@@ -541,7 +545,60 @@ result_sqq/
     test1_info.md
 ```
 
-`sqq-cage.gro` concatenates one complete block per successful frame; atom identity/order must match. Coordinates and boxes remain wrapped exactly as analyzed. Annotations begin at column 69 as `; SQQ1 m=...` and nonmembers use `m=-`. The VMD script temporarily splits the file for loading and deletes the temporary files. Source it, then use `sqq cage`, `sqq phase`, `sqq cluster`, `sqq domain`, or `sqq help`; cage is the default.
+`sqq-cage.gro` concatenates one complete block per successful frame; atom identity/order must match. Coordinates and boxes remain wrapped exactly as analyzed. Annotations begin at column 69 as `; SQQ1 m=...` and nonmembers use `m=-`. The VMD script temporarily splits the file for loading and deletes the temporary files. Source it in VMD; the initial view is `sqq show all`.
+
+```tcl
+source {E:/path/to/result/sqq-render.vmd.tcl}
+```
+
+Keep `sqq-render.vmd.tcl` and `sqq-cage.gro` in the same output directory.
+
+The generated Tcl command uses object names directly:
+
+```tcl
+sqq show all
+sqq show 51262
+sqq show 512 51262
+sqq show 51262_00053
+
+sqq show phase
+sqq show sI boundary
+sqq show cluster
+sqq show cluster_00001
+sqq show domain
+sqq show domain_00001
+
+sqq color 51262 blue
+sqq color 51262_00053 yellow
+sqq color boundary orange
+sqq color cluster_00001 cyan
+sqq color 51262 default
+sqq color all default
+
+sqq help
+```
+
+`show` infers the object family from each name. `sqq show all` shows every cage in the current frame and is the startup view; `cage` is not a `show` target. The bare category names `phase`, `cluster`, and `domain` show every object in their respective categories. Multiple explicit objects are allowed only within one family, such as `512 51262` or `sI boundary`; category targets must be used alone, and mixed-family selections are rejected. Standard cage types use names such as `51262`; generic labels such as `4^1-5^10-6^2` also accept the compact alias `4151062`. Full IDs use forms such as `51262_00053`, `4151062_00001`, `cluster_00001`, or `domain_00001`.
+
+`color` does not depend on the latest `show` command. It accepts one object or category followed by a case-insensitive VMD color name, a valid VMD ColorID, or `default`; `all` is the cage-category color target. An object override remains active when the displayed selection or trajectory frame changes. Coloring a whole category first clears that family's existing category and object overrides, then applies one uniform category color; later object-specific commands can override it. A category-level `default` clears that category's overrides. Colors change only the current VMD session and do not rewrite the GRO or Tcl file.
+
+Rendered cage edges use VMD `DynamicBonds` with a 3.5 angstrom distance cutoff. A single cage layer uses a 0.125 angstrom cylinder radius and therefore a 0.250 angstrom displayed diameter. Multi-type cage views use deterministic radii from 0.125 to 0.130 angstrom: nonstandard cages are below the standard order `512 < 51262 < 51263 < 51264 < 435663 < 51268`, and an explicitly selected or recolored cage ID is the final highlight layer. Argument order and ColorID never change this topology priority.
+
+The renderer manages representations by VMD's stable representation names, so `show`, `color`, and frame changes remove only SQQ-created representations and preserve representations added by the user. Rapid frame notifications are coalesced into one pending redraw. Fully unknown cage, cage-ID, cluster-ID, and domain-ID targets are rejected against the complete loaded trajectory; recognized phase names remain valid even when the current frame has no matching membership. Re-sourcing a generated script resets its selection/color state.
+
+Exact cage, cluster, and domain IDs are assigned independently in each frame. Retaining an ID selection while changing frames therefore selects the same frame-local label, not a tracked physical object. Category selections (`phase`, `cluster`, or `domain`) and recognized phase labels simply report no membership when cluster analysis was not run; an explicit cage/type/cluster/domain target that never occurs anywhere in the loaded trajectory is rejected.
+
+When cage objects are shown, the generated VMD script uses the following stable cage colors. The visible shades follow the active VMD ColorID palette.
+
+| Cage type | VMD ColorID | Default color |
+| --- | ---: | --- |
+| `5¹²` | 7 | Green |
+| `5¹²6²` | 0 | Blue |
+| `5¹²6³` | 1 | Red |
+| `5¹²6⁴` | 3 | Orange |
+| `5¹²6⁸` | 11 | Purple |
+| `4³5⁶6³` | 10 | Cyan |
+| Other cage types | 2 | Gray |
 
 Ordinary per-frame GRO files are opt-in through `gro` or individual types. `cluster-gro` is separately opt-in and requires cluster search; only mode `00` includes it by default. With `--output-type none`, only `run_config.yaml` remains.
 

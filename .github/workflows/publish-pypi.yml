@@ -16,7 +16,7 @@ env:
   CIBW_SKIP: "*-musllinux_*"
   CIBW_TEST_COMMAND: >-
     python -c "import sqq.core._sqq_cpp as native;
-    assert native.core_version() == '0.3.2', native.core_version()"
+    assert native.core_version() == '0.3.3', native.core_version()"
 
 jobs:
   build-wheels:

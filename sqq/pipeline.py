@@ -80,7 +80,11 @@ from .io.gro_writer import (
     write_quasi_cage_gro_files,
     write_ring_gro_files,
 )
-from .io.lammps import LAMMPS_TRAJECTORY_SUFFIXES, normalize_lammps_config
+from .io.lammps import (
+    LAMMPS_TRAJECTORY_SUFFIXES,
+    inspect_lammps_topology_mapping,
+    normalize_lammps_config,
+)
 from .io.summary import (
     dashboard_cage_targets,
     failed_row,
@@ -143,8 +147,45 @@ def analyze(args: Namespace) -> None:
     config["input"]["format"] = input_format_label(paths)
     config["input"]["topology"] = str(topology.resolve()) if topology else None
     if str(config["input"]["format"]).startswith("lammps-"):
-        config["input"]["lammps"]["type_map_source"] = (
-            str(Path(args.config).resolve()) if args.config else "<configuration>"
+        lammps_config = config["input"]["lammps"]
+        explicit_type_map = bool(lammps_config.get("type_map"))
+        resolved_type_map = {}
+        rebuilt_molecules = False
+        if topology is not None:
+            resolved_type_map, rebuilt_molecules = inspect_lammps_topology_mapping(
+                topology,
+                lammps_config,
+            )
+        mapping_text = ", ".join(
+            (
+                f"{type_id}=ignore"
+                if entry.ignore
+                else f"{type_id}={entry.resname}/{entry.atomname}"
+            )
+            for type_id, entry in sorted(
+                resolved_type_map.items(),
+                key=lambda item: int(item[0]),
+            )
+        )
+        lammps_config["resolved_type_map"] = {
+            type_id: (
+                {"ignore": True}
+                if entry.ignore
+                else {"resname": entry.resname, "atomname": entry.atomname}
+            )
+            for type_id, entry in sorted(
+                resolved_type_map.items(),
+                key=lambda item: int(item[0]),
+            )
+        }
+        if explicit_type_map:
+            source = str(Path(args.config).resolve()) if args.config else "<configuration>"
+        else:
+            source = "auto (DATA topology)"
+            if rebuilt_molecules:
+                source += "; molecule IDs rebuilt from Bonds"
+        lammps_config["type_map_source"] = (
+            f"{source}: {mapping_text}" if mapping_text else source
         )
     coordinate_parallelizable = can_parallelize_paths(paths, topology)
     trajectory_parallelizable = can_parallelize_trajectory(paths, topology)

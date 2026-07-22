@@ -174,7 +174,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     },
     "guest": {
         "resnames": ["CH4", "CO2", "MET", "ETH"],
-        "center_atoms": {"CH4": ["C"], "CO2": ["C"]},
+        "center_atoms": {"CH4": ["C"], "CO2": ["C"], "MET": ["C"]},
         "center_mode": "center_atom",
     },
     "graph": {
