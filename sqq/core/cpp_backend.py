@@ -66,7 +66,7 @@ def analyze_frame_cpp(
         "pair_edges": pair_edges,
     }
     native_options = {
-        "bond_mode": str(graph_config.get("bond_mode", "auto")),
+        "bond_mode": str(graph_config.get("effective_bond_mode", graph_config.get("bond_mode", "auto"))),
         "oo_cutoff_nm": float(graph_config.get("oo_cutoff_nm", 0.35)),
         "hbond_distance_nm": float(graph_config.get("hbond_distance_nm", 0.35)),
         "hbond_angle_deg": float(graph_config.get("hbond_angle_deg", 30.0)),

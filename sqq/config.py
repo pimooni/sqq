@@ -253,7 +253,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     },
     "output": {
         "types": list(DEFAULT_OUTPUT_TYPES),
-        "summary_csv_dir": "summary_csv",
+        "summary_csv_dir": "summary",
         "summary_detail_dir": "summary_detail",
         "cage_isomer_rows": "nonzero",
         "write_empty_files": False,

@@ -187,6 +187,21 @@ def analyze(args: Namespace) -> None:
         lammps_config["type_map_source"] = (
             f"{source}: {mapping_text}" if mapping_text else source
         )
+    from .gro_batch import analyze_multi_gro_batch, is_multi_gro_batch
+
+    if is_multi_gro_batch(paths):
+        analyze_multi_gro_batch(
+            args,
+            config,
+            input_path,
+            paths,
+            outdir,
+            topology,
+            run_started_at,
+            started_at,
+        )
+        return
+
     coordinate_parallelizable = can_parallelize_paths(paths, topology)
     trajectory_parallelizable = can_parallelize_trajectory(paths, topology)
     parallel_backend = normalize_parallel_backend(config.get("parallel", {}).get("backend", "process"))
@@ -444,7 +459,7 @@ def build_run_info(
                     / str(
                         config.get("output", {}).get(
                             "summary_csv_dir",
-                            "summary_csv",
+                            "summary",
                         )
                     )
                 ).resolve()
@@ -1597,6 +1612,8 @@ def process_frame(
     outdir: Path,
     strict: bool,
     stage_callback: Callable[[str], None] | None = None,
+    *,
+    separated_output: bool = False,
 ) -> dict[str, Any]:
     """Analyze one frame, write per-frame files, and return a summary row."""
     if frame.time_ps is None:
@@ -1608,10 +1625,16 @@ def process_frame(
             stage_callback=stage_callback,
             normalize_config=False,
         )
-        frame_dir = outdir / frame.name
+        if separated_output:
+            report_dir = outdir / "info"
+            frame_dir = outdir / "gro" / frame.name
+        else:
+            report_dir = outdir / frame.name
+            frame_dir = report_dir
+        report_dir.mkdir(parents=True, exist_ok=True)
         frame_dir.mkdir(parents=True, exist_ok=True)
         report_stage(stage_callback, "writing outputs")
-        write_frame_outputs(result, frame_dir, config)
+        write_frame_outputs(result, frame_dir, config, report_dir=report_dir)
         if output_enabled(config, "sqq-cage-gro"):
             write_sqq_cage_fragment(
                 result,
@@ -1633,15 +1656,22 @@ def report_stage(callback: Callable[[str], None] | None, stage: str) -> None:
         callback(stage)
 
 
-def write_frame_outputs(result: FrameResult, frame_dir: Path, config: dict[str, Any]) -> None:
+def write_frame_outputs(
+    result: FrameResult,
+    frame_dir: Path,
+    config: dict[str, Any],
+    *,
+    report_dir: Path | None = None,
+) -> None:
     """Write all configured per-frame output files."""
     output = config.get("output", {})
+    report_dir = report_dir or frame_dir
     order_parameters = config.get("order", {}).get("parameters", ["f3", "f4"])
     cpp_mode = is_cpp_mode(config.get("mode"))
     if output_enabled(config, "info"):
         write_frame_info(
             result,
-            frame_dir,
+            report_dir,
             ring_sizes=list(result.ring_report_sizes),
             requested_bond_mode=config["graph"]["bond_mode"],
             order_parameters=order_parameters,
@@ -1649,31 +1679,31 @@ def write_frame_outputs(result: FrameResult, frame_dir: Path, config: dict[str, 
             input_metadata=frame_input_metadata(config),
         )
     else:
-        remove_optional_info_output(result, frame_dir)
+        remove_optional_info_output(result, report_dir)
 
     if not cpp_mode and output_enabled(config, "membership-tsv"):
-        write_membership(result, frame_dir)
+        write_membership(result, report_dir)
     else:
         remove_optional_tsv_outputs(
             result,
-            frame_dir,
+            report_dir,
             remove_membership=True,
             remove_order=False,
         )
     if not cpp_mode and output_enabled(config, "order-tsv"):
-        write_order_parameter(result, frame_dir, order_parameters=order_parameters)
+        write_order_parameter(result, report_dir, order_parameters=order_parameters)
     else:
         remove_optional_tsv_outputs(
             result,
-            frame_dir,
+            report_dir,
             remove_membership=False,
             remove_order=True,
         )
 
     if not cpp_mode and output_enabled(config, "vmd"):
-        write_vmd_script(result, frame_dir)
+        write_vmd_script(result, report_dir)
     else:
-        remove_optional_vmd_output(result, frame_dir)
+        remove_optional_vmd_output(result, report_dir)
 
     layout = str(output.get("structure_layout", "grouped"))
     write_empty = bool(output.get("write_empty_files", False))
@@ -1728,6 +1758,10 @@ def write_frame_outputs(result: FrameResult, frame_dir: Path, config: dict[str, 
             layout=layout,
         )
     remove_frame_directory_if_empty(frame_dir)
+    if report_dir != frame_dir:
+        remove_frame_directory_if_empty(report_dir)
+        remove_frame_directory_if_empty(report_dir.parent)
+        remove_frame_directory_if_empty(frame_dir.parent)
 
 
 def remove_optional_info_output(result: FrameResult, frame_dir: Path) -> None:
@@ -2165,6 +2199,8 @@ def normalize_analysis_scopes(config: dict[str, Any]) -> None:
     }
 
     graph = config.setdefault("graph", {})
+    # Effective mode is internal run state, never a reusable user setting.
+    graph.pop("effective_bond_mode", None)
     graph_mode = str(graph.get("bond_mode", "auto")).strip().lower()
     if graph_mode not in {"auto", "hbond", "oo", "pairs"}:
         raise ValueError("graph.bond_mode must be auto, hbond, oo, or pairs.")
@@ -2338,7 +2374,7 @@ def normalize_analysis_scopes(config: dict[str, Any]) -> None:
         "output.write_empty_files",
     )
     for key, default in (
-        ("summary_csv_dir", "summary_csv"),
+        ("summary_csv_dir", "summary"),
         ("summary_detail_dir", "summary_detail"),
     ):
         directory = str(output.get(key, default)).strip() or default
@@ -2613,7 +2649,9 @@ def analyze_frame(
         frame.atoms,
         waters,
         frame.box,
-        bond_mode=config["graph"]["bond_mode"],
+        bond_mode=config["graph"].get(
+            "effective_bond_mode", config["graph"]["bond_mode"]
+        ),
         oo_cutoff_nm=float(config["graph"]["oo_cutoff_nm"]),
         hbond_distance_nm=float(config["graph"]["hbond_distance_nm"]),
         hbond_angle_deg=float(config["graph"]["hbond_angle_deg"]),

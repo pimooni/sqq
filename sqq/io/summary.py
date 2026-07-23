@@ -1902,8 +1902,8 @@ def write_summary_csvs(
     """Atomically write one main-summary CSV per workbook-equivalent table."""
     started = perf_counter()
     dir_name = (
-        str(config.get("output", {}).get("summary_csv_dir", "summary_csv")).strip()
-        or "summary_csv"
+        str(config.get("output", {}).get("summary_csv_dir", "summary")).strip()
+        or "summary"
     )
     summary_dir = outdir / dir_name
     summary_dir.mkdir(parents=True, exist_ok=True)
@@ -1951,8 +1951,8 @@ def write_summary_csvs(
 def remove_summary_csvs(outdir: Path, config: dict[str, Any]) -> None:
     """Remove known main-summary CSVs while preserving unrelated files."""
     dir_name = (
-        str(config.get("output", {}).get("summary_csv_dir", "summary_csv")).strip()
-        or "summary_csv"
+        str(config.get("output", {}).get("summary_csv_dir", "summary")).strip()
+        or "summary"
     )
     summary_dir = outdir / dir_name
     if not summary_dir.exists():
@@ -2099,6 +2099,23 @@ def config_with_run_metadata(config: dict[str, Any], run_info: dict[str, Any]) -
         "math_threads_per_worker": run_info.get("math_threads", 1),
         "summary_write": run_info.get("summary_write", {}),
     })
+    for key in (
+        "topology_group_count",
+        "topology_group_limit",
+        "topology_group_limit_exceeded",
+        "topology_group_labels_enabled",
+        "info_only_fallback_required",
+        "topology_grouping",
+        "topology_groups",
+        "topology_source_mapping",
+        "topology_group",
+        "topology_fingerprint",
+        "requested_output_types",
+        "output_policy",
+        "warnings",
+    ):
+        if key in run_info:
+            run[key] = deepcopy(run_info[key])
     return enriched
 
 

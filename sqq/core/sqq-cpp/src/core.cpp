@@ -1691,6 +1691,6 @@ AnalysisResult analyze_frame(const FrameInput& frame, const AnalyzeOptions& opti
     return result;
 }
 
-const char* core_version() noexcept { return "0.3.3"; }
+const char* core_version() noexcept { return "0.3.4"; }
 
 }  // namespace sqq_cpp

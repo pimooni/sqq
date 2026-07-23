@@ -2,11 +2,66 @@
 
 This file records versioned update notes. New releases should be appended above older entries.
 
+## Version 0.3.4
+
+### Short Summary
+
+Version 0.3.4 adds deterministic topology grouping for multiple GRO inputs, separates incompatible systems into independent result roots, changes the default main-summary CSV directory to `summary/`, and adds an information-only safety fallback above 26 topology groups. The grouped scheduler still uses one worker pool, resolves `auto` graph mode once per group, and validates a shared GRO topology against every input. It also makes `sqq show all` the generated VMD renderer's default all-cage command and gives overlapping cage types a deterministic display priority. Per-frame scientific algorithms and values are unchanged; the multi-GRO aggregation and output paths are intentionally different. Package and native-core metadata are synchronized at `0.3.4`, released Jul 23, 2026.
+
+### Main Changes
+
+1. Version metadata
+   - Updated Python package, native C++ core, CMake project, and wheel-publish checks to `0.3.4`.
+   - Updated root help and `sqq -v` / `sqq --version` to report `Release date: Jul 23, 2026`.
+
+2. Multiple-GRO topology grouping
+   - Added a pre-scan for invocations containing two or more GRO files.
+   - The fingerprint contains atom count and ordered contiguous residue blocks, with each block represented by `resname` and ordered `atomname` values.
+   - Titles/times, coordinates, velocities, boxes, and numeric atom/residue IDs do not affect the fingerprint; atom or residue-block order and identity do.
+   - Groups are assigned in first-occurrence order. One topology uses the requested root; 2-26 topologies use independent `result_A` through `result_Z` roots.
+
+3. Group-aware output layout
+   - Each normal group owns its own run config, selected summary, `info/`, optional `gro/`, and selected annotated cage GRO/VMD renderer.
+   - The requested root keeps the batch `run_config.yaml` source-to-group manifest when multiple groups exist.
+   - `summary-csv` now defaults to `summary/`, with one UTF-8-SIG CSV per logical summary table. `summary.xlsx` and `summary/` may coexist when both main-summary types are selected.
+   - More than 26 groups activate a whole-run information-only fallback. All readable GRO files are analyzed, but only the root run config and `info/*_info.md` are retained; no partial lettered groups, summaries, detail files, GRO, or renderer are produced.
+
+4. Group scheduling, graph resolution, and topology validation
+   - All GRO topology groups share one worker pool and bounded submission queue instead of running one group at a time.
+   - Tasks carry both a global progress index and group-local frame index, preserving source order while keeping each group summary and annotated bundle internally ordered.
+   - Requested `auto` graph mode is preserved in configuration but resolves once to `hbond` or `oo` for each topology group; SQQ-Py and SQQ-CPP consume the same resolved group setting.
+   - A shared GRO `--top` is checked against every GRO input before analysis. A mismatch fails with the exact incompatible source rather than silently applying one topology to heterogeneous inputs.
+
+5. VMD all-cage command
+   - Replaced `sqq show cage` with `sqq show all` and made it the generated script's startup view; the removed spelling has no `show` alias.
+   - Kept `sqq show phase`, `sqq show cluster`, and `sqq show domain` as whole-category selectors.
+   - Added `all` as the cage-category color target, for example `sqq color all default`.
+
+6. Deterministic shared-edge rendering
+   - Separated cage topology priority from color choice and command argument order.
+   - Nonstandard cages form the lowest layers, followed by `512 < 51262 < 51263 < 51264 < 435663 < 51268`; explicitly selected or recolored cage IDs form the final highlight layers.
+   - A single layer retains the 0.125 angstrom radius. Multi-layer views distribute topology tiers over 0.125-0.130 angstrom so higher-priority coincident edges remain visible without unbounded line growth.
+   - Generic cage IDs recover their canonical cage type when applying type-level color overrides.
+
+7. Validation
+   - Validated topology-fingerprint semantics, stable first-occurrence grouping, the exact 26-group A-Z boundary, the 27-group information-only fallback, and non-strict malformed-input scanning.
+   - Retained focused Tcl tests for `show all`, rejection of `show cage`, reversed argument order, fixed standard-cage priority, bounded radii, exact-ID highlights, and generic-cage aliases.
+   - Verified clean reuse transitions between multi-group, single-group, and information-only layouts; analysis or summary-write failures finalize root and group manifests as `failed`.
+
+### Compatibility
+
+- Single GRO files and trajectory inputs retain their established analysis/output paths.
+- Multiple GRO files that previously shared one aggregate output are now combined only when their topology fingerprints match; incompatible systems receive separate result roots.
+- The default `summary-csv` directory changes from `summary_csv/` to `summary/`; the public output-type name remains `summary-csv`.
+- More than 26 topologies intentionally suppress every optional output except per-frame info, even when a mode or explicit request selected other files.
+- Regenerate `sqq-render.vmd.tcl` to use `sqq show all` and deterministic cage layering.
+- Grouping and routing do not change graph, ring, cage, cluster, occupancy, or order-parameter values for an individual frame.
+
 ## Version 0.3.3
 
 ### Short Summary
 
-Version 0.3.3 adds `-t` as the short topology option, makes `input.lammps.type_map` optional for unambiguous standard water/methane DATA topologies, and replaces the generated VMD renderer's category commands with compact object-based `show` and `color` commands. The renderer starts with `sqq show all` and uses a fixed cage-topology layer priority so shared-edge colors no longer depend on argument order or VMD ColorID. Explicit LAMMPS mappings remain authoritative, and both SQQ-Py and SQQ-CPP consume the same resolved mapping. Package and native-core version metadata are synchronized at `0.3.3`, released Jul 22, 2026.
+Version 0.3.3 adds `-t` as the short topology option, makes `input.lammps.type_map` optional for unambiguous standard water/methane DATA topologies, and replaces the generated VMD renderer's category commands with compact object-based `show` and `color` commands. Explicit LAMMPS mappings remain authoritative, and both SQQ-Py and SQQ-CPP consume the same resolved mapping. Package and native-core version metadata are synchronized at `0.3.3`, released Jul 22, 2026.
 
 ### Main Changes
 
@@ -29,25 +84,25 @@ Version 0.3.3 adds `-t` as the short topology option, makes `input.lammps.type_m
    - Updated CMake and wheel-publish native-version checks to require `0.3.3`.
 
 4. VMD object commands
-   - Replaced the former `sqq cage`, `sqq phase`, `sqq cluster`, and `sqq domain` commands in newly generated render scripts with `sqq show <object...>`. `sqq show all` is the startup all-cage view; `phase`, `cluster`, and `domain` remain whole-category targets, while `sqq show cage` is rejected.
+   - Replaced the former `sqq cage`, `sqq phase`, `sqq cluster`, and `sqq domain` commands in newly generated render scripts with `sqq show <object...>`; `sqq show <category>` shows an entire category.
    - Added automatic object recognition for registered cage labels, delimiter-free generic-cage aliases such as `4151062`, full frame-local cage IDs, phase labels, cluster IDs, and domain IDs. Multiple explicit selections are accepted within one family.
    - Added `sqq color <object> <color>`, accepting a VMD color name, ColorID, or `default`. Overrides do not depend on the current selection and remain active across show and frame changes in the current VMD session.
    - Reconstructed `51262_00053`, `cluster_00001`, and `domain_00001` names from compact GRO annotations. Such numeric IDs remain frame-local rather than tracked physical identities.
-   - Cage objects are grouped by topology layer and effective ColorID. Nonstandard cages render below the fixed standard priority `512 < 51262 < 51263 < 51264 < 435663 < 51268`; explicit or recolored cage IDs render as final highlight layers. Reversing `show` arguments or changing colors does not change this order.
-   - Kept a single layer at a 0.125 angstrom DynamicBonds radius (0.250 angstrom diameter) and distributed multi-type layers over 0.125–0.130 angstrom, preventing coincident higher-priority cage edges from being hidden.
+   - Cage objects are grouped by effective ColorID during rendering, so a single-cage override remains visible in an all-cage or cage-type view without creating one representation per cage.
+   - Set the rendered DynamicBonds cylinder radius to 0.125 angstrom, corresponding to a 0.250 angstrom edge diameter.
    - Removed the duplicate cage-type atom-membership lists from Tcl state and deduplicated phase/cluster/domain atom lists per frame, reducing renderer memory without changing selected atoms.
    - Added a trajectory-wide object registry so misspelled cage, cage-ID, cluster-ID, and domain-ID targets fail instead of silently selecting nothing.
    - Coalesced rapid frame callbacks, preserved user-created VMD representations by tracking only SQQ-owned stable representation names, and reset pending/color state when a script is sourced again.
-   - Retained color-override specificity for phase/cluster/domain objects while separating cage color choice from cage topology priority.
+   - Ordered color layers by override specificity so exact cage highlights are drawn after default, category, and cage-type layers.
    - Kept the annotation format and scientific cage/cluster results unchanged.
-   - Focused Tcl tests cover `show all`, rejection of `show cage`, argument-order invariance, fixed standard cage order, bounded layer radii, exact-ID highlights, generic-cage aliases, object parsing, mixed-family rejection, and named/numeric/default colors.
+   - Focused Tcl tests cover object parsing, category and multi-object selection, mixed-family rejection, ID reconstruction, named/numeric/default colors, and override precedence.
 
 ### Compatibility
 
 - Existing explicit LAMMPS type maps and the long `--top` / `--topology` options retain their behavior.
 - Automatic inference changes input setup only; a successfully inferred map represents the same atoms as the equivalent explicit map and does not alter cage algorithms, mode presets, or output defaults.
 - Non-water/methane, ambiguous, or incomplete DATA topologies still require an explicit YAML mapping.
-- Newly generated `sqq-render.vmd.tcl` files use the new object command interface. Automation written for the 0.3.2 direct category commands must use `sqq show all`, `sqq show phase`, `sqq show cluster`, or `sqq show domain`; `sqq show cage` is not retained as an alias.
+- Newly generated `sqq-render.vmd.tcl` files use the new object command interface. Automation written for the 0.3.2 category commands must use `sqq show cage`, `sqq show phase`, `sqq show cluster`, or `sqq show domain` instead.
 - The Tcl command change affects visualization control only; GRO annotations, cage detection, classification, counts, and other scientific outputs are unchanged.
 
 ## Version 0.3.2

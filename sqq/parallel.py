@@ -33,6 +33,7 @@ from .io.trajectory import (
 StageEvent = tuple[str, int, str, float]
 
 _WORKER_CONFIG: dict[str, Any] | None = None
+_WORKER_GROUP_CONFIGS: dict[Any, dict[str, Any]] = {}
 _WORKER_OUTDIR: Path | None = None
 _WORKER_STRICT = False
 _WORKER_STAGE_QUEUE: Any = None
@@ -47,10 +48,13 @@ def initialize_file_worker(
     outdir: str,
     strict: bool,
     stage_queue: Any,
+    group_configs: dict[Any, dict[str, Any]] | None = None,
 ) -> None:
-    """Install immutable run settings once in each spawned worker."""
-    global _WORKER_CONFIG, _WORKER_OUTDIR, _WORKER_STRICT, _WORKER_STAGE_QUEUE
+    """Install shared and optional per-group settings in each spawned worker."""
+    global _WORKER_CONFIG, _WORKER_GROUP_CONFIGS, _WORKER_OUTDIR
+    global _WORKER_STRICT, _WORKER_STAGE_QUEUE
     _WORKER_CONFIG = config
+    _WORKER_GROUP_CONFIGS = dict(group_configs or {})
     _WORKER_OUTDIR = Path(outdir)
     _WORKER_STRICT = bool(strict)
     _WORKER_STAGE_QUEUE = stage_queue
@@ -165,8 +169,16 @@ def close_trajectory_worker() -> None:
     _WORKER_LAMMPS_CONFIG = None
 
 
-def process_file_task(frame_index: int, path_text: str) -> tuple[int, dict[str, Any]]:
-    """Read, analyze, and write one independent GRO/XYZ file in a worker."""
+def process_file_task(
+    frame_index: int,
+    path_text: str,
+    group_key: Any = None,
+    outdir_text: str | None = None,
+    local_index: int | None = None,
+    output_name: str | None = None,
+    separated_output: bool = False,
+) -> tuple[int, dict[str, Any]]:
+    """Read and analyze one file, optionally using group-local run settings."""
     if _WORKER_CONFIG is None or _WORKER_OUTDIR is None:
         raise RuntimeError("SQQ process worker was not initialized.")
 
@@ -175,7 +187,19 @@ def process_file_task(frame_index: int, path_text: str) -> tuple[int, dict[str, 
     from .pipeline import process_frame
 
     path = Path(path_text)
-    _emit_stage("start", frame_index, path.name, perf_counter())
+    if group_key is None:
+        config = _WORKER_CONFIG
+    else:
+        try:
+            config = _WORKER_GROUP_CONFIGS[group_key]
+        except KeyError as exc:
+            raise RuntimeError(
+                f"SQQ process worker has no configuration for group {group_key!r}."
+            ) from exc
+    task_outdir = Path(outdir_text) if outdir_text is not None else _WORKER_OUTDIR
+    task_index = frame_index if local_index is None else int(local_index)
+    display_name = output_name or path.name
+    _emit_stage("start", frame_index, display_name, perf_counter())
 
     def callback(stage: str) -> None:
         _emit_stage("stage", frame_index, stage, perf_counter())
@@ -185,24 +209,29 @@ def process_file_task(frame_index: int, path_text: str) -> tuple[int, dict[str, 
             iter(
                 read_frames(
                     [path],
-                    xyz_scale=float(
-                        _WORKER_CONFIG.get("input", {}).get("xyz_scale", 0.1)
-                    ),
+                    xyz_scale=float(config.get("input", {}).get("xyz_scale", 0.1)),
                 )
             )
         )
+        if output_name is not None:
+            frame.name = output_name
+        process_kwargs: dict[str, Any] = {
+            "strict": _WORKER_STRICT,
+            "stage_callback": callback,
+        }
+        if separated_output:
+            process_kwargs["separated_output"] = True
         row = process_frame(
-            frame_index,
+            task_index,
             frame,
-            _WORKER_CONFIG,
-            _WORKER_OUTDIR,
-            strict=_WORKER_STRICT,
-            stage_callback=callback,
+            config,
+            task_outdir,
+            **process_kwargs,
         )
     except Exception as exc:
         if _WORKER_STRICT:
             raise
-        row = failed_row(path.stem, str(path), str(exc))
+        row = failed_row(output_name or path.stem, str(path), str(exc))
     return frame_index, row
 
 

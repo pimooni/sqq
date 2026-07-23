@@ -50,9 +50,13 @@ def has_glob_magic(text: str) -> bool:
     return any(char in text for char in "*?[")
 
 
-def natural_key(path: Path) -> list[object]:
-    """Sort names like 1.gro, 2.gro, 10.gro in numeric order."""
-    return [int(part) if part.isdigit() else part.lower() for part in re.split(r"(\d+)", path.name)]
+def natural_key(path: Path) -> tuple[tuple[tuple[int, int | str], ...], str]:
+    """Naturally sort filenames with a stable full-path tie breaker."""
+    parts = tuple(
+        (0, int(part)) if part.isdigit() else (1, part.lower())
+        for part in re.split(r"(\d+)", path.name)
+    )
+    return parts, path.as_posix().casefold()
 
 
 def read_frames(

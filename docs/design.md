@@ -32,6 +32,14 @@ Python input/config/selection
 
 In SQQ-Py, the shared water graph is used by ring, half_cage, quasi_cage, cage, selected F3/F4, graph-mode Q_l, and ice analysis. Selected MCG and DHOP descriptors are calculated during the order stage but use dedicated guest/water cutoff graphs because their published definitions are independent of the selected SQQ bond mode. Hydrate_cluster analysis starts after cage detection and uses all detected cage-ring memberships, not the raw water graph or the report-filtered cage list. In both engines, the graph node is the water oxygen. A graph edge is an O-H...O hydrogen bond in `hbond` mode, an O-O neighbor in `oo` mode, or a user-supplied pair in `pairs` mode. Coordination diagnostics read this graph without adding, removing, or capping edges.
 
+### Multiple-GRO topology grouping
+
+Grouping is a pre-analysis boundary used only when one invocation contains two or more GRO files. Single GRO files and trajectory readers retain their established paths. The pre-scan parses each GRO atom block and builds a deterministic fingerprint from the total atom count plus ordered contiguous residue blocks. Each block contributes its `resname` and ordered `atomname` sequence. GRO title/time text, coordinates, optional velocities, box values, and numeric atom/residue identifiers are deliberately excluded, so renumbered or coordinate-shifted frames of the same molecular topology stay together. Atom order, residue-block order, names, or atom count changes create a different topology group. Groups are assigned `A` through `Z` in first-occurrence order.
+
+One detected topology uses the requested output root directly. Two through 26 topologies use independent `result_A` through `result_Z` roots, each with its own summary, info/GRO trees, annotated cage bundle, renderer, and group `run_config.yaml`; the requested root keeps a batch `run_config.yaml` source-to-group manifest. More than 26 topologies cannot be represented by the fixed letter namespace. In that case the entire invocation switches to information-only output at the requested root: every readable GRO is still analyzed, but all summary, detail, ordinary/annotated GRO, and VMD outputs are disabled. The limit is applied before creating partial `result_A`-`result_Z` trees and overrides explicit output selections.
+
+A single GRO topology supplied with `--top` is validated against every GRO input during the same pre-scan. A mismatch is fatal before analysis and reports the exact incompatible source; one topology cannot silently normalize heterogeneous GRO files. For requested `auto` graph mode, SQQ selects `hbond` or `oo` once from a representative frame in each topology group, stores that effective value beside the preserved requested value, and sends the same group configuration to either engine. Thus one group cannot mix graph definitions across its frames.
+
 ## Analysis Modes and Workers
 
 Modes are discrete presets rather than a continuous 00-99 scale. Modes `00` and `50` select SQQ-Py; modes `99` and `cpp` select SQQ-CPP. The command default remains `50`.
@@ -147,24 +155,30 @@ For two or more independent GRO/XYZ files, the default execution path is:
 ```text
 main process
   -> normalize config and resolve input order
-  -> validate unique frame-directory stems
-  -> create spawn ProcessPoolExecutor
-  -> initialize each worker once with config/output/stage queue
+  -> for multiple GRO files, pre-scan and assign topology groups
+  -> validate shared GRO topology and group-local output names
+  -> resolve requested auto graph mode once per GRO topology group
+  -> create one spawn ProcessPoolExecutor for the complete invocation
+  -> initialize each worker once with group configs/output roots/stage queue
   -> maintain a rolling queue of at most 3 * workers tasks
-  -> submit (input_index, path)
+  -> submit (global_index, group_key, group_local_index, path)
 
 worker process
-  -> report start
+  -> report progress with the global input index
   -> read one frame
+  -> select the matching group config and output root
   -> run the ordinary frame pipeline
-  -> write its own frame directory
-  -> return (input_index, summary_row)
+  -> write group-local info and selected structure output
+  -> return (global_index, group_key, group_local_index, summary_row)
 
 main process
-  -> consume stage events
-  -> reorder rows by input_index
-  -> write selected main-summary CSV/XLSX, optional detail CSV, and run_config.yaml with resolved run metadata
+  -> consume stage events across every group
+  -> reorder rows globally and within each group
+  -> finalize each selected group bundle and summary independently
+  -> finalize group run configs and the root batch manifest
 ```
+
+Topology groups are task-routing metadata, not separate serial jobs. One shared worker pool can execute tasks from different groups concurrently. The global index keeps progress and failure reporting stable, while the group-local index controls summary rows and `sqq-cage.gro` frame order inside one compatible system.
 
 `spawn` is selected explicitly on macOS, Windows, and Linux. This avoids forking a process after the interactive progress refresh thread exists and gives the same pickling/import contract on every platform. Worker callables and initializers are module-level functions. Only paths, raw trajectory indexes, small event tuples, and summary dictionaries cross process boundaries; atoms, rings, patches, and cages stay worker-local.
 
@@ -174,11 +188,11 @@ For one XTC/TRR or supported LAMMPS trajectory with `-t` / `--top`, the parent o
 
 Both standalone-file and indexed-trajectory process paths, plus the compatibility thread path, maintain at most `3 * workers` submitted tasks and refill the queue as futures complete. This is a bounded submission window, not a worker cap: 100 effective workers retain 100-way execution and at most 300 submitted tasks. It avoids constructing a Future and serializing arguments for every item in a very large input set.
 
-Standalone files whose case-insensitive stems collide are rejected because the stem is the frame output-directory name. Non-strict serial, thread, and process read failures return failed summary rows; strict failures cancel queued work where possible and propagate to the main process. Indexed trajectory reader failure records the current failed frame and stops that unusable iterator. Output order is determined by the original index rather than completion order. Configuration is normalized before dispatch, so thread workers only read the shared mapping.
+Standalone files whose case-insensitive stems collide inside the same output root are rejected because the stem supplies the per-frame output name. Non-strict serial, thread, and process read failures return failed summary rows; strict failures cancel queued work where possible and propagate to the main process. Indexed trajectory reader failure records the current failed frame and stops that unusable iterator. Output order is determined by the original index rather than completion order. Configuration is normalized before dispatch, so thread workers only read the shared mapping.
 
-Terminal and main-summary dashboard metadata share the same display helpers. The requested graph mode is preserved from config/CLI, and the effective per-frame graph modes are collected from `connection_mode` in summary rows. Explicit graph modes display as `hbond`, `oo`, or `pairs`. Automatic graph mode displays as `auto -> hbond`, `auto -> oo`, or `auto -> mixed (hbond: N, oo: N)` when different frames resolve differently. Before frame analysis completes, the terminal header may show `auto -> pending`; the final run summary and the `summary` table in either main-summary format use the resolved display value.
+Terminal and main-summary dashboard metadata share the same display helpers. The requested graph mode is preserved from config/CLI. Explicit graph modes display as `hbond`, `oo`, or `pairs`. For a multiple-GRO topology group, automatic graph mode is resolved once before dispatch and displays as `auto -> hbond` or `auto -> oo`; different topology groups may resolve differently, but their summaries remain separate. Single-file and trajectory paths retain their established pending/final effective-mode reporting.
 
-Root `sqq` / `sqq -h` output renders the banner and product sentence, then `SQQ version: 0.3.3   Release date: Jul 22, 2026`, then the ordinary `usage:` line. Root `sqq -v` / `sqq --version` exits successfully after printing only that version line. Subcommand help retains the standard argparse layout.
+Root `sqq` / `sqq -h` output renders the banner and product sentence, then `SQQ version: 0.3.4   Release date: Jul 23, 2026`, then the ordinary `usage:` line. Root `sqq -v` / `sqq --version` exits successfully after printing only that version line. Subcommand help retains the standard argparse layout.
 
 `run_config.yaml` preserves normalized configuration values such as `graph.bond_mode: auto`, `hydrate_cluster.enabled: false`, `order.parameters: [f3, f4]`, `output.types: [info, sqq-cage-gro, sqq-render, summary-xlsx]`, and `parallel.workers: 1.0`, then adds a `run` block with status/error, frame totals, failure details, `sqq_version`, requested/effective graph mode, normalized order/output selections, worker policy, resolved workers, backend, math threads, and final `summary_write` timing/table-size metadata. The metadata reports per-table rows, columns, cells, bytes, write time, format mode/time, final workbook-save time, and total summary-write time. An initial `status: running` file is written before frame analysis; strict analysis or summary-write failures update it to `status: failed`. `output.types` is the only output selector; removed `output.disabled_outputs` configurations are rejected rather than migrated. Run-config, main CSV, detail CSV, and workbook writes use same-directory temporary files followed by atomic replacement, so a failed rewrite does not truncate an existing completed artifact.
 
@@ -265,6 +279,7 @@ stage_summary       : reading:0    settings:0  selecting:0
 - `sqq/io/summary.py`: per-frame info, global workbook/CSV tables, output timing metadata, atomic replacement, and size-aware workbook formatting.
 - `sqq/io/gro_writer.py`: grouped or flat GRO structure output.
 - `sqq/io/vmd.py`: run-level annotated `sqq-cage.gro`, fragment merging, membership validation, and VMD Tcl generation.
+- `sqq/io/gro_grouping.py`: lightweight GRO topology fingerprints, first-occurrence grouping, source assignments, and the 26-group safety limit.
 
 ## Input Validation and Coordinate Units
 
@@ -777,7 +792,11 @@ Supported SQQ-Py canonical names are `info`, `membership-tsv`, `order-tsv`, lega
 
 SQQ-CPP accepts `info`, `gro`, `cage-gro`, `sqq-cage-gro`, `sqq-render`, `summary-csv`, `summary-xlsx`, `all`, and `none`. `gro` enables the supported ordinary classified cage GRO path; it is not collapsed in the recorded output selection. Mode `cpp` does not select either `gro` or `cage-gro` by default. `summary-detail-csv` and all cluster types are unsupported. `run_config.yaml` is mandatory in every mode.
 
-`sqq-cage.gro` contains one complete GRO block per successful frame, ordered by the original input/frame index. All source atoms, identity/order, wrapped coordinates, box, and optional GRO velocities are preserved; no PBC reimaging is performed. Atom lines reserve the optional velocity columns and place `; SQQ1 m=...` at column 69. Membership records encode cage type and ID plus phase/domain/cluster IDs when cluster analysis exists; nonmembers use `m=-`. Multiple cage memberships remain attached to one oxygen rather than being flattened into one label. A multi-frame bundle requires identical atom identity and order across frames and is finalized atomically from worker-local fragments.
+For a multiple-GRO invocation with one topology group, the requested root directly owns `run_config.yaml`, optional `summary.xlsx`, optional `summary/`, `info/`, optional `gro/`, and the selected `sqq-cage.gro`/`sqq-render.vmd.tcl`. For 2-26 topology groups, the requested root owns the batch manifest and each `result_<letter>/` owns the corresponding group files. Per-frame Markdown, membership/order TSV, and legacy per-frame VMD files are routed to the group's `info/`; ordinary structure output is routed below `gro/<frame>/`. If `summary-xlsx` and `summary-csv` are both selected, `summary.xlsx` and `summary/` coexist in the same group root.
+
+For more than 26 topology groups, output normalization is replaced by the information-only safety selection for the complete run. The root contains `run_config.yaml` plus `info/*_info.md`; no group directories, summaries, detail CSV, GRO, annotated bundle, or renderer are produced. The root manifest records the detected group count, source assignments, warning, requested output types, and effective information-only selection.
+
+`sqq-cage.gro` contains one complete GRO block per successful frame, ordered by the original input/frame index. All source atoms, identity/order, wrapped coordinates, box, and optional GRO velocities are preserved; no PBC reimaging is performed. Atom lines reserve the optional velocity columns and place `; SQQ1 m=...` at column 69. Membership records encode cage type and ID plus phase/domain/cluster IDs when cluster analysis exists; nonmembers use `m=-`. Multiple cage memberships remain attached to one oxygen rather than being flattened into one label. A multi-frame bundle requires the same named contiguous residue-block topology and atom order across frames; numeric atom/residue IDs may differ. It is finalized atomically from worker-local fragments.
 
 `sqq-render.vmd.tcl` is self-contained and loads the neighboring `sqq-cage.gro`. Because VMD does not treat concatenated GRO blocks as a trajectory directly, the script splits complete frames into a temporary directory, loads them in order, deletes the temporary files, and tracks frame changes. Cage topology is the default `sqq show all` view. Dynamic oxygen bonds use a 3.5 angstrom display cutoff. A single cage layer uses a 0.125 angstrom cylinder radius, giving a 0.250 angstrom displayed diameter; multi-type cage views use bounded 0.125–0.130 angstrom radii for deterministic overlap visibility.
 
@@ -793,7 +812,7 @@ Per-frame output folders keep the configured grouped/flat structure for ordinary
 
 When an output directory is reused, SQQ removes only known generated files that are outside the new effective selection. Temporary annotated-GRO fragments and partial visible bundles are removed after success or failure. Unknown user files remain untouched.
 
-Mode `50` writes per-frame info, run-level annotated GRO/VMD, and `summary.xlsx`; ordinary category GRO and detail CSV files are not default output. `summary-xlsx` owns the workbook, `summary-csv` owns one file per main table under `output.summary_csv_dir`, and `summary-detail-csv` owns ordinary multi-row and isomer CSV files under `output.summary_detail_dir`. The directory settings default to `summary_csv` and `summary_detail` and must be different relative paths inside the output root.
+Mode `50` writes per-frame info, run-level annotated GRO/VMD, and `summary.xlsx`; ordinary category GRO and detail CSV files are not default output. `summary-xlsx` owns the workbook, `summary-csv` owns one file per main table under `output.summary_csv_dir`, and `summary-detail-csv` owns ordinary multi-row and isomer CSV files under `output.summary_detail_dir`. The directory settings default to `summary` and `summary_detail` and must be different relative paths inside the output root.
 
 `cluster-detail` separately owns `hydrate_domain.csv` and `hydrate_cluster_detail.csv`. Explicit `cluster-detail` and `cluster-gro` require resolved cluster search on. Cluster search populates selected info and main-summary outputs without adding an unselected output type. Mode `00` already includes `cluster-gro`; mode `50` requires it explicitly. Search off removes stale SQQ-generated grouped directories or flat category filenames. If no per-frame type remains selected, the pipeline removes an empty frame directory. Unrelated files are preserved.
 
@@ -815,7 +834,7 @@ frame_name/
     frame_name_cluster_boundary.gro
 ```
 
-`summary-xlsx` writes the global `summary.xlsx` workbook. `summary-csv` writes the same applicable main-table mapping as separate UTF-8-SIG files under the configured `summary_csv_dir`, using sheet names as filenames and preserving columns, row order, and values without workbook formatting or tabs. The first `summary` table is a dashboard: Configuration begins with `SQQ version` and `Mode`, then includes input format/trajectory stride and applicable LAMMPS provenance, the same requested/effective `Graph mode` display used by the final terminal run summary, normalized order parameters, resolved `Find cluster`, and normalized output types; `Analysis Results (min / mean / max)` reports per-frame min/mean/max values while `Frames total / ok / failed` remains a run-level frame count. Analysis tables contain one input file or trajectory frame per row. `failures` instead has one failed input/frame per row, `detail_index` has one generated detail file per row, and `config` stores configuration metadata. Exact quasi-cage isomer rows, optional `failures.csv`, and other ordinary multi-row detail tables are written under the configured `summary_detail_dir` only when `summary-detail-csv` is selected. Failure details are always retained in `run_config.yaml`.
+`summary-xlsx` writes the global `summary.xlsx` workbook. `summary-csv` writes the same applicable main-table mapping as separate UTF-8-SIG files under the configured `summary_csv_dir` (default `summary/`), using sheet names as filenames and preserving columns, row order, and values without workbook formatting or tabs. The first `summary` table is a dashboard: Configuration begins with `SQQ version` and `Mode`, then includes input format/trajectory stride and applicable LAMMPS provenance, the same requested/effective `Graph mode` display used by the final terminal run summary, normalized order parameters, resolved `Find cluster`, and normalized output types; `Analysis Results (min / mean / max)` reports per-frame min/mean/max values while `Frames total / ok / failed` remains a run-level frame count. Analysis tables contain one input file or trajectory frame per row. `failures` instead has one failed input/frame per row, `detail_index` has one generated detail file per row, and `config` stores configuration metadata. Exact quasi-cage isomer rows, optional `failures.csv`, and other ordinary multi-row detail tables are written under the configured `summary_detail_dir` only when `summary-detail-csv` is selected. Failure details are always retained in `run_config.yaml`.
 
 The SQQ-CPP main summary deliberately contains only applicable tables: `summary`, `cage`, `cage_isomer`, selected F3/F4 `order_parameter`, and `config`; `failures` is conditional and `cage_occupancy` exists only when at least one frame contains selected guests. Its default `summary-csv` writes these as independent files, while explicit `summary-xlsx` writes the same mapping as workbook sheets. Ring/connection diagnostic tables, half/quasi, cluster, ice, detail index, and detail CSV are omitted from its compact schema. If no selected guests exist, the dashboard and per-frame info state that occupancy was not evaluated.
 
@@ -847,7 +866,7 @@ Summary generation records all table dimensions and write/format/save timings in
 - Boundary membership is a per-frame first-layer topological classification; transition-path kinetics, temporal domain tracking, and crystallographic orientation matching are not implemented.
 - Cluster GRO output preserves original wrapped coordinates and the original box rather than reimaging each category; periodic or percolating structures may therefore retain unavoidable cross-box seams in a single-copy file.
 - Default `quasi_cage.search_policy = bounded` is not exhaustive for large outer-layer components. Opt-in `exact` enumerates connected subsets but remains subject to explicit candidate and state limits.
-- Automatic process workers parallelize independent GRO/XYZ files or selected frames of one indexed XTC/TRR/LAMMPS trajectory. Worker counts are based on physical cores with one physical core reserved for the system; topology search inside one individual frame remains single-process.
+- Automatic process workers parallelize independent GRO/XYZ files or selected frames of one indexed XTC/TRR/LAMMPS trajectory. Multiple GRO topology groups share one pool rather than consuming workers group by group. Worker counts are based on physical cores with one physical core reserved for the system; topology search inside one individual frame remains single-process.
 - CHILL-style ice classification is implemented, but separate atomistic Ih/Ic stacking assignment can be refined later.
 - MCG is meaningful only for guest residue names selected in `hydrate_order.mcg_guest_resnames`; other guest species are not silently treated as methane.
 - Published DHOP transition-state thresholds are model- and condition-dependent; SQQ reports the descriptor and does not assign a universal critical-nucleus threshold.

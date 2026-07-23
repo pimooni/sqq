@@ -3,7 +3,6 @@ from __future__ import annotations
 """Run-level annotated GRO and VMD rendering outputs."""
 
 from dataclasses import dataclass
-from hashlib import sha256
 import json
 import os
 from pathlib import Path
@@ -14,7 +13,8 @@ from typing import Any, Iterable
 import numpy as np
 
 from ..display import graph_mode_display
-from ..models import Atom, FrameResult
+from ..models import Atom, Frame, FrameResult
+from .gro_grouping import gro_topology_fingerprint
 from .gro_writer import ascii_gro_text
 
 
@@ -259,19 +259,9 @@ def annotated_gro_block(
 
 
 def atom_signature(atoms: Iterable[Atom]) -> str:
-    """Hash the atom identity and order represented by an output GRO frame."""
-    digest = sha256()
-    for atom in atoms:
-        record = (
-            int(atom.index),
-            int(atom.resid),
-            ascii_gro_text(atom.resname)[:5],
-            ascii_gro_text(atom.atomname)[:5],
-            int(atom.atomid),
-        )
-        digest.update(json.dumps(record, ensure_ascii=True, separators=(",", ":")).encode("ascii"))
-        digest.update(b"\n")
-    return digest.hexdigest()
+    """Hash topology-compatible atom and molecule ordering for VMD frames."""
+    frame = Frame(name="", atoms=list(atoms))
+    return gro_topology_fingerprint(frame)
 
 
 def vmd_script_text() -> str:
