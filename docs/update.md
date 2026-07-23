@@ -2,6 +2,41 @@
 
 This file records versioned update notes. New releases should be appended above older entries.
 
+## Version 0.3.6
+
+### Short Summary
+
+Version 0.3.6 makes the generated VMD renderer additive across commands and across object families. A single `sqq show` can combine cage, guest, phase, cluster, and domain groups; the first show replaces the startup cage-all view, later shows add deduplicated selections, and `sqq clear` restores the default view and colors. Cross-family rendering is deterministic with guests last. The source welcome and full Tcl help now describe the same interface. Scientific analysis, annotations, counts, and report values are unchanged. Package and native-core metadata are synchronized at `0.3.6`, released Jul 23, 2026.
+
+### Main Changes
+
+1. Compound additive `show`
+   - Extended the grammar to `sqq show <family> <target...> [<family> <target...>]...`.
+   - Added cross-family commands such as `sqq show cage 512 guest 512` while retaining every valid single-family form.
+   - The first `show` after source/reset replaces the initial `cage all` view; later `show` commands add to the current view.
+   - Canonical family/target selections are deduplicated, including repeats within one command and across commands.
+
+2. Reset and deterministic rendering
+   - `sqq clear` removes custom selections and color overrides, restores the initial cage-all view, and rearms first-show replacement.
+   - Cross-family layers always render as `phase -> cluster -> domain -> cage -> guest`, independent of command order.
+   - The cross-family order is separate from the existing fixed cage-topology priority.
+   - `sqq color <family> <target...> <color>` remains a one-family command.
+
+3. Source welcome and full help
+   - Replaced the verbose source output with a compact `SQQ VMD Renderer` welcome showing the default view, additive mode, command forms, and two examples.
+   - `sqq help`, `sqq -h`, and `sqq --help` remain equivalent and now print the complete usage, family descriptions, layer lifecycle, reset behavior, and examples.
+
+4. Version metadata
+   - Synchronized Python package, native C++ core, CMake, and publish checks at `0.3.6`.
+   - Retained the release date Jul 23, 2026.
+
+### Compatibility
+
+- Existing single-family commands such as `sqq show cage 512 51264` remain valid.
+- `sqq color` does not accept compound family groups; issue separate color commands for separate families.
+- Regenerate `sqq-render.vmd.tcl` to use compound `show`, additive state, `sqq clear`, deterministic family order, and the revised help.
+- These changes affect VMD interaction and representation order only; cage detection, scientific classification, annotations, and report values are unchanged.
+
 ## Version 0.3.5
 
 ### Short Summary

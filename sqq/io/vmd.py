@@ -645,8 +645,9 @@ namespace eval ::SQQ {
     }
     variable molid -1
     variable gro_path ""
-    variable current_family cage
-    variable current_targets {{cage *}}
+    variable active_families {cage}
+    variable custom_show_active 0
+    variable active_targets
     variable representation_names {}
     variable frame_after_id ""
     variable displayed_graph_mode "__unset__"
@@ -657,10 +658,11 @@ namespace eval ::SQQ {
     variable known_objects
     variable object_aliases
     variable cage_types
-    foreach name {group_keys group_atoms graph_mode color_overrides known_objects object_aliases cage_types} {
+    foreach name {group_keys group_atoms graph_mode color_overrides known_objects object_aliases cage_types active_targets} {
         catch {array unset $name}
         array set $name {}
     }
+    set active_targets(cage) [list [list cage *]]
 }
 
 proc ::SQQ::add_member {frame source key atom_index} {
@@ -1025,6 +1027,10 @@ proc ::SQQ::normalize_family {value} {
     return $family
 }
 
+proc ::SQQ::is_family_token {value} {
+    return [expr {[string tolower [string trim $value]] in {cage guest phase cluster domain}}]
+}
+
 proc ::SQQ::parse_target {family value} {
     variable known_objects
     variable object_aliases
@@ -1109,13 +1115,111 @@ proc ::SQQ::parse_targets {family values} {
     return $targets
 }
 
-proc ::SQQ::set_show {family values} {
-    variable current_family
-    variable current_targets
-    set family [::SQQ::normalize_family $family]
-    set current_family $family
-    set current_targets [::SQQ::parse_targets $family $values]
+proc ::SQQ::parse_show_groups {values} {
+    if {[llength $values] < 2} {
+        error "Usage: sqq show <family> <target...> ?<family> <target...> ...?"
+    }
+    set groups {}
+    set family ""
+    set raw_targets {}
+    foreach value $values {
+        if {[::SQQ::is_family_token $value]} {
+            if {$family ne ""} {
+                if {[llength $raw_targets] == 0} {
+                    error "SQQ show family '$family' requires at least one target"
+                }
+                lappend groups [list $family [::SQQ::parse_targets $family $raw_targets]]
+            }
+            set family [::SQQ::normalize_family $value]
+            set raw_targets {}
+        } else {
+            if {$family eq ""} {
+                error "SQQ show must begin with cage, guest, phase, cluster, or domain"
+            }
+            lappend raw_targets $value
+        }
+    }
+    if {$family eq "" || [llength $raw_targets] == 0} {
+        if {$family eq ""} {
+            error "SQQ show must begin with cage, guest, phase, cluster, or domain"
+        }
+        error "SQQ show family '$family' requires at least one target"
+    }
+    lappend groups [list $family [::SQQ::parse_targets $family $raw_targets]]
+    return $groups
+}
+
+proc ::SQQ::merge_show_group {family targets} {
+    variable active_families
+    variable active_targets
+    if {$family ni $active_families} {
+        lappend active_families $family
+        set active_targets($family) {}
+    }
+    set includes_all 0
+    foreach target $targets {
+        if {[lindex $target 1] eq "*"} {
+            set includes_all 1
+            break
+        }
+    }
+    set already_all 0
+    foreach target $active_targets($family) {
+        if {[lindex $target 1] eq "*"} {
+            set already_all 1
+            break
+        }
+    }
+    if {$includes_all} {
+        set active_targets($family) $targets
+    } elseif {!$already_all} {
+        foreach target $targets {
+            if {$target ni $active_targets($family)} {
+                lappend active_targets($family) $target
+            }
+        }
+    }
+}
+
+proc ::SQQ::set_show {values args} {
+    variable active_families
+    variable active_targets
+    variable custom_show_active
+    if {[llength $args] > 0} {
+        set combined [list $values]
+        foreach argument $args {
+            foreach value $argument { lappend combined $value }
+        }
+        set values $combined
+    }
+    set groups [::SQQ::parse_show_groups $values]
+    if {!$custom_show_active} {
+        set active_families {}
+        array unset active_targets
+        array set active_targets {}
+        set custom_show_active 1
+    }
+    foreach group $groups {
+        lassign $group family targets
+        ::SQQ::merge_show_group $family $targets
+    }
     ::SQQ::render_current
+}
+
+proc ::SQQ::reset_show {{announce 0}} {
+    variable active_families
+    variable active_targets
+    variable color_overrides
+    variable custom_show_active
+    set active_families {cage}
+    array unset active_targets
+    array set active_targets {}
+    set active_targets(cage) [list [list cage *]]
+    array unset color_overrides
+    array set color_overrides {}
+    set custom_show_active 0
+    ::SQQ::render_current
+    if {$announce} { puts "SQQ clear: restored initial cage view" }
 }
 
 proc ::SQQ::color_value {value} {
@@ -1260,26 +1364,27 @@ proc ::SQQ::announce_graph_mode {frame} {
     }
 }
 
-proc ::SQQ::render_current {} {
-    ::SQQ::cancel_pending_render
-    variable molid
-    variable current_family
-    variable current_targets
+proc ::SQQ::ordered_active_families {} {
+    variable active_families
+    set ordered {}
+    foreach family {phase cluster domain cage guest} {
+        if {$family in $active_families} { lappend ordered $family }
+    }
+    return $ordered
+}
+
+proc ::SQQ::render_family {frame family targets} {
     variable group_atoms
-    if {$molid < 0 || $molid ni [molinfo list]} { return }
-    set frame [molinfo $molid get frame]
-    ::SQQ::announce_graph_mode $frame
-    ::SQQ::clear_representations
     set representation_count 0
-    if {$current_family in {cage guest}} {
+    if {$family in {cage guest}} {
         array set explicit_ids {}
-        foreach target $current_targets {
+        foreach target $targets {
             lassign $target source key
-            if {$source eq "${current_family}-id"} { set explicit_ids($key) 1 }
+            if {$source eq "${family}-id"} { set explicit_ids($key) 1 }
         }
         array set layer_atoms {}
         set layer_keys {}
-        foreach item [::SQQ::expanded_targets $frame $current_family $current_targets] {
+        foreach item [::SQQ::expanded_targets $frame $family $targets] {
             lassign $item source key
             set atom_key "$frame,$source,$key"
             if {![info exists group_atoms($atom_key)]} { continue }
@@ -1293,7 +1398,7 @@ proc ::SQQ::render_current {} {
             foreach atom_index $group_atoms($atom_key) { lappend layer_atoms($layer_key) $atom_index }
         }
         set layer_keys [lsort -command ::SQQ::compare_object_render_keys $layer_keys]
-        if {$current_family eq "cage"} {
+        if {$family eq "cage"} {
             set radius_tiers {}
             foreach layer_key $layer_keys { lappend radius_tiers [::SQQ::cage_radius_tier $layer_key] }
             set radius_tiers [lsort -integer -unique $radius_tiers]
@@ -1311,7 +1416,7 @@ proc ::SQQ::render_current {} {
     } else {
         array set color_atoms {}
         set render_keys {}
-        foreach item [::SQQ::expanded_targets $frame $current_family $current_targets] {
+        foreach item [::SQQ::expanded_targets $frame $family $targets] {
             lassign $item source key
             set atom_key "$frame,$source,$key"
             if {![info exists group_atoms($atom_key)]} { continue }
@@ -1326,14 +1431,29 @@ proc ::SQQ::render_current {} {
             incr representation_count [::SQQ::add_dynamic_bonds_representation $indexes $color_id 0.125]
         }
     }
-    display update
-    set labels {}
-    foreach target $current_targets { lappend labels [::SQQ::target_label $current_family $target] }
-    if {$representation_count == 0} {
-        puts "SQQ show $current_family: no memberships for [join $labels { }] in frame $frame"
-    } else {
-        puts "SQQ show $current_family: [join $labels { }] (frame $frame)"
+    return $representation_count
+}
+
+proc ::SQQ::render_current {} {
+    ::SQQ::cancel_pending_render
+    variable molid
+    variable active_targets
+    if {$molid < 0 || $molid ni [molinfo list]} { return }
+    set frame [molinfo $molid get frame]
+    ::SQQ::announce_graph_mode $frame
+    ::SQQ::clear_representations
+    foreach family [::SQQ::ordered_active_families] {
+        set targets $active_targets($family)
+        set representation_count [::SQQ::render_family $frame $family $targets]
+        set labels {}
+        foreach target $targets { lappend labels [::SQQ::target_label $family $target] }
+        if {$representation_count == 0} {
+            puts "SQQ show $family: no memberships for [join $labels { }] in frame $frame"
+        } else {
+            puts "SQQ show $family: [join $labels { }] (frame $frame)"
+        }
     }
+    display update
 }
 
 proc ::SQQ::cancel_pending_render {} {
@@ -1402,34 +1522,60 @@ proc ::SQQ::split_frames {path directory} {
 }
 
 proc ::SQQ::startup_help {} {
-    puts "SQQ VMD: sqq show <cage|guest|phase|cluster|domain> <target> ?target ...?"
-    puts "         sqq color <cage|guest|phase|cluster|domain> <target> ?target ...? <color>"
-    puts "         sqq help | sqq -h | sqq --help"
+    puts "SQQ VMD Renderer"
+    puts ""
+    puts "Default view : cage all"
+    puts "Show mode    : additive"
+    puts ""
+    puts "Commands:"
+    puts "  sqq show <family> <target...> ?<family> <target...> ...?"
+    puts "  sqq color <family> <target...> <color>"
+    puts "  sqq clear"
+    puts "  sqq -h"
+    puts ""
+    puts "Examples:"
+    puts "  sqq show cage 512"
+    puts "  sqq show cage 512 guest 512"
 }
 
 proc ::SQQ::help {} {
-    puts "SQQ commands:"
-    puts "  sqq show <family> <target> ?target ...?"
-    puts "  sqq color <family> <target> ?target ...? <VMD-color|ColorID|default>"
+    puts "SQQ VMD commands"
+    puts ""
+    puts "Usage:"
+    puts "  sqq show <family> <target...> ?<family> <target...> ...?"
+    puts "  sqq color <family> <target...> <VMD-color|ColorID|default>"
+    puts "  sqq clear"
     puts "  sqq help | sqq -h | sqq --help"
-    puts "Families: cage, guest, phase, cluster, domain"
-    puts "Targets: all; cage type; exact cage/cluster/domain ID; multiple compatible targets"
+    puts ""
+    puts "Families:"
+    puts "  cage      Cage topology or exact cage ID"
+    puts "  guest     Guests assigned to a cage topology or exact cage ID"
+    puts "  phase     sI, sII, sH, boundary, ambiguous, unclassified, isolated"
+    puts "  cluster   Exact cluster ID"
+    puts "  domain    Exact domain ID"
+    puts ""
+    puts "Show behavior:"
+    puts "  The first show replaces the default cage-all view."
+    puts "  Later show commands add layers; repeated selections are ignored."
+    puts "  sqq clear restores the default cage-all view and colors."
+    puts ""
     puts "Examples:"
     puts "  sqq show cage all"
     puts "  sqq show cage 512 51264"
-    puts "  sqq show guest 512"
-    puts "  sqq show phase sI boundary"
+    puts "  sqq show cage 512 guest 512"
+    puts "  sqq show cage 512 guest 512 phase sI"
     puts "  sqq color cage 512 green"
     puts "  sqq color guest 512 yellow"
+    puts "  sqq clear"
 }
 
 proc sqq {{command help} args} {
     switch -- [string tolower $command] {
         show {
             if {[llength $args] < 2} {
-                error "Usage: sqq show <cage|guest|phase|cluster|domain> <target> ?target ...?"
+                error "Usage: sqq show <family> <target...> ?<family> <target...> ...?"
             }
-            ::SQQ::set_show [lindex $args 0] [lrange $args 1 end]
+            ::SQQ::set_show $args
         }
         color {
             if {[llength $args] < 3} {
@@ -1437,11 +1583,15 @@ proc sqq {{command help} args} {
             }
             ::SQQ::set_colors [lindex $args 0] [lrange $args 1 end-1] [lindex $args end]
         }
+        clear {
+            if {[llength $args] != 0} { error "Usage: sqq clear" }
+            ::SQQ::reset_show 1
+        }
         help - -h - --help {
             if {[llength $args] != 0} { error "Usage: sqq help" }
             ::SQQ::help
         }
-        default { error "Unknown SQQ command '$command'; use show, color, or help" }
+        default { error "Unknown SQQ command '$command'; use show, color, clear, or help" }
     }
 }
 
@@ -1467,5 +1617,5 @@ display projection Orthographic
 catch {trace remove variable ::vmd_frame write ::SQQ::frame_changed}
 trace add variable ::vmd_frame write ::SQQ::frame_changed
 ::SQQ::startup_help
-sqq show cage all
+::SQQ::reset_show
 '''

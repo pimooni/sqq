@@ -2,7 +2,7 @@
 
 **SQQ: Python Joint Toolkit for Water-Shell Topology Analysis.**
 
-Current release: **0.3.5**
+Current release: **0.3.6**
 
 SQQ provides the complete SQQ-Py water-shell topology workflow plus the focused SQQ-CPP cage engine. Modes `00` and `py` use SQQ-Py; modes `99` and `cpp` use C++17 for graph, internal ring, cage, occupancy, and F3/F4 analysis. Algorithms are documented in `docs/design.md` and release notes in `docs/update.md`.
 
@@ -19,15 +19,14 @@ Names are listed alphabetically by family name. The order does not indicate rela
 - Fengyi Mi - Southwest University of Science and Technology
 - Zhengcai Zhang - Laoshan Laboratory
 
-## Changed in 0.3.5
+## Changed in 0.3.6
 
-- Package and native-core versions are synchronized at `0.3.5`, released Jul 23, 2026.
-- Mode `50` is replaced by `py` without an alias, and `py` is the default. The supported presets are `00`, `py`, `99`, and `cpp`.
-- Modes `py` and `cpp` default to one worker; modes `00` and `99` retain the 100% automatic-core policy with one physical core reserved. Explicit `-w` overrides the preset.
-- No mode emits ordinary, classified, or cluster GRO files by default. Modes `00` and `py` default to `info,sqq-cage-gro,sqq-render,summary-xlsx`; modes `99` and `cpp` default to `info,sqq-cage-gro,sqq-render,summary-csv`.
-- Generated VMD scripts use explicit cage/guest commands such as `sqq show cage 512`, `sqq show guest 512`, `sqq color cage 512 green`, and `sqq color guest 512 yellow`. Sourcing the script prints concise help and starts with `sqq show cage all`.
-- `sqq-cage.gro` now retains guest-to-cage memberships, including multi-cage assignments and every atom of a multi-atom guest. Cage networks use DynamicBonds; guests use CPK.
-- Mandatory runtime metadata is written atomically to `config.yaml`. Detailed `config` worksheet/CSV tables are removed, while the summary dashboard keeps a compact Configuration block.
+- Package and native-core versions are synchronized at `0.3.6`, released Jul 23, 2026.
+- The VMD `sqq show` command accepts one or more family/target groups, so one command can combine objects, for example `sqq show cage 512 guest 512`.
+- The source default remains `sqq show cage all`. The first `show` replaces it; later `show` commands add layers, and exact repeated selections are ignored.
+- `sqq clear` removes custom layers and color overrides, restores the default cage-all view, and rearms first-show replacement.
+- Cross-family representations use the fixed order `phase -> cluster -> domain -> cage -> guest`, independent of command order. The existing cage-topology priority remains separate.
+- Sourcing the Tcl script prints a compact command welcome. `sqq help`, `sqq -h`, and `sqq --help` print the full command guide. The `color` command remains single-family.
 
 ## Install
 
@@ -606,7 +605,7 @@ Keep `sqq-render.vmd.tcl` and `sqq-cage.gro` together, then source the script fr
 source {path/to/sqq-render.vmd.tcl}
 ```
 
-Sourcing prints a concise command list, reports `SQQ graph: <effective-mode>` once, and starts with `sqq show cage all`. The graph line is printed again only if the effective mode changes. The help spellings are equivalent:
+Sourcing prints a compact welcome, reports `SQQ graph: <effective-mode>` once, and starts from the default `sqq show cage all` view. The graph line is printed again only if the effective mode changes. Use any of these equivalent commands for the full guide:
 
 ```tcl
 sqq help
@@ -617,8 +616,9 @@ sqq --help
 The command grammar is explicit:
 
 ```text
-sqq show <family> <target> [target ...]
-sqq color <family> <target> [target ...] <color>
+sqq show <family> <target...> [<family> <target...>]...
+sqq color <family> <target...> <color>
+sqq clear
 ```
 
 Supported families are `cage`, `guest`, `phase`, `cluster`, and `domain`. Examples:
@@ -628,6 +628,8 @@ sqq show cage all
 sqq show cage 512
 sqq show cage 512 51264
 sqq show cage 51262_00053
+sqq show cage 512 guest 512
+sqq show cage 512 51264 guest 512 phase sI
 
 sqq show guest all
 sqq show guest 512
@@ -648,9 +650,11 @@ sqq color cluster cluster_00001 cyan
 sqq color cage all default
 ```
 
-For `cage`, a target is `all`, a registered cage type, or an exact frame-local cage ID; generic types such as `4^1-5^10-6^2` also accept `4151062`. For `guest`, the same target identifies guests assigned to all cages, to a cage type, or to one exact cage ID. Phase targets are `all`, `sI`, `sII`, `sH`, `boundary`, `ambiguous`, `unclassified`, or `isolated`; cluster/domain targets are `all` or exact IDs. Multiple targets are accepted within one family. The former inferred forms such as `sqq show 512` and `sqq color 512 blue` are not accepted.
+The startup `sqq show cage all` view is a replaceable default. The first `sqq show ...` command after sourcing the script or after `sqq clear` replaces that default; later `show` commands add independent layers without removing earlier selections. One `show` may contain several family/target groups, and an exact repeated family/target selection is ignored rather than creating another VMD representation. `sqq clear` removes all custom show layers and color overrides, restores the initial cage-all view, and makes the next `show` replace that restored default.
 
-Colors accept a case-insensitive VMD color name, an in-range ColorID, or `default`. Cage and guest overrides are independent and persist across frame/selection changes without rewriting either file. Cage networks use DynamicBonds with a 3.5 angstrom cutoff; guests use CPK and include the full molecule. When a guest belongs to several selected cage types, the same fixed topology priority used for coincident cage edges decides its display layer, independent of command order and ColorID. A single cage layer uses a 0.125 angstrom cylinder radius (0.250 angstrom diameter); multi-type layers remain bounded from 0.125 to 0.130 angstrom.
+Each family token in `show` starts a new group and consumes the following targets until the next family token. For `cage`, a target is `all`, a registered cage type, or an exact frame-local cage ID; generic types such as `4^1-5^10-6^2` also accept `4151062`. For `guest`, the same target identifies guests assigned to all cages, to a cage type, or to one exact cage ID. Phase targets are `all`, `sI`, `sII`, `sH`, `boundary`, `ambiguous`, `unclassified`, or `isolated`; cluster/domain targets are `all` or exact IDs. Multiple targets are accepted within each family group. The former inferred forms such as `sqq show 512` and `sqq color 512 blue` are not accepted.
+
+Unlike `show`, `sqq color` accepts exactly one family per command. Colors accept a case-insensitive VMD color name, an in-range ColorID, or `default`. Cage and guest overrides are independent and persist across frame/selection changes until `sqq clear`, re-sourcing, or an explicit `default` reset. Cross-family layers always render as `phase -> cluster -> domain -> cage -> guest`, so guests remain last and visible regardless of `show` order. This family order is separate from the fixed cage-topology priority used for coincident cage edges and multi-cage guests. Cage networks use DynamicBonds with a 3.5 angstrom cutoff; guests use CPK and include the full molecule. A single cage layer uses a 0.125 angstrom cylinder radius (0.250 angstrom diameter); multi-type layers remain bounded from 0.125 to 0.130 angstrom.
 
 The renderer manages representations by VMD's stable representation names, so `show`, `color`, and frame changes remove only SQQ-created representations and preserve representations added by the user. Rapid frame notifications are coalesced into one pending redraw. Fully unknown cage, cage-ID, guest-selection, cluster-ID, and domain-ID targets are rejected against the complete loaded trajectory; recognized phase names remain valid even when the current frame has no matching membership. Re-sourcing a generated script resets its selection/color state.
 

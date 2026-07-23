@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.20)
 
-project(sqq_cpp_core VERSION 0.3.5 LANGUAGES CXX)
+project(sqq_cpp_core VERSION 0.3.6 LANGUAGES CXX)
 
 find_package(Python REQUIRED COMPONENTS Interpreter Development.Module)
 find_package(pybind11 CONFIG REQUIRED)

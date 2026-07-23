@@ -192,7 +192,7 @@ Standalone files whose case-insensitive stems collide inside the same output roo
 
 Terminal and main-summary dashboard metadata share the same display helpers. The requested graph mode is preserved from config/CLI. Explicit graph modes display as `hbond`, `oo`, or `pairs`. For a multiple-GRO topology group, automatic graph mode is resolved once before dispatch and displays as `auto -> hbond` or `auto -> oo`; different topology groups may resolve differently, but their summaries remain separate. Single-file and trajectory paths retain their established pending/final effective-mode reporting.
 
-Root `sqq` / `sqq -h` output renders the banner and product sentence, then `SQQ version: 0.3.5   Release date: Jul 23, 2026`, then the ordinary `usage:` line. Root `sqq -v` / `sqq --version` exits successfully after printing only that version line. Subcommand help retains the standard argparse layout.
+Root `sqq` / `sqq -h` output renders the banner and product sentence, then `SQQ version: 0.3.6   Release date: Jul 23, 2026`, then the ordinary `usage:` line. Root `sqq -v` / `sqq --version` exits successfully after printing only that version line. Subcommand help retains the standard argparse layout.
 
 The mandatory output-root `config.yaml` is the authoritative runtime record. It preserves normalized analysis settings and adds final effective metadata: SQQ version, mode and engine, input/topology provenance, requested and effective graph modes, requested worker policy and resolved workers, backend/math threads, normalized output types, status/error, frame totals, failures, and `summary_write` timing/table dimensions. It is initialized with `status: running` before frame analysis and atomically replaced with `completed` or `failed`; a failed rewrite does not truncate the previous complete file. The detailed `config` worksheet in `summary.xlsx` and `summary/config.csv` are no longer built. Main summaries retain only the compact dashboard Configuration block. `output.types` remains the only output selector; removed `output.disabled_outputs` configurations are rejected rather than migrated.
 
@@ -798,20 +798,75 @@ For more than 26 topology groups, output normalization is replaced by the inform
 
 `sqq-cage.gro` contains one complete GRO block per successful frame, ordered by the original input/frame index. All source atoms, identity/order, wrapped coordinates, box, and optional GRO velocities are preserved; no PBC reimaging is performed. Atom lines reserve the optional velocity columns and place `; SQQ1 m=...` at column 69. Membership records encode cage type and ID plus phase/domain/cluster IDs when cluster analysis exists; nonmembers use `m=-`. Multiple cage memberships remain attached to one oxygen rather than being flattened into one label. A multi-frame bundle requires the same named contiguous residue-block topology and atom order across frames; numeric atom/residue IDs may differ. It is finalized atomically from worker-local fragments.
 
-`sqq-render.vmd.tcl` is self-contained and loads the neighboring `sqq-cage.gro`. Because VMD does not treat concatenated GRO blocks as one trajectory directly, the script splits complete frames into a temporary directory, loads them in order, deletes the temporary files, and tracks frame changes. When sourced, it prints concise help, reports `SQQ graph: <effective-mode>` once, and invokes `sqq show cage all`. The graph line is repeated only when the effective graph mode changes. `sqq help`, `sqq -h`, and `sqq --help` are equivalent.
+`sqq-render.vmd.tcl` is self-contained and loads the neighboring `sqq-cage.gro`. Because VMD does not treat concatenated GRO blocks as one trajectory directly, the script splits complete frames into a temporary directory, loads them in order, deletes the temporary files, and tracks frame changes. It initializes the default cage-all view, reports `SQQ graph: <effective-mode>` once, and repeats the graph line only when the effective graph mode changes.
+
+Sourcing prints this compact welcome verbatim:
+
+```text
+SQQ VMD Renderer
+
+Default view : cage all
+Show mode    : additive
+
+Commands:
+  sqq show <family> <target...> ?<family> <target...> ...?
+  sqq color <family> <target...> <color>
+  sqq clear
+  sqq -h
+
+Examples:
+  sqq show cage 512
+  sqq show cage 512 guest 512
+```
+
+`sqq help`, `sqq -h`, and `sqq --help` are equivalent and print the expanded guide:
+
+```text
+SQQ VMD commands
+
+Usage:
+  sqq show <family> <target...> ?<family> <target...> ...?
+  sqq color <family> <target...> <VMD-color|ColorID|default>
+  sqq clear
+  sqq help | sqq -h | sqq --help
+
+Families:
+  cage      Cage topology or exact cage ID
+  guest     Guests assigned to a cage topology or exact cage ID
+  phase     sI, sII, sH, boundary, ambiguous, unclassified, isolated
+  cluster   Exact cluster ID
+  domain    Exact domain ID
+
+Show behavior:
+  The first show replaces the default cage-all view.
+  Later show commands add layers; repeated selections are ignored.
+  sqq clear restores the default cage-all view and colors.
+
+Examples:
+  sqq show cage all
+  sqq show cage 512 51264
+  sqq show cage 512 guest 512
+  sqq show cage 512 guest 512 phase sI
+  sqq color cage 512 green
+  sqq color guest 512 yellow
+  sqq clear
+```
 
 The public grammar is explicit:
 
 ```text
-sqq show <family> <target> [target ...]
-sqq color <family> <target> [target ...] <VMD-color|ColorID|default>
+sqq show <family> <target...> [<family> <target...>]...
+sqq color <family> <target...> <VMD-color|ColorID|default>
+sqq clear
 ```
 
-Families are `cage`, `guest`, `phase`, `cluster`, and `domain`. Cage targets are `all`, a canonical/generic cage label, its delimiter-free alias, or a frame-local cage ID. Guest targets reuse the cage target namespace and mean the guests assigned to all cages, a cage type, or an exact cage ID. Phase accepts `all`, `sI`, `sII`, `sH`, `boundary`, `ambiguous`, `unclassified`, and `isolated`; cluster/domain accept `all` or reconstructed exact IDs. Multiple explicit targets are accepted only within one family. Bare inferred forms from 0.3.4 are removed.
+Families are `cage`, `guest`, `phase`, `cluster`, and `domain`. In `show`, every family token begins a group and consumes at least one following target up to the next family token; one command may therefore contain multiple groups, such as `sqq show cage 512 guest 512`. Cage targets are `all`, a canonical/generic cage label, its delimiter-free alias, or a frame-local cage ID. Guest targets reuse the cage target namespace and mean the guests assigned to all cages, a cage type, or an exact cage ID. Phase accepts `all`, `sI`, `sII`, `sH`, `boundary`, `ambiguous`, `unclassified`, and `isolated`; cluster/domain accept `all` or reconstructed exact IDs. Multiple explicit targets are accepted within each group. `color` deliberately remains a one-family command. Bare inferred forms from 0.3.4 are removed.
+
+The renderer stores the active view as deduplicated family/target state. On source or reset, it contains a synthetic, replaceable `cage all` default. The first `sqq show ...` replaces the default; each later `show` merges every supplied family group into the current view without clearing existing layers. Canonical family/target keys suppress exact duplicates before VMD representations are built. `sqq clear` removes custom selections and all color overrides, restores the synthetic `cage all` layer, and rearms first-show replacement. The color command continues to operate on one family per invocation.
 
 The annotated GRO keeps one atom list per frame-local cage and guest-to-cage membership for every assigned guest. Multi-atom guests retain the complete molecule, and one guest may belong to several cages. Cage representations use DynamicBonds; guest representations use CPK. Cage and guest colors have independent override maps. A multi-membership guest resolves coincident representations with the same fixed cage priority used for shared cage edges, independent of argument order and ColorID. Overrides persist across frame/selection changes in the current VMD session; `default` clears the selected override.
 
-A single cage layer uses a 0.125 angstrom cylinder radius, giving a 0.250 angstrom diameter. Multiple cage layers remain bounded from 0.125 through 0.130 angstrom, ordered as nonstandard below `512 < 51262 < 51263 < 51264 < 435663 < 51268`, with exact-ID highlights last. Explicit cage, guest, cluster, and domain targets are validated against the trajectory-wide registry. IDs remain frame-local labels rather than tracked physical objects.
+Cross-family rendering always follows `phase -> cluster -> domain -> cage -> guest`, independent of command grouping, command history, or target order. Rendering guests last keeps them visible above cage and classification networks. This family order is separate from the cage-topology order: a single cage layer uses a 0.125 angstrom cylinder radius, giving a 0.250 angstrom diameter; multiple cage layers remain bounded from 0.125 through 0.130 angstrom and are ordered as nonstandard below `512 < 51262 < 51263 < 51264 < 435663 < 51268`, with exact-ID highlights last. Explicit cage, guest, cluster, and domain targets are validated against the trajectory-wide registry. IDs remain frame-local labels rather than tracked physical objects.
 
 The renderer records VMD's stable representation names after each `mol addrep` and deletes only those names on the next redraw; the initial representation created with the SQQ molecule is adopted once, while later user-created representations are preserved. Frame traces keep at most one pending idle callback, so rapid animation updates coalesce to the final frame. Cage representations are ordered by fixed topology priority, with exact-object highlights last; changing a color or reversing `show` arguments does not change overlap ownership. Other object families retain color-override specificity ordering. Re-sourcing first removes the old frame trace, cancels its pending callback, and clears color/selection/representation state before loading the new bundle.
 
