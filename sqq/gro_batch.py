@@ -15,7 +15,7 @@ import sys
 from time import perf_counter
 from typing import Any
 
-from .config import is_cpp_mode, output_enabled
+from .config import DEFAULT_MODE, is_cpp_mode, output_enabled
 from .core.graph import resolve_bond_mode
 from .core.selection import select_waters
 from .io.gro_grouping import GroGroupingResult, gro_topology_descriptor, scan_and_group_gro_inputs
@@ -128,7 +128,7 @@ def analyze_multi_gro_batch(
     requested_workers = pipeline_api.resolve_workers(
         execution_config["parallel"].get("workers"),
         max(1, len(tasks)),
-        mode=execution_config.get("mode", "50"),
+        mode=execution_config.get("mode", DEFAULT_MODE),
         backend=parallel_backend,
     )
     workers = requested_workers if len(tasks) > 1 and parallel_backend != "serial" else 1
@@ -675,7 +675,7 @@ def cleanup_generated_output_root(root: Path, config: dict[str, Any]) -> None:
     if not root.exists():
         return
     cleanup_sqq_cage_bundle(root)
-    for name in ("summary.xlsx", "summary.md", "run_config.yaml"):
+    for name in ("summary.xlsx", "summary.md", "config.yaml", "run_config.yaml"):
         (root / name).unlink(missing_ok=True)
     remove_summary_csvs(root, config)
     legacy_config = deepcopy(config)

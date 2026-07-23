@@ -59,15 +59,16 @@ Examples:
 
 Analysis modes:
   -m 00  SQQ-Py: hbond, 4/5/6 search, 100% workers, find cluster on
-  -m 50  SQQ-Py: auto graph, 4/5/6 search, 50% workers, find cluster off
+  -m py  SQQ-Py: auto graph, 4/5/6 search, 1 worker, find cluster off
   -m 99  SQQ-CPP: hbond, internal 4/5/6 search, 100% workers
-  -m cpp SQQ-CPP: auto graph, internal 4/5/6 search, 50% workers
+  -m cpp SQQ-CPP: auto graph, internal 4/5/6 search, 1 worker
 
 Modes 99 and cpp use the C++17 cage/F3/F4 backend without quasi-cage,
-cluster, or ice analysis. Automatic 100% workers still reserve one physical
-core. Explicit -w/--worker overrides the mode fraction.
+cluster, or ice analysis. Modes 00/99 use 100% automatic workers and reserve
+one physical core; modes py/cpp default to one worker. Explicit -w/--worker
+overrides the mode default.
 -b/--bond-mode overrides the graph setting supplied by the selected mode.
---find-cluster overrides modes 00/50; SQQ-CPP rejects cluster search.
+--find-cluster overrides modes 00/py; SQQ-CPP rejects cluster search.
 
 Output layout:
   grouped: frame/ring/, frame/half_cage/<type>/,
@@ -121,8 +122,8 @@ def build_parser() -> argparse.ArgumentParser:
     analyze_parser.add_argument(
         "-m",
         "--mode",
-        choices=("00", "50", "99", "cpp"),
-        help="Analysis mode: SQQ-Py 00/50 or native SQQ-CPP 99/cpp.",
+        choices=("00", "py", "99", "cpp"),
+        help="Analysis mode: SQQ-Py 00/py or native SQQ-CPP 99/cpp; default py.",
     )
     analyze_parser.add_argument(
         "-b",
@@ -166,7 +167,7 @@ def build_parser() -> argparse.ArgumentParser:
     analyze_parser.add_argument("--max-cage-face", metavar="N", type=int, help="Maximum face count searched for Euler-compatible cages; default 20.")
     analyze_parser.add_argument("--cage-fast-closure", choices=("on", "off"), help="Enable or disable indexed 2-4 half-cage fast closure; default on.")
     analyze_parser.add_argument("--cage-scientific-validation", choices=("on", "off"), help="Enable or disable optional cage face-quality/volume validation; topology validation is always on; default off.")
-    analyze_parser.add_argument("--find-cluster", choices=("on", "off"), help="Override the mode preset for hydrate-cluster search; the overall default mode 50 is off.")
+    analyze_parser.add_argument("--find-cluster", choices=("on", "off"), help="Override the mode preset for hydrate-cluster search; the default py mode is off.")
     analyze_parser.add_argument("--cluster-min-cage", metavar="N", type=int, help="Minimum connected cage count required for a hydrate_cluster; default 2.")
     analyze_parser.add_argument("--recursive", action="store_true", help="Read input directory recursively.")
     analyze_parser.add_argument("--pairs", metavar="PAIRS.txt", help="Pair file for bond_mode=pairs; each line contains two water ids.")

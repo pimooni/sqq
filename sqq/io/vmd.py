@@ -16,6 +16,7 @@ from ..display import graph_mode_display
 from ..models import Atom, Frame, FrameResult
 from .gro_grouping import gro_topology_fingerprint
 from .gro_writer import ascii_gro_text
+from .occupancy import guest_id
 
 
 FRAGMENT_DIRECTORY = ".sqq-cage-fragments"
@@ -105,8 +106,14 @@ def write_sqq_cage_fragment(
     manifest_path = root / f"{stem}.json"
 
     memberships = water_cage_memberships(result)
+    guest_memberships = guest_cage_memberships(result)
     graph_display = _frame_graph_display(result, requested_graph_mode)
-    block = annotated_gro_block(result, memberships, graph_display)
+    block = annotated_gro_block(
+        result,
+        memberships,
+        graph_display,
+        guest_memberships=guest_memberships,
+    )
     signature = atom_signature(result.frame.atoms)
     manifest: dict[str, Any] = {
         "format": "SQQ cage fragment",
@@ -204,28 +211,38 @@ def cleanup_sqq_cage_bundle(outdir: Path) -> None:
         shutil.rmtree(fragment_dir)
 
 
-def water_cage_memberships(result: FrameResult) -> dict[int, tuple[CageMembership, ...]]:
-    """Map water-oxygen atom indexes to every cage membership."""
+def _cage_membership_records(
+    result: FrameResult,
+) -> tuple[list[Any], dict[str, CageMembership]]:
+    """Build one validated membership record for every output cage."""
     cages = list(result.all_cages or result.cages)
     cage_by_id: dict[str, Any] = {}
     for cage in cages:
         if cage.object_id in cage_by_id:
             raise ValueError(f"Duplicate cage id in SQQ cage output: {cage.object_id}")
         cage_by_id[cage.object_id] = cage
-
     classification = _cage_classification(result, cage_by_id)
-    memberships: dict[int, list[CageMembership]] = {}
+    records: dict[str, CageMembership] = {}
     for cage in cages:
         class_code, domain_id, cluster_id = classification.get(
             cage.object_id, ("-", "-", "-")
         )
-        item = CageMembership(
+        records[cage.object_id] = CageMembership(
             cage_id=_compact_object_id(cage.object_id),
             cage_type=cage.cage_type,
             class_code=class_code,
             domain_id=_compact_object_id(domain_id),
             cluster_id=_compact_object_id(cluster_id),
         )
+    return cages, records
+
+
+def water_cage_memberships(result: FrameResult) -> dict[int, tuple[CageMembership, ...]]:
+    """Map water-oxygen atom indexes to every cage membership."""
+    cages, records = _cage_membership_records(result)
+    memberships: dict[int, list[CageMembership]] = {}
+    for cage in cages:
+        item = records[cage.object_id]
         for oxygen in cage.waters:
             oxygen_index = int(oxygen)
             if oxygen_index < 0 or oxygen_index >= len(result.frame.atoms):
@@ -237,10 +254,48 @@ def water_cage_memberships(result: FrameResult) -> dict[int, tuple[CageMembershi
     return {index: tuple(items) for index, items in memberships.items()}
 
 
+def guest_cage_memberships(result: FrameResult) -> dict[int, tuple[CageMembership, ...]]:
+    """Map every atom of an assigned guest to all containing cages."""
+    cages, records = _cage_membership_records(result)
+    guests: dict[str, Any] = {}
+    for guest in result.guests:
+        identifier = guest_id(guest)
+        if identifier in guests:
+            raise ValueError(f"Duplicate guest id in SQQ cage output: {identifier}")
+        guests[identifier] = guest
+
+    by_guest: dict[str, list[CageMembership]] = {}
+    seen: dict[str, set[str]] = {}
+    for cage in cages:
+        item = records[cage.object_id]
+        for identifier in cage.guest_ids:
+            if identifier not in guests:
+                raise ValueError(
+                    f"Cage {cage.object_id} references unknown guest id: {identifier}"
+                )
+            if cage.object_id in seen.setdefault(identifier, set()):
+                continue
+            seen[identifier].add(cage.object_id)
+            by_guest.setdefault(identifier, []).append(item)
+
+    memberships: dict[int, tuple[CageMembership, ...]] = {}
+    for identifier, items in by_guest.items():
+        guest = guests[identifier]
+        for atom_index in guest.atoms:
+            index = int(atom_index)
+            if index < 0 or index >= len(result.frame.atoms):
+                raise ValueError(
+                    f"Guest {identifier} references invalid atom index {index}."
+                )
+            memberships[index] = tuple(items)
+    return memberships
+
 def annotated_gro_block(
     result: FrameResult,
     memberships: dict[int, tuple[CageMembership, ...]],
     graph_display: str,
+    *,
+    guest_memberships: dict[int, tuple[CageMembership, ...]] | None = None,
 ) -> str:
     """Return one complete ASCII GRO block with SQQ annotations."""
     title_parts = ["SQQ cage", f"frame={ascii_gro_text(result.frame.name)}"]
@@ -251,9 +306,13 @@ def annotated_gro_block(
         title_parts.append(f"time_ps={time_value:.9g}")
     title_parts.append("graph=" + ascii_gro_text(graph_display))
     lines = [" ".join(title_parts), f"{len(result.frame.atoms):5d}"]
+    guest_memberships = guest_memberships or {}
     for atom in result.frame.atoms:
         encoded = ",".join(item.encode() for item in memberships.get(int(atom.index), ()))
-        lines.append(_annotated_atom_line(atom, encoded or "-"))
+        guest_encoded = ",".join(
+            item.encode() for item in guest_memberships.get(int(atom.index), ())
+        )
+        lines.append(_annotated_atom_line(atom, encoded or "-", guest_encoded or "-"))
     lines.append(_box_line(result.frame.box))
     return "\n".join(lines) + "\n"
 
@@ -377,7 +436,11 @@ def _compact_object_id(value: Any) -> str:
 
 
 
-def _annotated_atom_line(atom: Atom, encoded_memberships: str) -> str:
+def _annotated_atom_line(
+    atom: Atom,
+    encoded_memberships: str,
+    encoded_guest_memberships: str = "-",
+) -> str:
     xyz = np.asarray(atom.xyz, dtype=float)
     if xyz.shape != (3,) or np.any(~np.isfinite(xyz)):
         raise ValueError(f"Invalid GRO coordinates for atom index {atom.index}.")
@@ -399,7 +462,8 @@ def _annotated_atom_line(atom: Atom, encoded_memberships: str) -> str:
         if velocity.shape != (3,) or np.any(~np.isfinite(velocity)):
             raise ValueError(f"Invalid GRO velocities for atom index {atom.index}.")
         velocity_text = "".join(_gro_velocity(value) for value in velocity)
-    line = prefix + velocity_text + ANNOTATION_PREFIX + annotation
+    guest_annotation = _ascii_annotation(encoded_guest_memberships)
+    line = prefix + velocity_text + ANNOTATION_PREFIX + annotation + " g=" + guest_annotation
     if line.index(";") + 1 != ANNOTATION_COLUMN:
         raise AssertionError("SQQ GRO annotation column is not 69.")
     return line
@@ -573,7 +637,7 @@ def _atomic_write_text(path: Path, text: str, *, encoding: str) -> None:
         temporary.unlink(missing_ok=True)
 
 
-_VMD_SCRIPT = r'''# SQQ annotated cage renderer for VMD.
+_VMD_SCRIPT = r'''# SQQ annotated cage and guest renderer for VMD.
 namespace eval ::SQQ {
     catch {trace remove variable ::vmd_frame write ::SQQ::frame_changed}
     if {[info exists frame_after_id] && $frame_after_id ne ""} {
@@ -582,9 +646,10 @@ namespace eval ::SQQ {
     variable molid -1
     variable gro_path ""
     variable current_family cage
-    variable current_targets {{cage cage *}}
+    variable current_targets {{cage *}}
     variable representation_names {}
     variable frame_after_id ""
+    variable displayed_graph_mode "__unset__"
     variable group_keys
     variable group_atoms
     variable graph_mode
@@ -598,13 +663,13 @@ namespace eval ::SQQ {
     }
 }
 
-proc ::SQQ::add_member {frame mode key atom_index} {
+proc ::SQQ::add_member {frame source key atom_index} {
     variable group_keys
     variable group_atoms
     variable known_objects
-    set known_objects($mode,$key) 1
-    set group_key "$frame,$mode"
-    set atom_key "$frame,$mode,$key"
+    set known_objects($source,$key) 1
+    set group_key "$frame,$source"
+    set atom_key "$frame,$source,$key"
     if {![info exists group_atoms($atom_key)]} {
         lappend group_keys($group_key) $key
         set group_atoms($atom_key) {}
@@ -612,33 +677,42 @@ proc ::SQQ::add_member {frame mode key atom_index} {
     lappend group_atoms($atom_key) $atom_index
 }
 
-proc ::SQQ::register_object {mode key} {
+proc ::SQQ::register_object {source key} {
     variable known_objects
-    set known_objects($mode,$key) 1
+    set known_objects($source,$key) 1
 }
 
-proc ::SQQ::register_cage {cage_type object_id} {
+proc ::SQQ::register_cage_object {family cage_type object_id} {
     variable object_aliases
     variable cage_types
-    ::SQQ::register_object cage $cage_type
-    ::SQQ::register_object cage-id $object_id
+    set id_source "${family}-id"
+    ::SQQ::register_object $family $cage_type
+    ::SQQ::register_object $id_source $object_id
     set cage_types($object_id) $cage_type
     set compact [string map [list "^" "" "-" "" "_" ""] $cage_type]
     if {$compact ne $cage_type} {
-        set object_aliases(cage,$compact) $cage_type
+        set object_aliases($family,$compact) $cage_type
         set suffix [string range $object_id [string length $cage_type] end]
-        set object_aliases(cage-id,${compact}${suffix}) $object_id
+        set object_aliases($id_source,${compact}${suffix}) $object_id
     }
+}
+
+proc ::SQQ::register_cage {cage_type object_id} {
+    ::SQQ::register_cage_object cage $cage_type $object_id
+}
+
+proc ::SQQ::register_guest_cage {cage_type object_id} {
+    ::SQQ::register_cage_object guest $cage_type $object_id
 }
 
 proc ::SQQ::deduplicate_frame_memberships {frame} {
     variable group_keys
     variable group_atoms
-    foreach mode {phase cluster domain} {
-        set group_key "$frame,$mode"
+    foreach source {cage-id guest-id phase cluster domain} {
+        set group_key "$frame,$source"
         if {![info exists group_keys($group_key)]} { continue }
         foreach key $group_keys($group_key) {
-            set atom_key "$frame,$mode,$key"
+            set atom_key "$frame,$source,$key"
             set group_atoms($atom_key) [lsort -integer -unique $group_atoms($atom_key)]
         }
     }
@@ -662,13 +736,38 @@ proc ::SQQ::cage_object_id {cage_type cage_id} {
 
 proc ::SQQ::cage_type_from_object_id {object_id} {
     variable cage_types
-    if {[info exists cage_types($object_id)]} {
-        return $cage_types($object_id)
-    }
-    if {[regexp {^(.+)_([0-9]+)$} $object_id -> cage_type number]} {
-        return $cage_type
-    }
+    if {[info exists cage_types($object_id)]} { return $cage_types($object_id) }
+    if {[regexp {^(.+)_([0-9]+)$} $object_id -> cage_type number]} { return $cage_type }
     return ""
+}
+
+proc ::SQQ::read_memberships {frame atom_index family payload} {
+    if {$payload eq "" || $payload eq "-"} { return }
+    foreach membership [split $payload ,] {
+        set fields [split $membership :]
+        if {[llength $fields] != 5} {
+            error "Invalid SQQ $family membership in frame $frame: $membership"
+        }
+        lassign $fields cage_id cage_type phase domain_id cluster_id
+        if {$cage_type eq "-"} { continue }
+        set object_id [::SQQ::cage_object_id $cage_type $cage_id]
+        if {$family eq "cage"} {
+            ::SQQ::register_cage $cage_type $object_id
+            ::SQQ::add_member $frame cage-id $object_id $atom_index
+            if {$phase ne "-"} { ::SQQ::add_member $frame phase $phase $atom_index }
+            if {$cluster_id ne "-"} {
+                ::SQQ::add_member $frame cluster [::SQQ::numbered_id cluster $cluster_id] $atom_index
+            }
+            if {$domain_id ne "-"} {
+                ::SQQ::add_member $frame domain [::SQQ::numbered_id domain $domain_id] $atom_index
+            }
+        } elseif {$family eq "guest"} {
+            ::SQQ::register_guest_cage $cage_type $object_id
+            ::SQQ::add_member $frame guest-id $object_id $atom_index
+        } else {
+            error "Invalid SQQ membership family '$family'"
+        }
+    }
 }
 
 proc ::SQQ::read_annotations {path} {
@@ -678,12 +777,10 @@ proc ::SQQ::read_annotations {path} {
     variable known_objects
     variable object_aliases
     variable cage_types
-    array unset group_keys
-    array unset group_atoms
-    array unset graph_mode
-    array unset known_objects
-    array unset object_aliases
-    array unset cage_types
+    foreach name {group_keys group_atoms graph_mode known_objects object_aliases cage_types} {
+        array unset $name
+        array set $name {}
+    }
     set handle [open $path r]
     fconfigure $handle -encoding ascii -translation auto
     set frame 0
@@ -707,32 +804,21 @@ proc ::SQQ::read_annotations {path} {
                 close $handle
                 error "Truncated atom records in sqq-cage.gro frame $frame"
             }
-            if {![regexp {; SQQ1 m=(.*)$} $line -> payload] || $payload eq "-"} {
-                continue
-            }
-            foreach membership [split $payload ,] {
-                set fields [split $membership :]
-                if {[llength $fields] != 5} {
+            if {![regexp {; SQQ1 m=([^ ]+)(.*)$} $line -> cage_payload suffix]} { continue }
+            set guest_payload "-"
+            if {$suffix ne ""} {
+                if {![regexp {^ g=([^ ]+)$} $suffix -> guest_payload]} {
                     close $handle
-                    error "Invalid SQQ membership in frame $frame: $membership"
+                    error "Invalid SQQ annotation in frame $frame: $suffix"
                 }
-                lassign $fields cage_id cage_type phase domain_id cluster_id
-                if {$cage_type ne "-"} {
-                    set object_id [::SQQ::cage_object_id $cage_type $cage_id]
-                    ::SQQ::register_cage $cage_type $object_id
-                    ::SQQ::add_member $frame cage-id $object_id $atom_index
-                }
-                if {$phase ne "-"} {
-                    ::SQQ::add_member $frame phase $phase $atom_index
-                }
-                if {$cluster_id ne "-"} {
-                    set key [::SQQ::numbered_id cluster $cluster_id]
-                    ::SQQ::add_member $frame cluster $key $atom_index
-                }
-                if {$domain_id ne "-"} {
-                    set key [::SQQ::numbered_id domain $domain_id]
-                    ::SQQ::add_member $frame domain $key $atom_index
-                }
+            }
+            if {[catch {::SQQ::read_memberships $frame $atom_index cage $cage_payload} message]} {
+                close $handle
+                error $message
+            }
+            if {[catch {::SQQ::read_memberships $frame $atom_index guest $guest_payload} message]} {
+                close $handle
+                error $message
             }
         }
         if {[gets $handle box_line] < 0} {
@@ -746,14 +832,14 @@ proc ::SQQ::read_annotations {path} {
     return $frame
 }
 
-proc ::SQQ::key_rank {mode key} {
-    if {$mode eq "cage"} {
+proc ::SQQ::key_rank {family key} {
+    if {$family in {cage guest}} {
         set order {512 51262 51263 51264 435663 51268}
         set position [lsearch -exact $order $key]
         if {$position >= 0} { return $position }
         return 100
     }
-    if {$mode eq "phase"} {
+    if {$family eq "phase"} {
         set order {I II H B A U X}
         set position [lsearch -exact $order $key]
         if {$position >= 0} { return $position }
@@ -762,15 +848,13 @@ proc ::SQQ::key_rank {mode key} {
     return 0
 }
 
-proc ::SQQ::ordered_keys {mode keys} {
+proc ::SQQ::ordered_keys {family keys} {
     set decorated {}
     foreach key [lsort -unique $keys] {
-        lappend decorated [list [::SQQ::key_rank $mode $key] $key]
+        lappend decorated [list [::SQQ::key_rank $family $key] $key]
     }
     set output {}
-    foreach item [lsort -integer -index 0 $decorated] {
-        lappend output [lindex $item 1]
-    }
+    foreach item [lsort -integer -index 0 $decorated] { lappend output [lindex $item 1] }
     return $output
 }
 
@@ -795,7 +879,7 @@ proc ::SQQ::generic_cage_rank {cage_type} {
     return [list $total_faces $ring_kinds]
 }
 
-proc ::SQQ::cage_render_key {object_id color_priority color_id explicit} {
+proc ::SQQ::object_render_key {object_id color_priority color_id explicit} {
     set cage_type [::SQQ::cage_type_from_object_id $object_id]
     set exact [expr {$explicit || $color_priority == 3}]
     set standard_rank [::SQQ::standard_cage_rank $cage_type]
@@ -811,7 +895,7 @@ proc ::SQQ::cage_render_key {object_id color_priority color_id explicit} {
     return [list $exact $standard $primary $secondary $cage_type $exact_id $color_id]
 }
 
-proc ::SQQ::compare_cage_render_keys {left right} {
+proc ::SQQ::compare_object_render_keys {left right} {
     foreach index {0 1 2 3} {
         set left_value [lindex $left $index]
         set right_value [lindex $right $index]
@@ -838,8 +922,7 @@ proc ::SQQ::cage_layer_radius {tier tiers} {
     set count [llength $tiers]
     if {$count <= 1} { return 0.125 }
     set index [lsearch -exact $tiers $tier]
-    set radius [expr {0.125 + 0.005 * $index / double($count - 1)}]
-    return [format "%.3f" $radius]
+    return [format "%.3f" [expr {0.125 + 0.005 * $index / double($count - 1)}]]
 }
 
 proc ::SQQ::stable_color {key} {
@@ -852,8 +935,8 @@ proc ::SQQ::stable_color {key} {
     return [lindex $palette [expr {$hash % [llength $palette]}]]
 }
 
-proc ::SQQ::color_id {mode key} {
-    if {$mode eq "cage"} {
+proc ::SQQ::color_id {family key} {
+    if {$family in {cage guest}} {
         switch -- $key {
             512 { return 7 }
             51262 { return 0 }
@@ -864,7 +947,7 @@ proc ::SQQ::color_id {mode key} {
             default { return 2 }
         }
     }
-    if {$mode eq "phase"} {
+    if {$family eq "phase"} {
         switch -- $key {
             I { return 1 }
             II { return 0 }
@@ -879,13 +962,23 @@ proc ::SQQ::color_id {mode key} {
     return [::SQQ::stable_color $key]
 }
 
+proc ::SQQ::source_family {source} {
+    switch -- $source {
+        cage - cage-id { return cage }
+        guest - guest-id { return guest }
+        phase - cluster - domain { return $source }
+    }
+    error "Unknown SQQ source '$source'"
+}
+
 proc ::SQQ::default_color_id {source key} {
-    if {$source eq "cage-id"} {
+    set family [::SQQ::source_family $source]
+    if {$source in {cage-id guest-id}} {
         set cage_type [::SQQ::cage_type_from_object_id $key]
-        if {$cage_type ne ""} { return [::SQQ::color_id cage $cage_type] }
+        if {$cage_type ne ""} { return [::SQQ::color_id $family $cage_type] }
         return 2
     }
-    return [::SQQ::color_id $source $key]
+    return [::SQQ::color_id $family $key]
 }
 
 proc ::SQQ::effective_color {source key} {
@@ -897,12 +990,11 @@ proc ::SQQ::effective_color {source key} {
         }
         return [list $color_overrides($exact) 3]
     }
-    set family $source
-    if {$source eq "cage-id"} {
-        set family cage
+    set family [::SQQ::source_family $source]
+    if {$source in {cage-id guest-id}} {
         set cage_type [::SQQ::cage_type_from_object_id $key]
         if {$cage_type ne ""} {
-            set type_key "cage,$cage_type"
+            set type_key "$family,$cage_type"
             if {[info exists color_overrides($type_key)]} {
                 if {$color_overrides($type_key) eq "default"} {
                     return [list [::SQQ::default_color_id $source $key] 2]
@@ -918,67 +1010,66 @@ proc ::SQQ::effective_color {source key} {
     return [list [::SQQ::default_color_id $source $key] 0]
 }
 
-proc ::SQQ::effective_color_id {source key} {
-    return [lindex [::SQQ::effective_color $source $key] 0]
-}
-
 proc ::SQQ::phase_key {value} {
-    set aliases [dict create \
-        si I i I sii II ii II sh H h H \
-        boundary B b B ambiguous A a A \
-        unclassified U u U isolated X x X]
+    set aliases [dict create si I i I sii II ii II sh H h H boundary B b B ambiguous A a A unclassified U u U isolated X x X]
     set key [string tolower $value]
-    if {[dict exists $aliases $key]} {
-        return [dict get $aliases $key]
-    }
+    if {[dict exists $aliases $key]} { return [dict get $aliases $key] }
     return ""
 }
 
-proc ::SQQ::parse_target {value} {
-    variable known_objects
-    variable object_aliases
-    set token [string trim $value]
-    set lower [string tolower $token]
-    if {$lower eq "all"} {
-        return [list cage cage *]
+proc ::SQQ::normalize_family {value} {
+    set family [string tolower [string trim $value]]
+    if {$family ni {cage guest phase cluster domain}} {
+        error "SQQ family must be cage, guest, phase, cluster, or domain"
     }
-    if {$lower in {cage phase cluster domain}} {
-        return [list $lower $lower *]
-    }
-    set phase [::SQQ::phase_key $token]
-    if {$phase ne ""} {
-        return [list phase phase $phase]
-    }
-    foreach source {cage-id cage} {
-        if {[info exists known_objects($source,$token)]} {
-            return [list cage $source $token]
-        }
-        if {[info exists object_aliases($source,$token)]} {
-            return [list cage $source $object_aliases($source,$token)]
-        }
-    }
-    if {[regexp -nocase {^cluster_([0-9]+)$} $token -> number]} {
-        return [list cluster cluster [::SQQ::numbered_id cluster $number]]
-    }
-    if {[regexp -nocase {^domain_([0-9]+)$} $token -> number]} {
-        return [list domain domain [::SQQ::numbered_id domain $number]]
-    }
-    if {[regexp {^([0-9]+)_([0-9]+)$} $token -> cage_type number]} {
-        return [list cage cage-id [::SQQ::cage_object_id $cage_type $number]]
-    }
-    if {[regexp {^[0-9]+$} $token]} {
-        return [list cage cage $token]
-    }
-    error "Unknown SQQ object '$value'"
+    return $family
 }
 
-proc ::SQQ::require_known_target {target} {
+proc ::SQQ::parse_target {family value} {
     variable known_objects
-    lassign $target family source key
-    if {$key eq "*" || $source eq "phase"} { return }
+    variable object_aliases
+    set family [::SQQ::normalize_family $family]
+    set token [string trim $value]
+    if {[string equal -nocase $token all]} { return [list $family *] }
+    if {$family in {cage guest}} {
+        set id_source "${family}-id"
+        foreach source [list $id_source $family] {
+            if {[info exists known_objects($source,$token)]} { return [list $source $token] }
+            if {[info exists object_aliases($source,$token)]} {
+                return [list $source $object_aliases($source,$token)]
+            }
+        }
+        if {[regexp {^(.+)_([0-9]+)$} $token -> cage_type number]} {
+            return [list $id_source [::SQQ::cage_object_id $cage_type $number]]
+        }
+        if {[regexp {^[0-9]+$} $token]} { return [list $family $token] }
+    } elseif {$family eq "phase"} {
+        set key [::SQQ::phase_key $token]
+        if {$key ne ""} { return [list phase $key] }
+    } elseif {$family eq "cluster"} {
+        if {[regexp -nocase {^cluster_([0-9]+)$} $token -> number]} {
+            return [list cluster [::SQQ::numbered_id cluster $number]]
+        }
+        if {[regexp {^[0-9]+$} $token]} {
+            return [list cluster [::SQQ::numbered_id cluster $token]]
+        }
+    } elseif {$family eq "domain"} {
+        if {[regexp -nocase {^domain_([0-9]+)$} $token -> number]} {
+            return [list domain [::SQQ::numbered_id domain $number]]
+        }
+        if {[regexp {^[0-9]+$} $token]} {
+            return [list domain [::SQQ::numbered_id domain $token]]
+        }
+    }
+    error "Unknown SQQ $family target '$value'"
+}
+
+proc ::SQQ::require_known_target {family target} {
+    variable known_objects
+    lassign $target source key
+    if {$key eq "*"} { return }
     if {![info exists known_objects($source,$key)]} {
-        set label [::SQQ::target_label $target]
-        error "SQQ object '$label' does not exist in the loaded trajectory"
+        error "SQQ $family target '[::SQQ::target_label $family $target]' does not exist in the loaded trajectory"
     }
 }
 
@@ -995,45 +1086,35 @@ proc ::SQQ::phase_label {key} {
     return $key
 }
 
-proc ::SQQ::target_label {target} {
-    lassign $target family source key
-    if {$family eq "cage" && $key eq "*"} { return all }
-    if {$key eq "*"} { return $family }
-    if {$source eq "phase"} { return [::SQQ::phase_label $key] }
+proc ::SQQ::target_label {family target} {
+    lassign $target source key
+    if {$key eq "*"} { return all }
+    if {$family eq "phase"} { return [::SQQ::phase_label $key] }
     return $key
 }
 
-proc ::SQQ::set_show {values} {
-    variable current_family
-    variable current_targets
-    if {[llength $values] == 0} {
-        error "Usage: sqq show <object> ?object ...?"
-    }
-    set family ""
+proc ::SQQ::parse_targets {family values} {
+    if {[llength $values] == 0} { error "At least one SQQ target is required" }
     set targets {}
     foreach value $values {
-        if {[string equal -nocase [string trim $value] cage]} {
-            error "'cage' is not a show target; use 'sqq show all'"
-        }
-        set target [::SQQ::parse_target $value]
-        ::SQQ::require_known_target $target
-        set target_family [lindex $target 0]
-        if {$family eq ""} {
-            set family $target_family
-        } elseif {$target_family ne $family} {
-            error "sqq show cannot mix $family and $target_family objects"
-        }
+        set target [::SQQ::parse_target $family $value]
+        ::SQQ::require_known_target $family $target
         if {$target ni $targets} { lappend targets $target }
     }
     if {[llength $targets] > 1} {
         foreach target $targets {
-            if {[lindex $target 2] eq "*"} {
-                error "A category name must be used alone with sqq show"
-            }
+            if {[lindex $target 1] eq "*"} { error "The all target must be used alone" }
         }
     }
+    return $targets
+}
+
+proc ::SQQ::set_show {family values} {
+    variable current_family
+    variable current_targets
+    set family [::SQQ::normalize_family $family]
     set current_family $family
-    set current_targets $targets
+    set current_targets [::SQQ::parse_targets $family $values]
     ::SQQ::render_current
 }
 
@@ -1048,9 +1129,7 @@ proc ::SQQ::color_value {value} {
         return $color_id
     }
     set color_id [lsearch -nocase -exact $names $value]
-    if {$color_id < 0} {
-        error "Unknown VMD color '$value'"
-    }
+    if {$color_id < 0} { error "Unknown VMD color '$value'" }
     return $color_id
 }
 
@@ -1058,26 +1137,28 @@ proc ::SQQ::clear_family_colors {family} {
     variable color_overrides
     foreach name [array names color_overrides] {
         set source [lindex [split $name ,] 0]
-        if {$source eq $family || ($family eq "cage" && $source eq "cage-id")} {
-            unset color_overrides($name)
-        }
+        if {[::SQQ::source_family $source] eq $family} { unset color_overrides($name) }
     }
 }
 
-proc ::SQQ::set_color {object color} {
+proc ::SQQ::set_colors {family values color} {
     variable color_overrides
-    set target [::SQQ::parse_target $object]
-    lassign $target family source key
+    set family [::SQQ::normalize_family $family]
+    set targets [::SQQ::parse_targets $family $values]
     set value [::SQQ::color_value $color]
-    ::SQQ::require_known_target $target
-    if {$key eq "*"} {
-        ::SQQ::clear_family_colors $family
-        if {$value ne "default"} { set color_overrides($family,*) $value }
-    } else {
-        set color_overrides($source,$key) $value
+    foreach target $targets {
+        lassign $target source key
+        if {$key eq "*"} {
+            ::SQQ::clear_family_colors $family
+            if {$value ne "default"} { set color_overrides($family,*) $value }
+        } else {
+            set color_overrides($source,$key) $value
+        }
     }
     ::SQQ::render_current
-    puts "SQQ color: [::SQQ::target_label $target] -> $color"
+    set labels {}
+    foreach target $targets { lappend labels [::SQQ::target_label $family $target] }
+    puts "SQQ color $family: [join $labels { }] -> $color"
 }
 
 proc ::SQQ::track_representation {rep_index} {
@@ -1090,9 +1171,7 @@ proc ::SQQ::track_representation {rep_index} {
 proc ::SQQ::adopt_initial_representations {} {
     variable molid
     set count [molinfo $molid get numreps]
-    for {set rep 0} {$rep < $count} {incr rep} {
-        ::SQQ::track_representation $rep
-    }
+    for {set rep 0} {$rep < $count} {incr rep} { ::SQQ::track_representation $rep }
 }
 
 proc ::SQQ::clear_representations {} {
@@ -1104,30 +1183,29 @@ proc ::SQQ::clear_representations {} {
         if {[catch {mol repindex $molid $name} rep]} { continue }
         if {[string is integer -strict $rep] && $rep >= 0} { lappend indexes $rep }
     }
-    foreach rep [lsort -integer -decreasing -unique $indexes] {
-        mol delrep $rep $molid
-    }
+    foreach rep [lsort -integer -decreasing -unique $indexes] { mol delrep $rep $molid }
     set representation_names {}
 }
 
-proc ::SQQ::expanded_targets {frame targets} {
+proc ::SQQ::expanded_targets {frame family targets} {
     variable group_keys
     set expanded {}
     foreach target $targets {
-        lassign $target family source key
-        if {$family eq "cage" && $source ne "cage-id"} {
-            set group_key "$frame,cage-id"
+        lassign $target source key
+        if {$family in {cage guest} && $source eq $family} {
+            set id_source "${family}-id"
+            set group_key "$frame,$id_source"
             if {![info exists group_keys($group_key)]} { continue }
             foreach object_id [lsort -unique $group_keys($group_key)] {
-                if {$key eq "*" || [string match "${key}_*" $object_id]} {
-                    set item [list cage-id $object_id]
+                if {$key eq "*" || [::SQQ::cage_type_from_object_id $object_id] eq $key} {
+                    set item [list $id_source $object_id]
                     if {$item ni $expanded} { lappend expanded $item }
                 }
             }
         } elseif {$key eq "*"} {
             set group_key "$frame,$source"
             if {![info exists group_keys($group_key)]} { continue }
-            foreach object_key [::SQQ::ordered_keys $source $group_keys($group_key)] {
+            foreach object_key [::SQQ::ordered_keys $family $group_keys($group_key)] {
                 set item [list $source $object_key]
                 if {$item ni $expanded} { lappend expanded $item }
             }
@@ -1156,9 +1234,30 @@ proc ::SQQ::add_dynamic_bonds_representation {indexes color_id radius} {
     mol selection "index [join $indexes { }]"
     mol material Opaque
     mol addrep $molid
-    set rep_index [expr {[molinfo $molid get numreps] - 1}]
-    ::SQQ::track_representation $rep_index
+    ::SQQ::track_representation [expr {[molinfo $molid get numreps] - 1}]
     return 1
+}
+
+proc ::SQQ::add_guest_representation {indexes color_id} {
+    variable molid
+    if {[llength $indexes] == 0} { return 0 }
+    mol representation CPK 1.0 0.3 12.0 12.0
+    mol color ColorID $color_id
+    mol selection "index [join $indexes { }]"
+    mol material Opaque
+    mol addrep $molid
+    ::SQQ::track_representation [expr {[molinfo $molid get numreps] - 1}]
+    return 1
+}
+
+proc ::SQQ::announce_graph_mode {frame} {
+    variable graph_mode
+    variable displayed_graph_mode
+    set value [expr {[info exists graph_mode($frame)] ? $graph_mode($frame) : "unknown"}]
+    if {$value ne $displayed_graph_mode} {
+        puts "SQQ graph: $value"
+        set displayed_graph_mode $value
+    }
 }
 
 proc ::SQQ::render_current {} {
@@ -1167,65 +1266,59 @@ proc ::SQQ::render_current {} {
     variable current_family
     variable current_targets
     variable group_atoms
-    variable graph_mode
     if {$molid < 0 || $molid ni [molinfo list]} { return }
     set frame [molinfo $molid get frame]
-    if {[info exists graph_mode($frame)]} {
-        puts "SQQ graph: $graph_mode($frame)"
-    }
+    ::SQQ::announce_graph_mode $frame
     ::SQQ::clear_representations
     set representation_count 0
-    if {$current_family eq "cage"} {
+    if {$current_family in {cage guest}} {
         array set explicit_ids {}
         foreach target $current_targets {
-            lassign $target family source key
-            if {$source eq "cage-id"} { set explicit_ids($key) 1 }
+            lassign $target source key
+            if {$source eq "${current_family}-id"} { set explicit_ids($key) 1 }
         }
         array set layer_atoms {}
         set layer_keys {}
-        foreach item [::SQQ::expanded_targets $frame $current_targets] {
+        foreach item [::SQQ::expanded_targets $frame $current_family $current_targets] {
             lassign $item source key
             set atom_key "$frame,$source,$key"
             if {![info exists group_atoms($atom_key)]} { continue }
             lassign [::SQQ::effective_color $source $key] color_id color_priority
             set explicit [info exists explicit_ids($key)]
-            set layer_key [::SQQ::cage_render_key $key $color_priority $color_id $explicit]
+            set layer_key [::SQQ::object_render_key $key $color_priority $color_id $explicit]
             if {![info exists layer_atoms($layer_key)]} {
                 lappend layer_keys $layer_key
                 set layer_atoms($layer_key) {}
             }
-            foreach atom_index $group_atoms($atom_key) {
-                lappend layer_atoms($layer_key) $atom_index
+            foreach atom_index $group_atoms($atom_key) { lappend layer_atoms($layer_key) $atom_index }
+        }
+        set layer_keys [lsort -command ::SQQ::compare_object_render_keys $layer_keys]
+        if {$current_family eq "cage"} {
+            set radius_tiers {}
+            foreach layer_key $layer_keys { lappend radius_tiers [::SQQ::cage_radius_tier $layer_key] }
+            set radius_tiers [lsort -integer -unique $radius_tiers]
+            foreach layer_key $layer_keys {
+                set indexes [lsort -integer -unique $layer_atoms($layer_key)]
+                set radius [::SQQ::cage_layer_radius [::SQQ::cage_radius_tier $layer_key] $radius_tiers]
+                incr representation_count [::SQQ::add_dynamic_bonds_representation $indexes [lindex $layer_key 6] $radius]
             }
-        }
-        set layer_keys [lsort -command ::SQQ::compare_cage_render_keys $layer_keys]
-        set radius_tiers {}
-        foreach layer_key $layer_keys {
-            lappend radius_tiers [::SQQ::cage_radius_tier $layer_key]
-        }
-        set radius_tiers [lsort -integer -unique $radius_tiers]
-        foreach layer_key $layer_keys {
-            set color_id [lindex $layer_key 6]
-            set indexes [lsort -integer -unique $layer_atoms($layer_key)]
-            set tier [::SQQ::cage_radius_tier $layer_key]
-            set radius [::SQQ::cage_layer_radius $tier $radius_tiers]
-            incr representation_count [::SQQ::add_dynamic_bonds_representation $indexes $color_id $radius]
+        } else {
+            foreach layer_key $layer_keys {
+                set indexes [lsort -integer -unique $layer_atoms($layer_key)]
+                incr representation_count [::SQQ::add_guest_representation $indexes [lindex $layer_key 6]]
+            }
         }
     } else {
         array set color_atoms {}
         set render_keys {}
-        foreach item [::SQQ::expanded_targets $frame $current_targets] {
+        foreach item [::SQQ::expanded_targets $frame $current_family $current_targets] {
             lassign $item source key
             set atom_key "$frame,$source,$key"
             if {![info exists group_atoms($atom_key)]} { continue }
             lassign [::SQQ::effective_color $source $key] color_id priority
             set render_key "$priority,$color_id"
-            if {![info exists color_atoms($render_key)]} {
-                lappend render_keys [list $priority $color_id]
-            }
-            foreach atom_index $group_atoms($atom_key) {
-                lappend color_atoms($render_key) $atom_index
-            }
+            if {![info exists color_atoms($render_key)]} { lappend render_keys [list $priority $color_id] }
+            foreach atom_index $group_atoms($atom_key) { lappend color_atoms($render_key) $atom_index }
         }
         foreach render_key [lsort -command ::SQQ::compare_render_keys $render_keys] {
             lassign $render_key priority color_id
@@ -1235,11 +1328,11 @@ proc ::SQQ::render_current {} {
     }
     display update
     set labels {}
-    foreach target $current_targets { lappend labels [::SQQ::target_label $target] }
+    foreach target $current_targets { lappend labels [::SQQ::target_label $current_family $target] }
     if {$representation_count == 0} {
-        puts "SQQ show: no $current_family memberships for [join $labels { }] in frame $frame"
+        puts "SQQ show $current_family: no memberships for [join $labels { }] in frame $frame"
     } else {
-        puts "SQQ show: [join $labels { }] (frame $frame)"
+        puts "SQQ show $current_family: [join $labels { }] (frame $frame)"
     }
 }
 
@@ -1308,33 +1401,43 @@ proc ::SQQ::split_frames {path directory} {
     return $files
 }
 
+proc ::SQQ::startup_help {} {
+    puts "SQQ VMD: sqq show <cage|guest|phase|cluster|domain> <target> ?target ...?"
+    puts "         sqq color <cage|guest|phase|cluster|domain> <target> ?target ...? <color>"
+    puts "         sqq help | sqq -h | sqq --help"
+}
+
 proc ::SQQ::help {} {
     puts "SQQ commands:"
-    puts "  sqq show all"
-    puts "  sqq show <category>"
-    puts "    category: phase, cluster, domain"
-    puts "  sqq show <object> ?object ...?"
-    puts "  sqq color <object|category> <VMD-color|ColorID|default>"
-    puts "  sqq help"
+    puts "  sqq show <family> <target> ?target ...?"
+    puts "  sqq color <family> <target> ?target ...? <VMD-color|ColorID|default>"
+    puts "  sqq help | sqq -h | sqq --help"
+    puts "Families: cage, guest, phase, cluster, domain"
+    puts "Targets: all; cage type; exact cage/cluster/domain ID; multiple compatible targets"
     puts "Examples:"
-    puts "  sqq show all"
-    puts "  sqq show 51262"
-    puts "  sqq show 512 51262"
-    puts "  sqq show 51262_00053"
-    puts "  sqq show sI boundary"
-    puts "  sqq color 51262 blue"
+    puts "  sqq show cage all"
+    puts "  sqq show cage 512 51264"
+    puts "  sqq show guest 512"
+    puts "  sqq show phase sI boundary"
+    puts "  sqq color cage 512 green"
+    puts "  sqq color guest 512 yellow"
 }
 
 proc sqq {{command help} args} {
     switch -- [string tolower $command] {
-        show { ::SQQ::set_show $args }
-        color {
-            if {[llength $args] != 2} {
-                error "Usage: sqq color <object|category> <VMD-color|ColorID|default>"
+        show {
+            if {[llength $args] < 2} {
+                error "Usage: sqq show <cage|guest|phase|cluster|domain> <target> ?target ...?"
             }
-            ::SQQ::set_color [lindex $args 0] [lindex $args 1]
+            ::SQQ::set_show [lindex $args 0] [lrange $args 1 end]
         }
-        help {
+        color {
+            if {[llength $args] < 3} {
+                error "Usage: sqq color <family> <target> ?target ...? <VMD-color|ColorID|default>"
+            }
+            ::SQQ::set_colors [lindex $args 0] [lrange $args 1 end-1] [lindex $args end]
+        }
+        help - -h - --help {
             if {[llength $args] != 0} { error "Usage: sqq help" }
             ::SQQ::help
         }
@@ -1343,15 +1446,11 @@ proc sqq {{command help} args} {
 }
 
 set ::SQQ::gro_path [file join [file dirname [file normalize [info script]]] "sqq-cage.gro"]
-if {![file isfile $::SQQ::gro_path]} {
-    error "SQQ GRO file not found: $::SQQ::gro_path"
-}
+if {![file isfile $::SQQ::gro_path]} { error "SQQ GRO file not found: $::SQQ::gro_path" }
 set parsed_frames [::SQQ::read_annotations $::SQQ::gro_path]
 set temp_dir [file join [file dirname $::SQQ::gro_path] ".sqq-vmd-[pid]-[clock clicks]"]
 set frame_files [::SQQ::split_frames $::SQQ::gro_path $temp_dir]
-if {[llength $frame_files] == 0} {
-    error "SQQ GRO file contains no frames: $::SQQ::gro_path"
-}
+if {[llength $frame_files] == 0} { error "SQQ GRO file contains no frames: $::SQQ::gro_path" }
 set ::SQQ::molid [mol new [lindex $frame_files 0] type gro waitfor all]
 foreach frame_path [lrange $frame_files 1 end] {
     mol addfile $frame_path type gro waitfor all molid $::SQQ::molid
@@ -1367,5 +1466,6 @@ if {$loaded_frames != $parsed_frames} {
 display projection Orthographic
 catch {trace remove variable ::vmd_frame write ::SQQ::frame_changed}
 trace add variable ::vmd_frame write ::SQQ::frame_changed
-sqq show all
+::SQQ::startup_help
+sqq show cage all
 '''

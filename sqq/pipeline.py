@@ -35,9 +35,11 @@ except ImportError:  # pragma: no cover - exercised in minimal source-tree runs.
 from . import __version__
 from .banner import SQQ_BANNER
 from .config import (
+    DEFAULT_MODE,
     is_cpp_mode,
     load_config,
     mode_display,
+    mode_worker_count,
     mode_worker_fraction,
     normalize_cpp_output_types,
     normalize_order_parameters,
@@ -225,7 +227,7 @@ def analyze(args: Namespace) -> None:
     requested_workers = resolve_workers(
         config["parallel"].get("workers"),
         work_items,
-        mode=config.get("mode", "50"),
+        mode=config.get("mode", DEFAULT_MODE),
         backend=parallel_backend,
     )
     workers = (
@@ -369,7 +371,7 @@ def build_run_info(
     finished_at_wall: datetime,
     rows: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
-    """Collect run-level metadata for terminal, run_config, and summary workbook."""
+    """Collect run-level metadata for terminal, config.yaml, and summaries."""
     requested_graph_mode = config["graph"]["bond_mode"]
     effective_graph_modes = row_effective_graph_modes(rows or [])
     selected_order_parameters = normalize_order_parameters(
@@ -403,7 +405,7 @@ def build_run_info(
         "time_zone": format_time_zone(started_at_wall),
         "config_file": args.config or "<built-in defaults>",
         "sqq_version": __version__,
-        "mode": mode_display(config.get("mode", "50")),
+        "mode": mode_display(config.get("mode", DEFAULT_MODE)),
         "worker_policy": worker_policy_text(config),
         "topology": str(topology) if topology else "<none>",
         "matched_files": len(paths),
@@ -441,7 +443,7 @@ def build_run_info(
         "q_n_neighbor": config["order"].get("q_n_neighbor", None),
         "output_types": output_type_display(
             output_types,
-            cpp_mode=is_cpp_mode(config.get("mode", "50")),
+            cpp_mode=is_cpp_mode(config.get("mode", DEFAULT_MODE)),
         ),
         "output_layout": config["output"].get("structure_layout", "grouped"),
         "workers": workers,
@@ -485,7 +487,7 @@ def build_run_info(
             )
             else "<disabled>"
         ),
-        "run_config": str((outdir / "run_config.yaml").resolve()),
+        "config_output": str((outdir / "config.yaml").resolve()),
     }
     if input_format.startswith("lammps-"):
         lammps = config["input"].get("lammps", {})
@@ -528,7 +530,7 @@ def print_run_header(
     print("")
     print("Configuration")
     print_terminal_field("SQQ version", __version__)
-    print_terminal_field("Mode", mode_display(config.get("mode", "50")))
+    print_terminal_field("Mode", mode_display(config.get("mode", DEFAULT_MODE)))
     print_terminal_field("Config file", args.config or "<built-in defaults>")
     print_terminal_field("Topology", topology or "<none>")
     print_terminal_field("Trajectory stride", config["input"].get("trajectory_stride", 1))
@@ -561,7 +563,7 @@ def print_run_header(
         "Output types",
         output_type_display(
             config.get("output", {}).get("types"),
-            cpp_mode=is_cpp_mode(config.get("mode", "50")),
+            cpp_mode=is_cpp_mode(config.get("mode", DEFAULT_MODE)),
         ),
     )
     print_terminal_field("Output layout", config["output"].get("structure_layout", "grouped"))
@@ -1675,7 +1677,7 @@ def write_frame_outputs(
             ring_sizes=list(result.ring_report_sizes),
             requested_bond_mode=config["graph"]["bond_mode"],
             order_parameters=order_parameters,
-            analysis_mode=config.get("mode", "50"),
+            analysis_mode=config.get("mode", DEFAULT_MODE),
             input_metadata=frame_input_metadata(config),
         )
     else:
@@ -1849,7 +1851,12 @@ def worker_policy_text(config: dict[str, Any]) -> str:
     value = config.get("parallel", {}).get("workers", "auto")
     reserve_text = "reserve 1 physical core"
     if is_auto_worker_request(value):
-        percent = int(round(mode_worker_fraction(config.get("mode", "50")) * 100))
+        mode = config.get("mode", DEFAULT_MODE)
+        fixed_count = mode_worker_count(mode)
+        if fixed_count is not None:
+            unit = "worker" if fixed_count == 1 else "workers"
+            return f"mode default ({fixed_count} {unit})"
+        percent = int(round(mode_worker_fraction(mode) * 100))
         return f"auto ({percent}% of physical cores, {reserve_text})"
     try:
         request_text = describe_worker_request(value)
@@ -1932,7 +1939,7 @@ def normalize_parallel_backend(value: Any) -> str:
 def resolve_workers(
     value: Any,
     n_paths: int,
-    mode: Any = "50",
+    mode: Any = DEFAULT_MODE,
     cpu_total: int | None = None,
     backend: str = "process",
 ) -> int:
@@ -1943,7 +1950,12 @@ def resolve_workers(
         if single_or_serial:
             return 1
         physical_total = max(1, int(cpu_total if cpu_total is not None else physical_cpu_count()))
-        requested = max(1, int(physical_total * mode_worker_fraction(mode)))
+        fixed_count = mode_worker_count(mode)
+        requested = (
+            fixed_count
+            if fixed_count is not None
+            else max(1, int(physical_total * mode_worker_fraction(mode)))
+        )
     else:
         # Validate before the single-task short-circuit.
         classify_worker_request(value)
@@ -2358,7 +2370,7 @@ def normalize_analysis_scopes(config: dict[str, Any]) -> None:
     raw_output_types = output.get("types")
     output_normalizer = (
         normalize_cpp_output_types
-        if is_cpp_mode(config.get("mode", "50"))
+        if is_cpp_mode(config.get("mode", DEFAULT_MODE))
         else normalize_output_types
     )
     output_types = list(output_normalizer(raw_output_types))

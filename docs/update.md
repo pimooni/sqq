@@ -2,6 +2,53 @@
 
 This file records versioned update notes. New releases should be appended above older entries.
 
+## Version 0.3.5
+
+### Short Summary
+
+Version 0.3.5 replaces mode `50` with the explicit single-worker `py` default, makes all four presets GRO-clean by default, adds family-qualified VMD cage/guest controls, and moves authoritative runtime metadata from `run_config.yaml` to `config.yaml`. Detailed configuration sheets are removed from XLSX/CSV summaries while the compact dashboard Configuration block remains. The release also adds project acknowledgements in surname-alphabetical order without implying contribution rank. Scientific topology and order-parameter algorithms are unchanged. Package and native-core metadata are synchronized at `0.3.5`, released Jul 23, 2026.
+
+### Main Changes
+
+1. Mode names and exact defaults
+   - Removed mode `50` and introduced `py` without a compatibility alias; `py` is the command default.
+   - Retained modes `00`, `py`, `99`, and `cpp`.
+   - Modes `py` and `cpp` default to one worker; modes `00` and `99` retain the 100% automatic-core policy with one physical core reserved. Explicit `-w` remains authoritative.
+   - Modes `00` and `py` default to `info,sqq-cage-gro,sqq-render,summary-xlsx`.
+   - Modes `99` and `cpp` default to `info,sqq-cage-gro,sqq-render,summary-csv`.
+   - No mode emits ordinary, classified, or cluster GRO files by default. The corresponding `--output-type` values remain available explicitly.
+   - Mode `00` still enables cluster search; that search populates selected info/main-summary output without implicitly selecting `cluster-gro`.
+
+2. Explicit VMD cage and guest commands
+   - The generated script starts with `sqq show cage all` and prints concise help when sourced.
+   - Added `sqq -h` and `sqq --help` as equivalents of `sqq help`.
+   - Replaced inferred object syntax with `sqq show <family> <target...>` and `sqq color <family> <target...> <color>` for `cage`, `guest`, `phase`, `cluster`, and `domain`.
+   - Cage and guest targets accept `all`, cage types, exact cage IDs, and multiple targets where applicable.
+   - Cage networks use DynamicBonds; guests use CPK. Cage/guest colors are independent, and guests assigned to multiple cages use the fixed cage-type priority.
+   - `sqq-cage.gro` retains guest-to-cage memberships and every atom of a multi-atom guest.
+   - `SQQ graph: <mode>` is printed when the script loads and thereafter only when the effective graph mode changes.
+
+3. Runtime `config.yaml` and compact summaries
+   - Replaced mandatory output-root `run_config.yaml` with `config.yaml`.
+   - The file records final SQQ version, mode/engine, input metadata, requested/effective graph modes, requested/resolved workers, normalized output types, status/failures, and summary-write metadata.
+   - Runtime configuration is written atomically for running, successful, and failed states.
+   - Removed the detailed `config` worksheet from `summary.xlsx` and `config.csv` from `summary/`.
+   - Retained a compact Configuration block on the summary dashboard.
+
+4. Documentation and acknowledgements
+   - Updated README and design documentation for the four modes, exact output presets, Tcl cage/guest commands, and runtime configuration ownership.
+   - Replaced drive-specific Tcl examples with `source {path/to/sqq-render.vmd.tcl}`.
+   - Added the approved README Acknowledgements section. Contributors are listed alphabetically by family name; ordering does not indicate relative contribution.
+
+### Compatibility
+
+- `-m 50` is rejected; use `-m py` or omit `-m`.
+- Scripts generated before 0.3.5 retain their embedded commands. Regenerate the Tcl/GRO pair to use family-qualified cage/guest controls and guest memberships.
+- Bare commands such as `sqq show 512` and `sqq color 512 blue` are not aliases; use `sqq show cage 512` and `sqq color cage 512 blue`.
+- Consumers of `run_config.yaml`, the XLSX `config` worksheet, or `summary/config.csv` must use output-root `config.yaml` instead.
+- Ordinary and cluster GRO output remains available only through explicit `--output-type` selection.
+- Mode renaming, output routing, Tcl controls, and report consolidation do not change per-frame graph, ring, cage, occupancy, cluster, or order-parameter values.
+
 ## Version 0.3.4
 
 ### Short Summary

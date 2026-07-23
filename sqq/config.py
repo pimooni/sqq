@@ -14,7 +14,7 @@ except ImportError:  # pragma: no cover - exercised in minimal source-tree runs.
     yaml = None
 
 
-DEFAULT_MODE = "50"
+DEFAULT_MODE = "py"
 DEFAULT_ORDER_PARAMETERS = ("f3", "f4")
 CPP_MODE = "cpp"
 CPP_MODES = frozenset({"99", CPP_MODE})
@@ -109,16 +109,14 @@ MODE_PRESETS: dict[str, dict[str, Any]] = {
         "find_cluster": True,
         "output_types": [
             "info",
-            "gro",
             "sqq-cage-gro",
             "sqq-render",
             "summary-xlsx",
-            "cluster-gro",
         ],
     },
-    "50": {
+    "py": {
         "label": "standard",
-        "worker_fraction": 0.50,
+        "worker_count": 1,
         "bond_mode": "auto",
         "ring_sizes": [4, 5, 6],
         "find_cluster": False,
@@ -132,7 +130,6 @@ MODE_PRESETS: dict[str, dict[str, Any]] = {
         "find_cluster": False,
         "output_types": [
             "info",
-            "gro",
             "sqq-cage-gro",
             "sqq-render",
             "summary-csv",
@@ -140,7 +137,7 @@ MODE_PRESETS: dict[str, dict[str, Any]] = {
     },
     CPP_MODE: {
         "label": "sqq-cpp",
-        "worker_fraction": 0.50,
+        "worker_count": 1,
         "bond_mode": "auto",
         "ring_sizes": [4, 5, 6],
         "find_cluster": False,
@@ -149,7 +146,7 @@ MODE_PRESETS: dict[str, dict[str, Any]] = {
 }
 
 
-# Explicit defaults keep run_config.yaml reproducible.
+# Explicit defaults keep the generated config.yaml reproducible.
 DEFAULT_CONFIG: dict[str, Any] = {
     "mode": DEFAULT_MODE,
     "input": {
@@ -301,9 +298,18 @@ def mode_display(mode: Any) -> str:
     return f"{normalized} (sqq-py)"
 
 
+def mode_worker_count(mode: Any) -> int | None:
+    """Return a fixed default worker count, if the mode defines one."""
+    value = MODE_PRESETS[normalize_mode(mode)].get("worker_count")
+    return None if value is None else int(value)
+
+
 def mode_worker_fraction(mode: Any) -> float:
-    """Return the automatic worker fraction for a mode."""
-    return float(MODE_PRESETS[normalize_mode(mode)]["worker_fraction"])
+    """Return the automatic worker fraction for a fraction-based mode."""
+    preset = MODE_PRESETS[normalize_mode(mode)]
+    if "worker_fraction" not in preset:
+        raise ValueError(f"mode {normalize_mode(mode)} uses a fixed worker count")
+    return float(preset["worker_fraction"])
 
 
 def normalize_order_parameters(value: Any = None) -> tuple[str, ...]:

@@ -17,9 +17,10 @@ import pandas as pd
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 
-from .. import __version__
+from .. import __release_date__, __version__
 from ..banner import SQQ_BANNER
 from ..config import (
+    DEFAULT_MODE,
     dump_config,
     is_cpp_mode,
     mode_display,
@@ -1005,7 +1006,7 @@ def write_frame_info(
     ring_sizes: list[int] | None = None,
     requested_bond_mode: Any | None = None,
     order_parameters: Any | None = None,
-    analysis_mode: Any = "50",
+    analysis_mode: Any = DEFAULT_MODE,
     input_metadata: dict[str, Any] | None = None,
 ) -> None:
     """Write the per-frame Markdown report with inspection-oriented tables."""
@@ -1738,7 +1739,7 @@ def write_summary(
     outdir.mkdir(parents=True, exist_ok=True)
     metrics: dict[str, Any] = {
         "dataframe_seconds": 0.0,
-        "run_config_initial_seconds": 0.0,
+        "config_initial_seconds": 0.0,
         "detail_table_build_seconds": 0.0,
         "detail_csv": {"enabled": False, "total_seconds": 0.0, "tables": []},
         "summary_csv": {"enabled": False, "total_seconds": 0.0, "tables": []},
@@ -1760,8 +1761,8 @@ def write_summary(
         summary_md.unlink()
 
     config_started = perf_counter()
-    config_for_dump = write_run_config(outdir, config, run_info or {})
-    metrics["run_config_initial_seconds"] = round(perf_counter() - config_started, 6)
+    write_run_config(outdir, config, run_info or {})
+    metrics["config_initial_seconds"] = round(perf_counter() - config_started, 6)
 
     detail_index = pd.DataFrame()
     if (
@@ -1789,7 +1790,6 @@ def write_summary(
             data,
             config,
             run_info or {},
-            config_for_dump,
             detail_index,
         )
 
@@ -1875,7 +1875,6 @@ def summary_output_tables(
     data: pd.DataFrame,
     config: dict[str, Any],
     run_info: dict[str, Any],
-    config_for_dump: dict[str, Any],
     detail_index: pd.DataFrame,
 ) -> list[tuple[str, pd.DataFrame, bool]]:
     """Build the shared table list for summary XLSX and CSV outputs."""
@@ -1886,9 +1885,8 @@ def summary_output_tables(
         (sheet_name, table, True)
         for sheet_name, table in summary_sheet_tables(data, config).items()
     )
-    if not is_cpp_mode(config.get("mode", "50")) and not detail_index.empty:
+    if not is_cpp_mode(config.get("mode", DEFAULT_MODE)) and not detail_index.empty:
         tables.append(("detail_index", detail_index, True))
-    tables.append(("config", pd.DataFrame(flatten_config(config_for_dump)), True))
     return tables
 
 
@@ -2048,12 +2046,14 @@ def write_run_config(
     """Atomically write mandatory run metadata and return the dumped mapping."""
     outdir.mkdir(parents=True, exist_ok=True)
     config_for_dump = config_with_run_metadata(config, run_info)
-    target = outdir / "run_config.yaml"
+    target = outdir / "config.yaml"
+    legacy_target = outdir / "run_config.yaml"
     temp_path = temporary_output_path(target)
     try:
         with temp_path.open("w", encoding="utf-8", newline="\n") as handle:
             dump_config(config_for_dump, handle)
         os.replace(temp_path, target)
+        legacy_target.unlink(missing_ok=True)
     finally:
         temp_path.unlink(missing_ok=True)
     return config_for_dump
@@ -2061,13 +2061,17 @@ def write_run_config(
 
 def config_with_run_metadata(config: dict[str, Any], run_info: dict[str, Any]) -> dict[str, Any]:
     """Return a config copy that preserves raw settings and records resolved run metadata."""
-    if not run_info:
-        return config
     enriched = deepcopy(config)
+    if not run_info:
+        return enriched
     run = enriched.setdefault("run", {})
     parallel = config.get("parallel", {})
     run.update({
         "sqq_version": run_info.get("sqq_version", __version__),
+        "release_date": run_info.get("release_date", __release_date__),
+        "mode": mode_display(config.get("mode", DEFAULT_MODE)),
+        "engine": "sqq-cpp" if is_cpp_mode(config.get("mode", DEFAULT_MODE)) else "sqq-py",
+        "config_output": run_info.get("config_output", "config.yaml"),
         "status": run_info.get("status", ""),
         "error": run_info.get("error", ""),
         "graph_mode_requested": run_info.get("graph_mode", config.get("graph", {}).get("bond_mode", "")),
@@ -2085,7 +2089,7 @@ def config_with_run_metadata(config: dict[str, Any], run_info: dict[str, Any]) -
             "output_types",
             output_type_display(
                 config.get("output", {}).get("types"),
-                cpp_mode=is_cpp_mode(config.get("mode", "50")),
+                cpp_mode=is_cpp_mode(config.get("mode", DEFAULT_MODE)),
             ),
         ),
         "frames_total": run_info.get("frames_total", ""),
@@ -2196,7 +2200,7 @@ def remove_summary_detail_csvs(outdir: Path, config: dict[str, Any]) -> None:
 
 def summary_dashboard_table(data: pd.DataFrame, run_info: dict[str, Any], config: dict[str, Any]) -> pd.DataFrame:
     """Build a compact human-facing dashboard for the summary sheet."""
-    cpp_mode = is_cpp_mode(config.get("mode", "50"))
+    cpp_mode = is_cpp_mode(config.get("mode", DEFAULT_MODE))
     banner_lines = [line.strip("| ") for line in SQQ_BANNER.splitlines() if line.startswith("|")]
     title = banner_lines[0] if banner_lines else "Shell  Quant  Qualifier"
     author = banner_lines[1] if len(banner_lines) > 1 else "by J. PANG & Q. SUN"
@@ -2242,11 +2246,11 @@ def summary_dashboard_table(data: pd.DataFrame, run_info: dict[str, Any], config
         ["summary.xlsx", run_info.get("summary_xlsx", "")],
         ["summary_csv", run_info.get("summary_csv", "")],
         ["summary_detail_csv", run_info.get("summary_detail_csv", "")],
-        ["run_config.yaml", run_info.get("run_config", "")],
+        ["config.yaml", run_info.get("config_output", "")],
         ["", ""],
         ["Configuration", ""],
         ["SQQ version", run_info.get("sqq_version", __version__)],
-        ["Mode", mode_display(config.get("mode", "50"))],
+        ["Mode", mode_display(config.get("mode", DEFAULT_MODE))],
         ["Config file", run_info.get("config_file", "<built-in defaults>")],
         ["Topology", run_info.get("topology", "<none>")],
         ["Graph mode", graph_mode_value],
@@ -2632,7 +2636,7 @@ def summary_markdown_tables(data: pd.DataFrame) -> list[tuple[str, pd.DataFrame]
 
 def summary_sheet_tables(data: pd.DataFrame, config: dict[str, Any]) -> dict[str, pd.DataFrame]:
     """Build lightweight main-summary tables using the configured scopes."""
-    if is_cpp_mode(config.get("mode", "50")):
+    if is_cpp_mode(config.get("mode", DEFAULT_MODE)):
         include_zero_isomers = (
             str(config.get("output", {}).get("cage_isomer_rows", "nonzero")).lower()
             == "all"
