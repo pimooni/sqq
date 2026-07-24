@@ -192,7 +192,7 @@ Standalone files whose case-insensitive stems collide inside the same output roo
 
 Terminal and main-summary dashboard metadata share the same display helpers. The requested graph mode is preserved from config/CLI. Explicit graph modes display as `hbond`, `oo`, or `pairs`. For a multiple-GRO topology group, automatic graph mode is resolved once before dispatch and displays as `auto -> hbond` or `auto -> oo`; different topology groups may resolve differently, but their summaries remain separate. Single-file and trajectory paths retain their established pending/final effective-mode reporting.
 
-Root `sqq` / `sqq -h` output renders the banner and product sentence, then `SQQ version: 0.3.6   Release date: Jul 23, 2026`, then the ordinary `usage:` line. Root `sqq -v` / `sqq --version` exits successfully after printing only that version line. Subcommand help retains the standard argparse layout.
+Root `sqq` / `sqq -h` output renders the banner and product sentence, then `SQQ version: 0.3.7   Release date: Jul 25, 2026`, then the ordinary `usage:` line. Root `sqq -v` / `sqq --version` exits successfully after printing only that version line. Subcommand help retains the standard argparse layout.
 
 The mandatory output-root `config.yaml` is the authoritative runtime record. It preserves normalized analysis settings and adds final effective metadata: SQQ version, mode and engine, input/topology provenance, requested and effective graph modes, requested worker policy and resolved workers, backend/math threads, normalized output types, status/error, frame totals, failures, and `summary_write` timing/table dimensions. It is initialized with `status: running` before frame analysis and atomically replaced with `completed` or `failed`; a failed rewrite does not truncate the previous complete file. The detailed `config` worksheet in `summary.xlsx` and `summary/config.csv` are no longer built. Main summaries retain only the compact dashboard Configuration block. `output.types` remains the only output selector; removed `output.disabled_outputs` configurations are rejected rather than migrated.
 
@@ -619,9 +619,9 @@ The high-level hierarchy is informed by HTR+ ([DOI 10.1088/1361-648X/ad52df](htt
 5. Find deterministic connected components in the resulting undirected graph.
 6. Report components with cage count >= `hydrate_cluster.min_cage`; count cages in smaller components as isolated cages.
 
-### Local phase fingerprints and strict seeds
+### Local phase fingerprints and spatial consensus
 
-For every graph node, SQQ counts first-shell labels of the form `(neighbor cage type, shared face size)`. Strict seeds reject unexpected label types and allow each expected count to differ by at most one.
+For every graph node, SQQ counts first-shell labels of the form `(neighbor cage type, shared face size)`. Strict evidence rejects unexpected label types and allows each expected count to differ by at most one.
 
 The sI templates are:
 
@@ -641,13 +641,23 @@ The sH templates are:
 
 These counts are shared-face incidences. They need not be distinct cage ids in a minimal periodic cell. Their balance is consistent with the ideal sH cell ratio of three `5^12`, two `4^3 5^6 6^3`, and one `5^12 6^8`.
 
-The existing conservative sH composite is retained as supplemental high-confidence evidence: two nonadjacent `5^12 6^8` anchors, exactly six common `5^12` cages connected to both anchors through 5-ring faces, exactly six `4^3 5^6 6^3` cages, and at least one adjacent medium-cage bridge between the anchors. It supplements rather than replaces the per-cage fingerprints.
+The conservative sH composite remains supplemental high-confidence evidence: two nonadjacent `5^12 6^8` anchors, exactly six common `5^12` cages connected to both anchors through 5-ring faces, exactly six `4^3 5^6 6^3` cages, and at least one adjacent medium-cage bridge between the anchors.
 
-Seeds are internal phase evidence. `seed_count` is the number of strict seed anchors contained in a domain; `seed_cage_count` is the number of unique domain cages covered by their overlapping seed neighborhoods.
+A strict fingerprint is no longer the only way to initialize a domain. SQQ also scores distributed spatial evidence in the current frame:
+
+1. `matched` is the sum of each observed expected label capped at its template count.
+2. `coverage = matched / expected labels`; `purity = matched / all observed labels`.
+3. `support` is the harmonic mean of coverage and purity.
+4. A spatial candidate requires coverage >= 0.50, purity >= 0.50, and support >= 0.55.
+5. Candidates are connected only by face labels allowed by both endpoint templates. Iterative removal of nodes with degree below two leaves the graph 2-core.
+6. A retained component requires at least three cages, mean support >= 0.60, and a phase-defining hexagonal edge: `5^12 6^2`--`5^12 6^2` for sI, `5^12 6^4`--`5^12 6^4` for sII, or `4^3 5^6 6^3`--`5^12 6^8` for sH.
+7. Spatial cores are anchored only by phase-specific cages: `5^12 6^2` for sI, `5^12 6^4` for sII, and `4^3 5^6 6^3`/`5^12 6^8` for sH. Shared `5^12` cages provide spatial support without becoming mandatory anchors for competing phases.
+
+Strict and spatial evidence are internal. `seed_count` counts the contained evidence objects, and `seed_cage_count` counts their unique domain anchors or strict neighborhoods. Neither value is used as a public phase category.
 
 ### Expansion and exclusive domains
 
-sI, sII, and sH expand independently from the union of their strict seed members. A growth candidate must:
+sI, sII, and sH expand independently from strict seed members and spatial-core anchors. A growth candidate must:
 
 - use a cage type supported by the phase template;
 - have at least one compatible internal fingerprint label;
@@ -655,9 +665,11 @@ sI, sII, and sH expand independently from the union of their strict seed members
 - connect through a face label allowed by both endpoint templates; and
 - receive at least two compatible contacts from already accepted phase cages.
 
-For sH, the same edge check includes pentagonal `5^12` contacts, square medium-medium contacts, equatorial medium-large hexagonal contacts, and axial large-large hexagonal contacts. Composite-seed internal edges remain trusted seed evidence.
+For sH, the same edge check includes pentagonal `5^12` contacts, square medium-medium contacts, equatorial medium-large hexagonal contacts, and axial large-large hexagonal contacts. Strict/composite-seed internal edges remain trusted evidence; spatial-core edges must pass the ordinary template check.
 
-After all phases collect claims independently, SQQ forms domains from cages claimed by exactly one phase. Domain edges must remain phase-compatible, and every connected domain component must contain at least one strict seed anchor. Same-phase regions separated by non-domain cages remain separate domains. Domain ids are deterministic within a frame and are not tracked across frames.
+After all phases collect claims independently, SQQ forms domains from cages claimed by exactly one phase. Domain edges must remain phase-compatible, and every connected domain component must contain at least one strict or spatial evidence anchor. Same-phase regions separated by non-domain cages remain separate domains. Domain ids are deterministic within a frame and are not tracked across frames.
+
+All spatial scoring is frame-local. No previous/next frame, persistent cage id, hysteresis, or temporal smoothing is used. Therefore one frame analyzed alone has the same phase assignment as that frame analyzed in a trajectory or compatible multi-file group. True topology changes can still cross the fixed spatial thresholds.
 
 ### Boundaries and cluster type
 

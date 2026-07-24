@@ -37,17 +37,33 @@ PHASE_TEMPLATES: dict[str, dict[str, Counter[tuple[str, int]]]] = {
 STRICT_COUNT_TOLERANCE = 1
 EXPANSION_COUNT_TOLERANCE = 1
 EXPANSION_MIN_PHASE_CONTACTS = 2
+SPATIAL_CORE_MIN_COVERAGE = 0.50
+SPATIAL_CORE_MIN_PURITY = 0.50
+SPATIAL_CORE_MIN_SCORE = 0.55
+SPATIAL_CORE_MIN_MEAN_SCORE = 0.60
+SPATIAL_CORE_MIN_SIZE = 3
+PHASE_CORE_EDGE = {
+    "sI": ("51262", "51262", 6),
+    "sII": ("51264", "51264", 6),
+    "sH": ("435663", "51268", 6),
+}
+PHASE_CORE_ANCHOR_TYPES = {
+    "sI": {"51262"},
+    "sII": {"51264"},
+    "sH": {"435663", "51268"},
+}
 
 
 @dataclass(frozen=True)
 class PhaseSeed:
-    """Internal strict phase evidence; seeds are deliberately not exported."""
+    """Internal phase evidence; seeds are deliberately not exported."""
 
     hydrate_type: str
     anchor_indexes: tuple[int, ...]
     cage_indexes: tuple[int, ...]
     shared_face_ids: tuple[str, ...]
     cluster_id: str
+    source: str = "strict"
 
 
 @dataclass(frozen=True)
@@ -84,7 +100,7 @@ def analyze_hydrate_clusters(
     rings_by_id: dict[str, Ring] | None = None,
     face_geometries: dict[str, tuple[np.ndarray, np.ndarray]] | None = None,
 ) -> tuple[list[HydrateCluster], list[HydrateMotif], list[HydrateDomain], tuple[str, ...]]:
-    """Build clusters, identify strict phase seeds, and expand phase domains.
+    """Build clusters, identify strict and spatial evidence, and expand phase domains.
 
     Motifs are internal implementation details. The second return value remains
     for API compatibility and is always empty.
@@ -138,6 +154,17 @@ def analyze_hydrate_clusters(
             signatures,
             evidence,
         )
+        seeds.extend(
+            find_spatial_phase_cores(
+                cluster.object_id,
+                component,
+                cages,
+                adjacency,
+                shared_faces,
+                face_sizes,
+                signatures,
+            )
+        )
         all_seeds.extend(seeds)
         seeds_by_phase = {
             phase: [seed for seed in seeds if seed.hydrate_type == phase]
@@ -157,6 +184,18 @@ def analyze_hydrate_clusters(
                 for seed in seeds_by_phase[phase]
                 for left, right in combinations(seed.cage_indexes, 2)
                 if right in adjacency[left]
+                and (
+                    seed.source == "strict"
+                    or phase_edge_compatible(
+                        phase,
+                        left,
+                        right,
+                        cages,
+                        shared_faces,
+                        face_sizes,
+                        set(),
+                    )
+                )
             }
             for phase in PHASE_TYPES
         }
@@ -436,6 +475,159 @@ def strict_signature_match(
     )
 
 
+def phase_signature_support(
+    observed: Counter[tuple[str, int]],
+    expected: Counter[tuple[str, int]],
+) -> tuple[float, float, float, int]:
+    """Score how much of a local phase fingerprint is present and phase-pure."""
+    matched = sum(
+        min(observed.get(key, 0), expected_count)
+        for key, expected_count in expected.items()
+    )
+    expected_total = sum(expected.values())
+    observed_total = sum(observed.values())
+    coverage = matched / expected_total if expected_total else 0.0
+    purity = matched / observed_total if observed_total else 0.0
+    score = (
+        2.0 * coverage * purity / (coverage + purity)
+        if coverage > 0.0 and purity > 0.0
+        else 0.0
+    )
+    return score, coverage, purity, matched
+
+
+def find_spatial_phase_cores(
+    cluster_id: str,
+    component: tuple[int, ...],
+    cages: list[Cage],
+    adjacency: dict[int, set[int]],
+    shared_faces: dict[tuple[int, int], set[str]],
+    face_sizes: dict[str, int],
+    signatures: dict[int, Counter[tuple[str, int]]],
+) -> list[PhaseSeed]:
+    """Find coherent per-frame phase cores without requiring one perfect cage."""
+    output: list[PhaseSeed] = []
+    component_set = set(component)
+    for phase in PHASE_TYPES:
+        scores: dict[int, float] = {}
+        for index in component:
+            expected = PHASE_TEMPLATES[phase].get(cages[index].cage_type)
+            if expected is None:
+                continue
+            score, coverage, purity, _ = phase_signature_support(
+                signatures[index],
+                expected,
+            )
+            if (
+                coverage >= SPATIAL_CORE_MIN_COVERAGE
+                and purity >= SPATIAL_CORE_MIN_PURITY
+                and score >= SPATIAL_CORE_MIN_SCORE
+            ):
+                scores[index] = score
+
+        candidate_set = set(scores)
+        phase_adjacency = {
+            index: {
+                neighbor
+                for neighbor in adjacency[index].intersection(
+                    candidate_set,
+                    component_set,
+                )
+                if phase_edge_compatible(
+                    phase,
+                    index,
+                    neighbor,
+                    cages,
+                    shared_faces,
+                    face_sizes,
+                    set(),
+                )
+            }
+            for index in candidate_set
+        }
+        core = graph_two_core(phase_adjacency)
+        if not core:
+            continue
+        for indexes in induced_components(phase_adjacency, core):
+            members = tuple(sorted(indexes))
+            if len(members) < SPATIAL_CORE_MIN_SIZE:
+                continue
+            mean_score = sum(scores[index] for index in members) / len(members)
+            if mean_score < SPATIAL_CORE_MIN_MEAN_SCORE:
+                continue
+            if not has_phase_core_edge(
+                phase,
+                members,
+                cages,
+                shared_faces,
+                face_sizes,
+            ):
+                continue
+            anchors = tuple(
+                index
+                for index in members
+                if cages[index].cage_type in PHASE_CORE_ANCHOR_TYPES[phase]
+            )
+            output.append(
+                PhaseSeed(
+                    hydrate_type=phase,
+                    anchor_indexes=anchors,
+                    cage_indexes=anchors,
+                    shared_face_ids=internal_shared_faces(anchors, shared_faces),
+                    cluster_id=cluster_id,
+                    source="spatial_core",
+                )
+            )
+    return output
+
+
+def graph_two_core(adjacency: dict[int, set[int]]) -> set[int]:
+    """Return the maximal subgraph whose nodes have at least two neighbors."""
+    remaining = set(adjacency)
+    degrees = {
+        index: len(neighbors.intersection(remaining))
+        for index, neighbors in adjacency.items()
+    }
+    queue = deque(sorted(index for index, degree in degrees.items() if degree < 2))
+    while queue:
+        index = queue.popleft()
+        if index not in remaining:
+            continue
+        remaining.remove(index)
+        for neighbor in adjacency[index].intersection(remaining):
+            degrees[neighbor] -= 1
+            if degrees[neighbor] == 1:
+                queue.append(neighbor)
+    return remaining
+
+
+def has_phase_core_edge(
+    phase: str,
+    indexes: tuple[int, ...],
+    cages: list[Cage],
+    shared_faces: dict[tuple[int, int], set[str]],
+    face_sizes: dict[str, int],
+) -> bool:
+    """Require the phase-defining large-cage connection in a spatial core."""
+    left_type, right_type, required_size = PHASE_CORE_EDGE[phase]
+    for left, right in combinations(indexes, 2):
+        pair_types = (cages[left].cage_type, cages[right].cage_type)
+        if not (
+            pair_types == (left_type, right_type)
+            or pair_types == (right_type, left_type)
+        ):
+            continue
+        if pair_shares_face_size(
+            left,
+            right,
+            required_size,
+            shared_faces,
+            face_sizes,
+        ):
+            return True
+    return False
+
+
 def partial_signature_match(
     observed: Counter[tuple[str, int]],
     expected: Counter[tuple[str, int]],
@@ -518,7 +710,7 @@ def expand_phase_from_seeds(
     signatures: dict[int, Counter[tuple[str, int]]],
     seed_edges: set[tuple[int, int]],
 ) -> set[int]:
-    """Expand one phase once per graph edge from strict seed members."""
+    """Expand one phase from strict seeds and spatial-core anchors."""
     if not seed_members:
         return set()
     accepted = set(seed_members)

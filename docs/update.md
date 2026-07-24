@@ -2,6 +2,42 @@
 
 This file records versioned update notes. New releases should be appended above older entries.
 
+## Version 0.3.7
+
+### Short Summary
+
+Version 0.3.7 stabilizes frame-local sI/sII/sH phase assignment without temporal smoothing. Exact local fingerprints remain high-confidence evidence, while a conservative spatial-consensus path can initialize a coherent domain when no single cage has a perfect first shell. Phase-specific anchors, compatible graph 2-cores, and the existing two-contact expansion prevent one marginal contact from switching an entire domain on or off. Public phase and boundary categories remain unchanged, and a frame produces the same assignment alone or in a compatible batch. Package and native-core metadata are synchronized at `0.3.7`, released Jul 25, 2026.
+
+### Main Changes
+
+1. Distributed spatial phase evidence
+   - Added coverage, purity, and harmonic-support scoring for partial sI/sII/sH first-shell fingerprints.
+   - Requires coverage >= 0.50, purity >= 0.50, support >= 0.55, and component mean support >= 0.60.
+   - Prunes the phase-compatible candidate graph to its degree-2 core and requires at least three cages plus the phase-defining large-cage hexagonal connection.
+   - Uses `5^12 6^2`, `5^12 6^4`, and `4^3 5^6 6^3`/`5^12 6^8` as phase-specific spatial anchors; shared `5^12` cages do not become mandatory competing anchors.
+
+2. Deterministic per-frame domains
+   - Retains strict fingerprints and the supplemental sH composite as high-confidence evidence.
+   - Expands strict and spatial evidence through the established mutually compatible face labels and two-contact rule.
+   - Uses only the current frame. No previous/next frame, persistent cage id, hysteresis, interpolation, or moving average affects classification.
+   - Keeps sI, sII, sH, boundary, ambiguous, unclassified, and isolated ownership rules mutually exclusive as before.
+
+3. Regression and trajectory validation
+   - Synthetic tests cover a coherent sI spatial core with no strict seed and sparse/mixed negative fingerprints.
+   - On the supplied 815--845 ns diagnostic window, zero-sI frames decreased from 15 to 0, on/off transitions from 10 to 0, maximum adjacent change from 53 to 18 cages, and total variation from 542 to 205.
+   - The specified 410 ns `51262_00003` and 1000 ns `51262_00053` counterexamples remain boundary cages rather than sI cages.
+   - Current 0.3.x tests and boundary regressions pass; archived tests tied to removed 0.2.x interfaces remain historical fixtures.
+
+4. Metadata and acknowledgements
+   - Synchronized Python, C++ core, CMake, and wheel-publish checks at `0.3.7` with release date Jul 25, 2026.
+   - Added Zhenchao Li and Yifei Hu to the surname-alphabetized README acknowledgements and retained only the approved ordering sentence.
+
+### Compatibility
+
+- No CLI option, output type, table, or public phase name is added or removed.
+- Phase counts can intentionally differ from 0.3.6 when a coherent spatial domain previously disappeared because its last strict local seed was missing.
+- Cluster search remains SQQ-Py-only and opt-in except in mode `00`; SQQ-CPP scientific outputs are unchanged apart from version metadata.
+
 ## Version 0.3.6
 
 ### Short Summary

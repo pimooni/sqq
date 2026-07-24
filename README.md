@@ -2,31 +2,33 @@
 
 **SQQ: Python Joint Toolkit for Water-Shell Topology Analysis.**
 
-Current release: **0.3.6**
+Current release: **0.3.7**
 
 SQQ provides the complete SQQ-Py water-shell topology workflow plus the focused SQQ-CPP cage engine. Modes `00` and `py` use SQQ-Py; modes `99` and `cpp` use C++17 for graph, internal ring, cage, occupancy, and F3/F4 analysis. Algorithms are documented in `docs/design.md` and release notes in `docs/update.md`.
 
 ## Acknowledgements
 
-Names are listed alphabetically by family name. The order does not indicate relative contribution.
+Names are listed alphabetically by family name.
 
-- Liwei Cheng - Wuhan Institute of Technology
-- Bin Fang - Hainan University
-- Jihui Jia - China University of Petroleum (Beijing)
-- Wuquan Li - Beijing Huairou Laboratory
-- Bo Liao - China University of Petroleum (East China)
-- Yingxu Lu - Wuhan Institute of Technology
-- Fengyi Mi - Southwest University of Science and Technology
-- Zhengcai Zhang - Laoshan Laboratory
+- Liwei Cheng @ Wuhan Institute of Technology
+- Bin Fang @ Hainan University
+- Yifei Hu @ Fuzhou University
+- Jihui Jia @ China University of Petroleum (Beijing)
+- Wuquan Li @ Beijing Huairou Laboratory
+- Zhenchao Li @ Fuzhou University
+- Bo Liao @ China University of Petroleum (East China)
+- Yingxu Lu @ Wuhan Institute of Technology
+- Fengyi Mi @ Southwest University of Science and Technology
+- Zhengcai Zhang @ Laoshan Laboratory
 
-## Changed in 0.3.6
+## Changed in 0.3.7
 
-- Package and native-core versions are synchronized at `0.3.6`, released Jul 23, 2026.
-- The VMD `sqq show` command accepts one or more family/target groups, so one command can combine objects, for example `sqq show cage 512 guest 512`.
-- The source default remains `sqq show cage all`. The first `show` replaces it; later `show` commands add layers, and exact repeated selections are ignored.
-- `sqq clear` removes custom layers and color overrides, restores the default cage-all view, and rearms first-show replacement.
-- Cross-family representations use the fixed order `phase -> cluster -> domain -> cage -> guest`, independent of command order. The existing cage-topology priority remains separate.
-- Sourcing the Tcl script prints a compact command welcome. `sqq help`, `sqq -h`, and `sqq --help` print the full command guide. The `color` command remains single-family.
+- Package and native-core versions are synchronized at `0.3.7`, released Jul 25, 2026.
+- Hydrate phases are assigned independently in every frame from distributed spatial evidence on the cage graph; no temporal smoothing or information from adjacent frames is used.
+- Strict local fingerprints remain high-confidence evidence but are no longer a single on/off gate for an otherwise coherent phase domain.
+- A phase-compatible spatial core and per-cage expansion reduce whole-domain flicker caused by one marginal local contact.
+- Phase/domain labels remain `sI`, `sII`, `sH`, and `boundary`; residual `ambiguous` and `unclassified` sets stay mutually exclusive, while isolated cages remain outside reported cluster components.
+- Running one frame alone produces the same phase assignment as analyzing that frame within a trajectory or compatible multi-file group.
 
 ## Install
 
@@ -417,17 +419,17 @@ Guest occupancy uses the configured center atom when available. The defaults sel
 
 `--find-cluster on` analyzes every detected cage in the selected search scope. Cages become graph nodes and are connected through complete shared ring faces. When several detected cages reference the same face, ring-plane geometry keeps at most one cage on each physical side. `--cage-size` filters user-facing cage tables and files only; it does not remove cages from cluster connectivity or phase evidence.
 
-The hierarchy follows the HTR+ idea of classifying hydrate type, domains, and boundaries on a cage-connection graph ([DOI 10.1088/1361-648X/ad52df](https://doi.org/10.1088/1361-648X/ad52df)). SQQ implements this independently with labelled shared-face fingerprints, strict local seeds, mutually compatible expansion, and exclusive per-frame domains.
+The hierarchy follows the HTR+ idea of classifying hydrate type, domains, and boundaries on a cage-connection graph ([DOI 10.1088/1361-648X/ad52df](https://doi.org/10.1088/1361-648X/ad52df)). SQQ implements this independently with labelled shared-face fingerprints, strict local evidence, distributed spatial cores, mutually compatible expansion, and exclusive per-frame domains.
 
 `--cluster-min-cage N` sets the minimum connected-component size; the default is `2`. Smaller components are counted as isolated cages.
 
-Within each cluster, SQQ builds labelled first-shell fingerprints from neighboring cage types and shared-face sizes. Strict local sI/sII/sH seeds initialize phase evidence. The sH templates cover `5^12`, `4^3 5^6 6^3`, and `5^12 6^8` cages; the earlier two-anchor sH composite is retained as supplemental high-confidence evidence. All three phases expand through mutually compatible face-labelled edges when a candidate has at least two accepted phase contacts. Cages claimed exclusively by one phase form deterministic per-frame domains.
+Within each cluster, SQQ builds labelled first-shell fingerprints from neighboring cage types and shared-face sizes. Exact sI/sII/sH fingerprints remain high-confidence seeds. In addition, partial but phase-pure fingerprints can form a distributed spatial core: candidates require at least 50% template coverage, 50% phase purity, and a harmonic support score of 0.55; the compatible cage graph must retain a degree-2 core of at least three cages, mean support of 0.60, and the phase-defining hexagonal large-cage connection. The core is anchored by phase-specific cages (`5^12 6^2` for sI, `5^12 6^4` for sII, and `4^3 5^6 6^3`/`5^12 6^8` for sH). All three phases then expand through mutually compatible face-labelled edges when a candidate has at least two accepted phase contacts. Cages claimed exclusively by one phase form deterministic per-frame domains.
 
 After the exclusive sI/sII/sH domains are finalized, SQQ partitions the remaining cluster cages. A cage enters the generic boundary only when it is outside every phase domain and directly shares a complete cage face with at least one domain cage. Boundary search stops at this first external non-phase layer. Domain cages are never relabelled as boundary, and a direct shared-face contact between different phase domains leaves both endpoint cages in their original phases.
 
 The resulting `classified_cage_ids`, `boundary_cage_ids`, `ambiguous_cage_ids`, and `unclassified_cage_ids` are mutually exclusive and together cover every cage in a reported cluster. Competing phase claims without boundary membership remain ambiguous; all other residual cages are unclassified. There are no `sI-boundary`, `sII-boundary`, `sH-boundary`, transition, or boundary-context categories. Neighboring cages can still share face-water coordinates in structure views, so cage ownership should be verified from cage IDs or detected cage/ring edges rather than coordinate-set overlap.
 
-The default command uses mode `py`, so cluster search is off unless enabled by mode `00`, `hydrate_cluster.enabled`, or explicit `--find-cluster on`. Modes `99` and `cpp` do not support cluster search. Explicit `--find-cluster on|off` has highest priority. Cluster search does not alter ring, patch, cage, occupancy, order-parameter, or ice results. Classification is per-frame and independent of the cage reporting filter; temporal grain tracking and crystallographic orientation matching are not implemented.
+The default command uses mode `py`, so cluster search is off unless enabled by mode `00`, `hydrate_cluster.enabled`, or explicit `--find-cluster on`. Modes `99` and `cpp` do not support cluster search. Explicit `--find-cluster on|off` has highest priority. Cluster search does not alter ring, patch, cage, occupancy, order-parameter, or ice results. Classification is per-frame and independent of the cage reporting filter. Spatial consensus uses only the current frame: it performs no temporal smoothing, so analyzing a frame alone or inside a compatible batch gives the same phase assignment. Temporal grain tracking and crystallographic orientation matching are not implemented.
 
 Cluster search populates every selected `info` and main-summary output. Split category structures are written only when `cluster-gro` is selected explicitly; no mode includes it by default. The selected main summary output gains its per-frame `hydrate_cluster` table, while native category structures are written under grouped layout as `<frame>/hydrate_cluster/<frame>_cluster_sI.gro`, `<frame>_cluster_sII.gro`, `<frame>_cluster_sH.gro`, and `<frame>_cluster_boundary.gro`. Flat layout places the same filenames directly in the frame directory. All same-category domains and clusters are aggregated into one file per frame. An absent category is omitted unless `output.write_empty_files: true`.
 
