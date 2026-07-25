@@ -98,7 +98,12 @@ from .io.summary import (
     write_summary,
     write_vmd_script,
 )
-from .io.trajectory import expand_inputs, read_frames, trajectory_frame_indices
+from .io.trajectory import (
+    TrajectorySelection,
+    expand_inputs,
+    read_frames,
+    trajectory_frame_selection,
+)
 from .io.vmd import (
     FRAGMENT_DIRECTORY,
     cleanup_sqq_cage_bundle,
@@ -192,6 +197,11 @@ def analyze(args: Namespace) -> None:
     from .gro_batch import analyze_multi_gro_batch, is_multi_gro_batch
 
     if is_multi_gro_batch(paths):
+        if config["input"].get("delta_time_ps") is not None:
+            raise ValueError(
+                "--delta-time applies to one trajectory or one stacked GRO, not "
+                "to multiple independent GRO files."
+            )
         analyze_multi_gro_batch(
             args,
             config,
@@ -208,18 +218,32 @@ def analyze(args: Namespace) -> None:
     trajectory_parallelizable = can_parallelize_trajectory(paths, topology)
     parallel_backend = normalize_parallel_backend(config.get("parallel", {}).get("backend", "process"))
     trajectory_indexes: list[int] = []
+    frame_selection: TrajectorySelection | None = None
     validate_unique_output_names(paths)
-    if coordinate_parallelizable:
-        work_items = len(paths)
-    elif trajectory_parallelizable:
-        trajectory_indexes = trajectory_frame_indices(
+    trajectory_like_suffixes = {".gro", ".xtc", ".trr"} | set(LAMMPS_TRAJECTORY_SUFFIXES)
+    if len(paths) == 1 and paths[0].suffix.lower() in trajectory_like_suffixes:
+        frame_selection = trajectory_frame_selection(
             paths[0],
             topology,
-            stride=int(config["input"].get("trajectory_stride", 1)),
+            delta_time_ps=config["input"].get("delta_time_ps"),
             lammps_config=config["input"].get("lammps", {}),
         )
-        work_items = len(trajectory_indexes)
+        trajectory_indexes = list(frame_selection.raw_indexes)
+        if (
+            paths[0].suffix.lower() != ".gro"
+            or frame_selection.total_frames > 1
+            or config["input"].get("delta_time_ps") is not None
+        ):
+            config["input"]["sampling"] = sampling_metadata(frame_selection)
+        else:
+            config["input"].pop("sampling", None)
+        work_items = frame_selection.selected_frames
+    elif config["input"].get("delta_time_ps") is not None:
+        raise ValueError(
+            "--delta-time requires one XTC, TRR, LAMMPS trajectory, or stacked GRO input."
+        )
     else:
+        config["input"].pop("sampling", None)
         work_items = len(paths)
     parallelizable = coordinate_parallelizable or (
         trajectory_parallelizable and parallel_backend == "process"
@@ -290,7 +314,8 @@ def analyze(args: Namespace) -> None:
                 topology=topology,
                 strict=bool(args.strict),
                 total_started_at=started_at,
-                total_frames=work_items if trajectory_parallelizable else None,
+                total_frames=work_items if frame_selection is not None else None,
+                selected_frame_indexes=trajectory_indexes if frame_selection is not None else None,
             )
         if bundle_gro or bundle_script:
             finalize_sqq_cage_bundle(
@@ -357,6 +382,50 @@ def analyze(args: Namespace) -> None:
     print(f"Wrote SQQ results: {outdir}")
 
 
+def sampling_metadata(selection: TrajectorySelection) -> dict[str, Any]:
+    """Return compact YAML-safe metadata for one resolved frame selection."""
+    return {
+        "native_frame_interval_ps": selection.native_interval_ps,
+        "delta_time_ps": selection.delta_time_ps,
+        "raw_frame_step": selection.raw_frame_step,
+        "selected_frames": selection.selected_frames,
+        "total_frames": selection.total_frames,
+    }
+
+
+def sampling_interval_display(config: dict[str, Any]) -> str:
+    """Render the one-line terminal summary for resolved trajectory sampling."""
+    sampling = config.get("input", {}).get("sampling", {})
+    if not sampling:
+        return ""
+    requested = sampling.get("delta_time_ps")
+    native = sampling.get("native_frame_interval_ps")
+    selected = sampling.get("selected_frames", 0)
+    total = sampling.get("total_frames", 0)
+    interval_text = "all" if requested is None else f"{format_ps(requested)} ps"
+    native_text = "unknown" if native is None else f"{format_ps(native)} ps"
+    return (
+        f"{interval_text} [native {native_text}; "
+        f"{selected} of {total} frames]"
+    )
+
+
+def sampling_selected_frames_text(config: dict[str, Any]) -> str:
+    """Render selected and available frame counts for reports."""
+    sampling = config.get("input", {}).get("sampling", {})
+    if not sampling:
+        return ""
+    return f"{sampling.get('selected_frames', 0)} / {sampling.get('total_frames', 0)}"
+
+
+def format_ps(value: Any) -> str:
+    """Format a finite ps value without unnecessary decimal zeros."""
+    try:
+        return f"{float(value):g}"
+    except (TypeError, ValueError):
+        return str(value)
+
+
 def build_run_info(
     args: Namespace,
     config: dict[str, Any],
@@ -409,7 +478,12 @@ def build_run_info(
         "worker_policy": worker_policy_text(config),
         "topology": str(topology) if topology else "<none>",
         "matched_files": len(paths),
-        "trajectory_stride": int(config["input"].get("trajectory_stride", 1)),
+        "delta_time_ps": config["input"].get("delta_time_ps"),
+        "sampling_interval": sampling_interval_display(config),
+        "native_frame_interval_ps": config["input"].get("sampling", {}).get("native_frame_interval_ps"),
+        "raw_frame_step": config["input"].get("sampling", {}).get("raw_frame_step", 1),
+        "selected_frames": config["input"].get("sampling", {}).get("selected_frames", len(result_rows)),
+        "source_frames_total": config["input"].get("sampling", {}).get("total_frames", len(result_rows)),
         "frames_total": len(result_rows),
         "frames_ok": sum(
             str(row.get("status", "")).lower() == "ok"
@@ -423,6 +497,8 @@ def build_run_info(
         "graph_mode_display": graph_mode_display(requested_graph_mode, effective_graph_modes),
         "search_sizes": config["ring"]["sizes"],
         "ring_report_sizes": config["ring"]["report_sizes"],
+        "find_half": on_off_text(config.get("half_cage", {}).get("enabled", False)),
+        "find_quasi": on_off_text(config.get("quasi_cage", {}).get("enabled", False)),
         "quasi_cage_base_sizes": config["quasi_cage"].get("base_sizes", "auto"),
         "quasi_cage_side_sizes": config["quasi_cage"].get("side_sizes", "auto"),
         "cage_report_types": config["cage"].get("report_types", []),
@@ -533,7 +609,8 @@ def print_run_header(
     print_terminal_field("Mode", mode_display(config.get("mode", DEFAULT_MODE)))
     print_terminal_field("Config file", args.config or "<built-in defaults>")
     print_terminal_field("Topology", topology or "<none>")
-    print_terminal_field("Trajectory stride", config["input"].get("trajectory_stride", 1))
+    if config["input"].get("sampling"):
+        print_terminal_field("Sampling Interval", sampling_interval_display(config))
     if input_format_label(paths).startswith("lammps-"):
         lammps = config["input"].get("lammps", {})
         print_terminal_field("LAMMPS units", lammps.get("units", "real"))
@@ -545,9 +622,12 @@ def print_run_header(
     print_terminal_field("Ring definition", config["ring"].get("definition", "chordless"))
     if not is_cpp_mode(config.get("mode")):
         print_terminal_field("Ring report sizes", config["ring"]["report_sizes"])
-        print_terminal_field("Quasi-cage sizes", f"{config['quasi_cage'].get('base_sizes', 'auto')} / {config['quasi_cage'].get('side_sizes', 'auto')}")
-        print_terminal_field("Quasi max layer", config["quasi_cage"].get("max_layers", ""))
-        print_terminal_field("Quasi search policy", config["quasi_cage"].get("search_policy", "bounded"))
+        print_terminal_field("Find half", on_off_text(config.get("half_cage", {}).get("enabled", False)))
+        print_terminal_field("Find quasi", on_off_text(config.get("quasi_cage", {}).get("enabled", False)))
+        if config.get("quasi_cage", {}).get("enabled", False):
+            print_terminal_field("Quasi-cage sizes", f"{config['quasi_cage'].get('base_sizes', 'auto')} / {config['quasi_cage'].get('side_sizes', 'auto')}")
+            print_terminal_field("Quasi max layer", config["quasi_cage"].get("max_layers", ""))
+            print_terminal_field("Quasi search policy", config["quasi_cage"].get("search_policy", "bounded"))
     print_terminal_field("Cage report types", dashboard_cage_targets(config))
     print_terminal_field("Maximum cage face", config["cage"].get("max_faces", 20))
     if not is_cpp_mode(config.get("mode")):
@@ -622,7 +702,13 @@ def frame_input_metadata(config: dict[str, Any]) -> dict[str, Any]:
     metadata = {
         "input_format": input_config.get("format", ""),
         "topology": input_config.get("topology"),
-        "trajectory_stride": input_config.get("trajectory_stride", 1),
+        "sampling_interval": sampling_interval_display(config),
+        "native_frame_interval_ps": input_config.get("sampling", {}).get("native_frame_interval_ps"),
+        "delta_time_ps": input_config.get("delta_time_ps"),
+        "raw_frame_step": input_config.get("sampling", {}).get("raw_frame_step"),
+        "selected_frames": sampling_selected_frames_text(config),
+        "find_half": on_off_text(config.get("half_cage", {}).get("enabled", False)),
+        "find_quasi": on_off_text(config.get("quasi_cage", {}).get("enabled", False)),
     }
     if str(metadata["input_format"]).startswith("lammps-"):
         lammps = input_config.get("lammps", {})
@@ -811,6 +897,7 @@ STAGE_LABEL_BY_NAME = {
 def configured_stage_groups(
     include_cluster_stage: bool,
     cpp_mode: bool = False,
+    include_patch_stage: bool = True,
 ) -> list[list[tuple[str, str]]]:
     """Return progress stages, hiding hydrate cluster when it is not enabled."""
     groups = CPP_STAGE_GROUPS if cpp_mode else STAGE_GROUPS
@@ -818,7 +905,8 @@ def configured_stage_groups(
         [
             (stage, label)
             for stage, label in group
-            if include_cluster_stage or label != "cluster"
+            if (include_cluster_stage or label != "cluster")
+            and (include_patch_stage or label != "half/quasi")
         ]
         for group in groups
     ]
@@ -854,10 +942,15 @@ class RunProgressDisplay:
         total_started_at: float,
         include_cluster_stage: bool,
         cpp_mode: bool = False,
+        include_patch_stage: bool = True,
     ) -> None:
         self.total = total
         self.total_started_at = total_started_at
-        self.stage_groups = configured_stage_groups(include_cluster_stage, cpp_mode)
+        self.stage_groups = configured_stage_groups(
+            include_cluster_stage,
+            cpp_mode,
+            include_patch_stage,
+        )
         self.completed = 0
         self.failed = 0
         self.current_index: int | None = None
@@ -1029,11 +1122,16 @@ class ParallelRunProgressDisplay:
         total_started_at: float,
         include_cluster_stage: bool,
         cpp_mode: bool = False,
+        include_patch_stage: bool = True,
     ) -> None:
         self.total = total
         self.workers = workers
         self.total_started_at = total_started_at
-        self.stage_groups = configured_stage_groups(include_cluster_stage, cpp_mode)
+        self.stage_groups = configured_stage_groups(
+            include_cluster_stage,
+            cpp_mode,
+            include_patch_stage,
+        )
         self.completed = 0
         self.failed = 0
         self._active: dict[int, dict[str, Any]] = {}
@@ -1226,6 +1324,7 @@ def analyze_paths_serial(
     strict: bool,
     total_started_at: float,
     total_frames: int | None = None,
+    selected_frame_indexes: list[int] | None = None,
 ) -> list[dict[str, Any]]:
     """Analyze frames in input order."""
     rows: list[dict[str, Any]] = []
@@ -1234,10 +1333,12 @@ def analyze_paths_serial(
         total_started_at=total_started_at,
         include_cluster_stage=bool(config.get("hydrate_cluster", {}).get("enabled", False)),
         cpp_mode=is_cpp_mode(config.get("mode")),
+        include_patch_stage=bool(config.get("half_cage", {}).get("enabled", False) or config.get("quasi_cage", {}).get("enabled", False)),
     )
     try:
         standalone_paths = (
-            topology is None
+            len(paths) > 1
+            and topology is None
             and bool(paths)
             and all(path.suffix.lower() in PARALLEL_SUFFIXES for path in paths)
         )
@@ -1277,7 +1378,7 @@ def analyze_paths_serial(
                 paths,
                 topology=topology,
                 xyz_scale=float(config["input"].get("xyz_scale", 0.1)),
-                trajectory_stride=int(config["input"].get("trajectory_stride", 1)),
+                frame_indexes=selected_frame_indexes,
                 lammps_config=config["input"].get("lammps", {}),
             )
         )
@@ -1348,6 +1449,7 @@ def analyze_paths_threaded(
         total_started_at=total_started_at,
         include_cluster_stage=bool(config.get("hydrate_cluster", {}).get("enabled", False)),
         cpp_mode=is_cpp_mode(config.get("mode")),
+        include_patch_stage=bool(config.get("half_cage", {}).get("enabled", False) or config.get("quasi_cage", {}).get("enabled", False)),
     )
     try:
         with ThreadPoolExecutor(max_workers=workers) as executor:
@@ -1408,6 +1510,7 @@ def analyze_paths_processes(
         total_started_at=total_started_at,
         include_cluster_stage=bool(config.get("hydrate_cluster", {}).get("enabled", False)),
         cpp_mode=is_cpp_mode(config.get("mode")),
+        include_patch_stage=bool(config.get("half_cage", {}).get("enabled", False) or config.get("quasi_cage", {}).get("enabled", False)),
     )
     context = get_context("spawn")
     stage_queue = context.Queue()
@@ -1477,6 +1580,7 @@ def analyze_trajectory_processes(
         total_started_at=total_started_at,
         include_cluster_stage=bool(config.get("hydrate_cluster", {}).get("enabled", False)),
         cpp_mode=is_cpp_mode(config.get("mode")),
+        include_patch_stage=bool(config.get("half_cage", {}).get("enabled", False) or config.get("quasi_cage", {}).get("enabled", False)),
     )
     context = get_context("spawn")
     stage_queue = context.Queue()
@@ -1997,7 +2101,7 @@ def can_parallelize_paths(paths: list[Path], topology: Path | None) -> bool:
     """Return whether every input is an independent coordinate file."""
     if topology is not None:
         return False
-    return bool(paths) and all(path.suffix.lower() in PARALLEL_SUFFIXES for path in paths)
+    return len(paths) > 1 and all(path.suffix.lower() in PARALLEL_SUFFIXES for path in paths)
 
 
 def can_parallelize_trajectory(paths: list[Path], topology: Path | None) -> bool:
@@ -2018,8 +2122,8 @@ def apply_cli_overrides(config: dict[str, Any], args: Namespace) -> None:
         if not math.isfinite(args.xyz_scale) or args.xyz_scale <= 0:
             raise ValueError("--xyz-scale must be positive and finite.")
         config["input"]["xyz_scale"] = args.xyz_scale
-    if getattr(args, "trajectory_stride", None) is not None:
-        config["input"]["trajectory_stride"] = args.trajectory_stride
+    if getattr(args, "delta_time", None) is not None:
+        config["input"]["delta_time_ps"] = args.delta_time
     lammps = config["input"].setdefault("lammps", {})
     if getattr(args, "lammps_units", None) is not None:
         lammps["units"] = args.lammps_units
@@ -2046,6 +2150,21 @@ def apply_cli_overrides(config: dict[str, Any], args: Namespace) -> None:
         config["quasi_cage"]["max_layers"] = args.quasi_max_layer
     if getattr(args, "quasi_search_policy", None):
         config["quasi_cage"]["search_policy"] = args.quasi_search_policy
+    if getattr(args, "find_half", None):
+        config["half_cage"]["enabled"] = parse_on_off(
+            args.find_half,
+            "--find-half",
+        )
+    if getattr(args, "find_quasi", None):
+        config["quasi_cage"]["enabled"] = parse_on_off(
+            args.find_quasi,
+            "--find-quasi",
+        )
+    if (
+        getattr(args, "quasi_max_layer", None) is not None
+        and not config["quasi_cage"].get("enabled", True)
+    ):
+        raise ValueError("--quasi-max-layer requires --find-quasi on.")
     if getattr(args, "ring_definition", None):
         config["ring"]["definition"] = args.ring_definition
     unified_order = getattr(args, "order_parameter", None)
@@ -2184,17 +2303,29 @@ def normalize_analysis_scopes(config: dict[str, Any]) -> None:
         input_config.get("frame_time_step_ps", 100.0),
         "input.frame_time_step_ps",
     )
-    legacy_stride = input_config.pop("xtc_stride", None)
-    stride_value = input_config.get("trajectory_stride", legacy_stride if legacy_stride is not None else 1)
-    input_config["trajectory_stride"] = positive_integer(
-        stride_value,
-        "input.trajectory_stride / --trajectory-stride",
+    removed_sampling_keys = {
+        "trajectory_stride",
+        "xtc_stride",
+    }.intersection(input_config)
+    if removed_sampling_keys:
+        names = ", ".join(sorted(removed_sampling_keys))
+        raise ValueError(
+            f"Unsupported input sampling key(s): {names}. Use input.delta_time_ps."
+        )
+    raw_delta_time = input_config.get("delta_time_ps")
+    input_config["delta_time_ps"] = (
+        None
+        if raw_delta_time in (None, "")
+        else finite_float(
+            raw_delta_time,
+            "input.delta_time_ps / -dt / --delta-time",
+            positive=True,
+        )
     )
     raw_lammps = input_config.get("lammps", {})
     if not isinstance(raw_lammps, dict):
         raise ValueError("input.lammps must be a mapping.")
     lammps_values = dict(raw_lammps)
-    lammps_values["stride"] = input_config["trajectory_stride"]
     settings = normalize_lammps_config(lammps_values)
     type_map: dict[str, dict[str, Any]] = {}
     for type_id, entry in settings.type_map.items():
@@ -2267,6 +2398,9 @@ def normalize_analysis_scopes(config: dict[str, Any]) -> None:
         raise ValueError("ring.definition / --ring-definition must be chordless or shortest_path.")
     ring["definition"] = ring_definition
 
+    half = config.setdefault("half_cage", {})
+    half["enabled"] = parse_on_off(half.get("enabled", True), "half_cage.enabled")
+
     quasi = config.setdefault("quasi_cage", {})
     quasi["enabled"] = parse_on_off(quasi.get("enabled", True), "quasi_cage.enabled")
     raw_quasi_base_sizes = quasi.get("base_sizes", "auto")
@@ -2292,6 +2426,8 @@ def normalize_analysis_scopes(config: dict[str, Any]) -> None:
         ("max_layer_candidates", 24),
     ):
         quasi[key] = positive_integer(quasi.get(key, default), f"quasi_cage.{key}")
+    if not quasi["enabled"] and quasi["max_layers"] != 1:
+        raise ValueError("quasi_cage.max_layers requires quasi_cage.enabled=true.")
 
     cage = config.setdefault("cage", {})
     max_faces = positive_integer(cage.get("max_faces", 20), "cage.max_faces / --max-cage-face")
@@ -2380,6 +2516,12 @@ def normalize_analysis_scopes(config: dict[str, Any]) -> None:
             for output_type in output_types
             if output_type not in {"cluster-gro", "cluster-detail"}
         ]
+    half_output_requested = "gro" in output_types or "half-gro" in output_types
+    quasi_output_requested = "gro" in output_types or "quasi-gro" in output_types
+    if half_output_requested and not half["enabled"]:
+        raise ValueError("half-gro output requires --find-half on.")
+    if quasi_output_requested and not quasi["enabled"]:
+        raise ValueError("quasi-gro output requires --find-quasi on.")
     output["types"] = output_types
     output["write_empty_files"] = parse_on_off(
         output.get("write_empty_files", False),
@@ -2686,11 +2828,15 @@ def analyze_frame(
         compute_face_normals=hydrate_cluster_enabled,
     )
     warnings: list[str] = []
-    report_stage(stage_callback, "searching half/quasi cage")
+    find_half = bool(config.get("half_cage", {}).get("enabled", False))
+    find_quasi = bool(config["quasi_cage"].get("enabled", False))
+    if find_half or find_quasi:
+        report_stage(stage_callback, "searching half/quasi cage")
     half_cages, quasi_cages = find_cage_patches(
         frame,
         rings,
-        enabled=bool(config["quasi_cage"].get("enabled", False)),
+        find_half=find_half,
+        find_quasi=find_quasi,
         base_sizes=quasi_base_sizes,
         side_sizes=quasi_side_sizes,
         max_combinations_per_base=int(config["quasi_cage"].get("max_combinations_per_base", 50000)),
@@ -2805,8 +2951,8 @@ def analyze_frame(
         min_six_rings=int(config["ice"].get("min_six_rings", 2)),
         require_four_coord_neighbors=bool(config["ice"].get("require_four_coord_neighbors", True)),
     )
-    if bool(config["quasi_cage"].get("enabled", False)) and not half_cages and not quasi_cages:
-        warnings.append("No half_cage or quasi_cage was found with the current layered patch criteria.")
+    if (find_half or find_quasi) and not half_cages and not quasi_cages:
+        warnings.append("No enabled half_cage or quasi_cage was found with the current patch criteria.")
     return FrameResult(
         frame=frame,
         waters=waters,

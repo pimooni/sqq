@@ -1026,7 +1026,9 @@ def write_frame_info(
     metadata_rows = [
         [key, metadata[key]]
         for key in (
-            "input_format", "topology", "trajectory_stride", "lammps_units",
+            "input_format", "topology", "sampling_interval",
+            "native_frame_interval_ps", "delta_time_ps", "raw_frame_step",
+            "selected_frames", "find_half", "find_quasi", "lammps_units",
             "lammps_timestep", "lammps_atom_style", "lammps_type_map_source",
         )
         if metadata.get(key) not in (None, "", "<none>")
@@ -1072,9 +1074,11 @@ def write_frame_info(
             ]
         )
         lines.extend(section_table("Ring", ["ring size", "total", "free"], ring_rows))
-        lines.extend(patch_info_section("Half Cage", result.half_cages))
-        lines.extend(patch_info_section("Quasi Cage", result.quasi_cages))
-        lines.extend(patch_isomer_description_section("Quasi Cage Isomer Description", result.quasi_cages))
+        if str(metadata.get("find_half", "on")).lower() == "on":
+            lines.extend(patch_info_section("Half Cage", result.half_cages))
+        if str(metadata.get("find_quasi", "on")).lower() == "on":
+            lines.extend(patch_info_section("Quasi Cage", result.quasi_cages))
+            lines.extend(patch_isomer_description_section("Quasi Cage Isomer Description", result.quasi_cages))
 
     lines.extend(cage_info_section(result, cage_types))
     lines.extend(cage_isomer_description_section(result, cage_types))
@@ -2081,6 +2085,8 @@ def config_with_run_metadata(config: dict[str, Any], run_info: dict[str, Any]) -
             "order_parameters",
             order_parameter_display(config.get("order", {}).get("parameters")),
         ),
+        "find_half": run_info.get("find_half", "on" if config.get("half_cage", {}).get("enabled", False) else "off"),
+        "find_quasi": run_info.get("find_quasi", "on" if config.get("quasi_cage", {}).get("enabled", False) else "off"),
         "find_cluster": run_info.get(
             "find_cluster",
             "on" if config.get("hydrate_cluster", {}).get("enabled", False) else "off",
@@ -2092,6 +2098,12 @@ def config_with_run_metadata(config: dict[str, Any], run_info: dict[str, Any]) -
                 cpp_mode=is_cpp_mode(config.get("mode", DEFAULT_MODE)),
             ),
         ),
+        "sampling_interval": run_info.get("sampling_interval", ""),
+        "native_frame_interval_ps": run_info.get("native_frame_interval_ps"),
+        "delta_time_ps": run_info.get("delta_time_ps"),
+        "raw_frame_step": run_info.get("raw_frame_step", 1),
+        "selected_frames": run_info.get("selected_frames", ""),
+        "source_frames_total": run_info.get("source_frames_total", ""),
         "frames_total": run_info.get("frames_total", ""),
         "frames_ok": run_info.get("frames_ok", ""),
         "frames_failed": run_info.get("frames_failed", ""),
@@ -2259,7 +2271,15 @@ def summary_dashboard_table(data: pd.DataFrame, run_info: dict[str, Any], config
     if not cpp_mode:
         rows.append(["Ring report sizes", excel_scalar(configured_ring_report_sizes(config))])
     rows.append(["Ring definition", config.get("ring", {}).get("definition", "chordless")])
-    rows.append(["Trajectory stride", run_info.get("trajectory_stride", 1)])
+    if run_info.get("sampling_interval"):
+        native = run_info.get("native_frame_interval_ps")
+        delta = run_info.get("delta_time_ps")
+        rows.extend([
+            ["Native frame interval", "unknown" if native is None else f"{float(native):g} ps"],
+            ["Delta time", "all" if delta is None else f"{float(delta):g} ps"],
+            ["Raw frame step", run_info.get("raw_frame_step", 1)],
+            ["Selected frames", f"{run_info.get('selected_frames', 0)} / {run_info.get('source_frames_total', 0)}"],
+        ])
     if str(run_info.get("input_format", "")).startswith("lammps-"):
         rows.extend([
             ["LAMMPS units", run_info.get("lammps_units", "")],
@@ -2269,10 +2289,15 @@ def summary_dashboard_table(data: pd.DataFrame, run_info: dict[str, Any], config
         ])
     if not cpp_mode:
         rows.extend([
-            ["Quasi-cage sizes", f"{excel_scalar(config.get('quasi_cage', {}).get('base_sizes', 'auto'))} / {excel_scalar(config.get('quasi_cage', {}).get('side_sizes', 'auto'))}"],
-            ["Quasi max layer", config.get("quasi_cage", {}).get("max_layers", "")],
-            ["Quasi search policy", config.get("quasi_cage", {}).get("search_policy", "bounded")],
+            ["Find half", "on" if config.get("half_cage", {}).get("enabled", False) else "off"],
+            ["Find quasi", "on" if config.get("quasi_cage", {}).get("enabled", False) else "off"],
         ])
+        if config.get("quasi_cage", {}).get("enabled", False):
+            rows.extend([
+                ["Quasi-cage sizes", f"{excel_scalar(config.get('quasi_cage', {}).get('base_sizes', 'auto'))} / {excel_scalar(config.get('quasi_cage', {}).get('side_sizes', 'auto'))}"],
+                ["Quasi max layer", config.get("quasi_cage", {}).get("max_layers", "")],
+                ["Quasi search policy", config.get("quasi_cage", {}).get("search_policy", "bounded")],
+            ])
     rows.extend([
         ["Cage report types", dashboard_cage_targets(config)],
         ["Maximum cage face", config.get("cage", {}).get("max_faces", 20)],

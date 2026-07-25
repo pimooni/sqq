@@ -4,14 +4,16 @@ from __future__ import annotations
 
 import re
 from collections.abc import Iterable, Mapping
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Any, Sequence
 
 import numpy as np
 
 from ..models import Atom, Frame
 from .lammps import (
     LAMMPS_TRAJECTORY_SUFFIXES,
-    lammps_trajectory_frame_indices,
+    lammps_trajectory_times_ps,
     read_lammps,
 )
 
@@ -20,6 +22,22 @@ SUPPORTED_SUFFIXES = {".gro", ".xyz", ".xtc", ".trr"} | set(
     LAMMPS_TRAJECTORY_SUFFIXES
 )
 BOX_TOLERANCE = 1.0e-8
+TIME_TOLERANCE = 1.0e-6
+
+
+@dataclass(frozen=True)
+class TrajectorySelection:
+    """Resolved time-based frame selection for one trajectory-like input."""
+
+    raw_indexes: tuple[int, ...]
+    total_frames: int
+    native_interval_ps: float | None
+    delta_time_ps: float | None
+    raw_frame_step: int
+
+    @property
+    def selected_frames(self) -> int:
+        return len(self.raw_indexes)
 
 
 def expand_inputs(input_path: Path, pattern: str, recursive: bool) -> list[Path]:
@@ -63,55 +81,188 @@ def read_frames(
     paths: list[Path],
     topology: Path | None = None,
     xyz_scale: float = 0.1,
-    trajectory_stride: int = 1,
+    frame_indexes: Sequence[int] | None = None,
     lammps_config: Mapping[str, object] | None = None,
 ) -> Iterable[Frame]:
-    """Yield frames from supported coordinate and trajectory formats."""
-    stride = validated_stride(trajectory_stride)
+    """Yield selected frames from supported coordinate and trajectory formats."""
+    if frame_indexes is not None and len(paths) != 1:
+        raise ValueError("Frame indexes can only select frames from one input file.")
     for path in paths:
         suffix = path.suffix.lower()
         if suffix == ".gro":
-            yield read_gro(path)
+            yield from read_gro_frames(path, frame_indexes)
         elif suffix == ".xyz":
+            if frame_indexes not in (None, (), [0], (0,)):
+                raise ValueError("XYZ input contains one frame and only accepts frame index 0.")
             yield read_xyz(path, scale=xyz_scale)
         elif suffix in {".xtc", ".trr"}:
-            yield from read_mdanalysis(path, topology, stride=stride)
+            yield from read_mdanalysis(path, topology, raw_indexes=frame_indexes)
         elif suffix in LAMMPS_TRAJECTORY_SUFFIXES:
-            values = dict(lammps_config or {})
-            values["stride"] = stride
-            yield from read_lammps(path, topology, values)
+            yield from read_lammps(path, topology, lammps_config, raw_indexes=frame_indexes)
         else:
             raise ValueError(f"Unsupported input format: {path}")
 
 
 def read_gro(path: Path) -> Frame:
-    """Read one GROMACS GRO frame."""
-    lines = path.read_text(encoding="utf-8-sig", errors="replace").splitlines()
-    if len(lines) < 3:
-        raise ValueError(f"Invalid GRO file: {path}")
-    title = lines[0].strip()
+    """Read one GROMACS GRO frame and reject a stacked trajectory."""
+    iterator = _iter_gro_blocks(path)
     try:
-        natoms = int(lines[1].strip())
-    except ValueError as exc:
-        raise ValueError(f"Invalid atom count in GRO file: {path}") from exc
-    if natoms < 0:
-        raise ValueError(f"Negative atom count in GRO file: {path}")
-    atom_end = 2 + natoms
-    if len(lines) <= atom_end:
-        remaining = max(0, len(lines) - 2)
+        frame = next(iterator)
+    except StopIteration as exc:
+        raise ValueError(f"Invalid GRO file: {path}") from exc
+    try:
+        next(iterator)
+    except StopIteration:
+        frame.name = path.stem
+        return frame
+    raise ValueError(
+        f"GRO file contains multiple frames: {path}; use it as an analysis input "
+        "instead of a single-frame topology file."
+    )
+
+
+def read_gro_frames(
+    path: Path,
+    raw_indexes: Sequence[int] | None = None,
+) -> Iterable[Frame]:
+    """Yield one or more topology-consistent frames from a stacked GRO file."""
+    selected = None if raw_indexes is None else _validated_raw_indexes(raw_indexes)
+    selected_set = None if selected is None else set(selected)
+    iterator = _iter_gro_blocks(path)
+    try:
+        first = next(iterator)
+    except StopIteration as exc:
+        raise ValueError(f"Invalid GRO file: {path}") from exc
+    signature = _gro_topology_signature(first)
+    try:
+        second = next(iterator)
+    except StopIteration:
+        if selected_set is None or 0 in selected_set:
+            first.name = path.stem
+            yield first
+        if selected is not None and any(index != 0 for index in selected):
+            raise ValueError(f"GRO frame index exceeds the single frame in {path}.")
+        return
+
+    frames = ((0, first), (1, second))
+    last_index = -1
+    for raw_index, frame in frames:
+        _validate_gro_topology(frame, signature, path, raw_index)
+        frame.name = f"{path.stem}_frame{raw_index:06d}"
+        if selected_set is None or raw_index in selected_set:
+            yield frame
+        last_index = raw_index
+    for raw_index, frame in enumerate(iterator, start=2):
+        _validate_gro_topology(frame, signature, path, raw_index)
+        frame.name = f"{path.stem}_frame{raw_index:06d}"
+        if selected_set is None or raw_index in selected_set:
+            yield frame
+        last_index = raw_index
+    if selected is not None and selected and selected[-1] > last_index:
         raise ValueError(
-            f"Truncated GRO file {path}: declared {natoms} atoms and requires "
-            f"a separate box line, but found only {remaining} lines after the header."
+            f"GRO frame index {selected[-1]} exceeds the {last_index + 1} frames in {path}."
         )
 
-    atoms = [_parse_gro_atom(i, line) for i, line in enumerate(lines[2:atom_end])]
-    box = parse_gro_box(lines[atom_end], path)
-    if any(line.strip() for line in lines[atom_end + 1 :]):
+
+def _iter_gro_blocks(path: Path) -> Iterable[Frame]:
+    """Parse repeated title/count/atoms/box GRO blocks without loading the file."""
+    with path.open("r", encoding="utf-8-sig", errors="replace") as handle:
+        frame_index = 0
+        while True:
+            title_line = handle.readline()
+            while title_line != "" and not title_line.strip():
+                title_line = handle.readline()
+            if title_line == "":
+                return
+            title = title_line.rstrip("\r\n")
+            count_line = handle.readline()
+            if count_line == "":
+                if not title.strip():
+                    return
+                raise ValueError(
+                    f"Truncated GRO file {path}: frame {frame_index} lacks an atom count."
+                )
+            try:
+                natoms = int(count_line.strip())
+            except ValueError as exc:
+                raise ValueError(
+                    f"Invalid GRO file {path}: atom count in frame {frame_index} is "
+                    f"{count_line.strip()!r}."
+                ) from exc
+            if natoms < 0:
+                raise ValueError(
+                    f"Negative atom count in GRO file {path} frame {frame_index}."
+                )
+            atoms: list[Atom] = []
+            for atom_index in range(natoms):
+                line = handle.readline()
+                if line == "":
+                    raise ValueError(
+                        f"Truncated GRO file {path}: frame {frame_index} declares "
+                        f"{natoms} atoms but ends at atom {atom_index}."
+                    )
+                try:
+                    atoms.append(_parse_gro_atom(atom_index, line.rstrip("\r\n")))
+                except (TypeError, ValueError, IndexError) as exc:
+                    raise ValueError(
+                        f"Invalid GRO atom record in {path} frame {frame_index}, "
+                        f"atom {atom_index + 1}: {exc}"
+                    ) from exc
+            box_line = handle.readline()
+            if box_line == "":
+                raise ValueError(
+                    f"Truncated GRO file {path}: frame {frame_index} lacks a box line."
+                )
+            box = parse_gro_box(box_line, path)
+            yield Frame(
+                name=f"{path.stem}_frame{frame_index:06d}",
+                atoms=atoms,
+                box=box,
+                time_ps=_parse_title_time_ps(title),
+                source=path,
+            )
+            frame_index += 1
+
+
+def _gro_topology_signature(frame: Frame) -> tuple[tuple[int, str, str, int], ...]:
+    """Return the ordered atom identity required to stay fixed across GRO frames."""
+    return tuple(
+        (int(atom.resid), str(atom.resname), str(atom.atomname), int(atom.atomid))
+        for atom in frame.atoms
+    )
+
+
+def _validate_gro_topology(
+    frame: Frame,
+    expected: tuple[tuple[int, str, str, int], ...],
+    path: Path,
+    raw_index: int,
+) -> None:
+    """Reject atom-count or ordered-identity changes within one stacked GRO."""
+    observed = _gro_topology_signature(frame)
+    if observed != expected:
+        if len(observed) != len(expected):
+            detail = f"atom count changed from {len(expected)} to {len(observed)}"
+        else:
+            mismatch = next(
+                index
+                for index, (left, right) in enumerate(zip(expected, observed, strict=True))
+                if left != right
+            )
+            detail = f"ordered atom identity changed at atom {mismatch + 1}"
         raise ValueError(
-            f"Invalid GRO file: {path} contains extra non-empty records after "
-            "the box line; SQQ accepts one GRO frame per file."
+            f"Stacked GRO topology mismatch in {path} frame {raw_index}: {detail}."
         )
-    return Frame(name=path.stem, atoms=atoms, box=box, time_ps=_parse_title_time_ps(title), source=path)
+
+
+def _validated_raw_indexes(values: Sequence[int]) -> tuple[int, ...]:
+    """Normalize sorted unique nonnegative raw frame indexes."""
+    indexes = tuple(int(value) for value in values)
+    if any(index < 0 for index in indexes):
+        raise ValueError("Raw frame indexes must be nonnegative.")
+    if indexes != tuple(sorted(set(indexes))):
+        raise ValueError("Raw frame indexes must be sorted and unique.")
+    return indexes
 
 
 def parse_gro_box(line: str, path: Path | None = None) -> np.ndarray | None:
@@ -156,7 +307,7 @@ def _parse_gro_atom(index: int, line: str) -> Atom:
     except ValueError:
         fixed_width = False
         # Also accept whitespace-separated generated records.
-        parts = line.split()
+        parts = record.split()
         if len(parts) < 6:
             raise
         head = parts[0]
@@ -169,10 +320,10 @@ def _parse_gro_atom(index: int, line: str) -> Atom:
         atomid = int(parts[2])
         xyz = np.asarray([float(parts[3]), float(parts[4]), float(parts[5])], dtype=float)
     velocity = None
-    if fixed_width and len(line) >= 68 and line[44:68].strip():
+    if fixed_width and len(record) >= 68 and record[44:68].strip():
         try:
             velocity = np.asarray(
-                [float(line[44:52]), float(line[52:60]), float(line[60:68])],
+                [float(record[44:52]), float(record[52:60]), float(record[60:68])],
                 dtype=float,
             )
         except ValueError as exc:
@@ -193,7 +344,7 @@ def _parse_gro_atom(index: int, line: str) -> Atom:
 
 def _parse_title_time_ps(title: str) -> float | None:
     """Extract `t=` from a GRO title when present."""
-    match = re.search(r"\bt\s*=\s*([-+0-9.eE]+)", title)
+    match = re.search(r"\b(?:time_ps|t)\s*=\s*([-+0-9.eE]+)", title, re.IGNORECASE)
     if not match:
         return None
     try:
@@ -265,23 +416,141 @@ def close_mdanalysis_universe(universe) -> None:
         close()
 
 
-def trajectory_frame_indices(
+def trajectory_frame_selection(
     path: Path,
     topology: Path | None,
-    stride: int = 1,
+    delta_time_ps: float | None = None,
     lammps_config: Mapping[str, object] | None = None,
-) -> list[int]:
-    """Return raw trajectory indexes selected by the configured stride."""
-    step = validated_stride(stride)
-    if path.suffix.lower() in LAMMPS_TRAJECTORY_SUFFIXES:
-        values = dict(lammps_config or {})
-        values["stride"] = step
-        return lammps_trajectory_frame_indices(path, topology, values)
-    universe = open_mdanalysis_universe(path, topology)
+) -> TrajectorySelection:
+    """Resolve selected raw indexes from physical frame times."""
+    suffix = path.suffix.lower()
+    if suffix == ".gro":
+        times = gro_frame_times_ps(path)
+    elif suffix in LAMMPS_TRAJECTORY_SUFFIXES:
+        times = lammps_trajectory_times_ps(path, topology, lammps_config)
+    elif suffix in {".xtc", ".trr"}:
+        universe = open_mdanalysis_universe(path, topology)
+        try:
+            times = []
+            for raw_index, ts in enumerate(universe.trajectory):
+                try:
+                    value = float(ts.time)
+                except (TypeError, ValueError) as exc:
+                    raise ValueError(
+                        f"Trajectory frame {raw_index} in {path} lacks a valid time."
+                    ) from exc
+                times.append(value if np.isfinite(value) else None)
+        finally:
+            close_mdanalysis_universe(universe)
+    else:
+        raise ValueError(f"Time-based frame selection is not supported for {path}.")
+    return select_time_frames(times, delta_time_ps, path)
+
+
+def gro_frame_times_ps(path: Path) -> list[float | None]:
+    """Read and validate stacked-GRO topology while collecting frame times."""
+    times: list[float | None] = []
+    signature: tuple[tuple[int, str, str, int], ...] | None = None
+    for raw_index, frame in enumerate(_iter_gro_blocks(path)):
+        if signature is None:
+            signature = _gro_topology_signature(frame)
+        else:
+            _validate_gro_topology(frame, signature, path, raw_index)
+        times.append(frame.time_ps)
+    if not times:
+        raise ValueError(f"Invalid GRO file: {path}")
+    return times
+
+
+def select_time_frames(
+    times_ps: Sequence[float | None],
+    delta_time_ps: float | None,
+    source: Path | str,
+) -> TrajectorySelection:
+    """Select a regular physical-time interval without rounding to nearby frames."""
+    total = len(times_ps)
+    if total < 1:
+        raise ValueError(f"Trajectory contains no frames: {source}")
+    requested = _optional_positive_time(delta_time_ps)
+    complete_times = all(value is not None and np.isfinite(float(value)) for value in times_ps)
+    if requested is not None and not complete_times:
+        raise ValueError(
+            f"--delta-time requires valid time metadata on every frame in {source}."
+        )
+
+    native: float | None = None
+    regular = False
+    if complete_times and total > 1:
+        values = np.asarray(times_ps, dtype=float)
+        differences = np.diff(values)
+        if np.any(differences <= 0.0):
+            if requested is not None:
+                raise ValueError(
+                    f"--delta-time requires strictly increasing frame times in {source}."
+                )
+        else:
+            native = float(differences[0])
+            tolerance = max(TIME_TOLERANCE, abs(native) * TIME_TOLERANCE)
+            regular = bool(
+                np.allclose(
+                    differences,
+                    native,
+                    rtol=TIME_TOLERANCE,
+                    atol=tolerance,
+                )
+            )
+            if not regular:
+                native = None
+                if requested is not None:
+                    raise ValueError(
+                        f"--delta-time requires a regular native frame interval in {source}."
+                    )
+
+    step = 1
+    if requested is not None and total > 1:
+        if native is None or not regular:
+            raise ValueError(
+                f"Cannot resolve the native frame interval required by --delta-time in {source}."
+            )
+        tolerance = max(TIME_TOLERANCE, abs(native) * TIME_TOLERANCE)
+        if requested + tolerance < native:
+            raise ValueError(
+                f"--delta-time {requested:g} ps is shorter than the native "
+                f"interval {native:g} ps in {source}."
+            )
+        ratio = requested / native
+        nearest = int(round(ratio))
+        if nearest < 1 or not math_isclose(ratio, nearest):
+            raise ValueError(
+                f"--delta-time {requested:g} ps must be an integer multiple of "
+                f"the native interval {native:g} ps in {source}."
+            )
+        step = nearest
+    return TrajectorySelection(
+        raw_indexes=tuple(range(0, total, step)),
+        total_frames=total,
+        native_interval_ps=native,
+        delta_time_ps=requested,
+        raw_frame_step=step,
+    )
+
+
+def _optional_positive_time(value: Any) -> float | None:
+    """Normalize an optional positive physical-time value in ps."""
+    if value is None or (isinstance(value, str) and not value.strip()):
+        return None
     try:
-        return list(range(0, len(universe.trajectory), step))
-    finally:
-        close_mdanalysis_universe(universe)
+        number = float(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("input.delta_time_ps / -dt / --delta-time must be positive.") from exc
+    if not np.isfinite(number) or number <= 0.0:
+        raise ValueError("input.delta_time_ps / -dt / --delta-time must be positive.")
+    return number
+
+
+def math_isclose(left: float, right: float) -> bool:
+    """Compare a sampling ratio with an integer using one strict tolerance."""
+    return bool(np.isclose(left, right, rtol=TIME_TOLERANCE, atol=TIME_TOLERANCE))
 
 
 def trajectory_atom_metadata(universe) -> tuple[tuple[int, int, str, str, int], ...]:
@@ -360,12 +629,26 @@ def frame_from_mdanalysis_universe(
     )
 
 
-def read_mdanalysis(path: Path, topology: Path | None, stride: int = 1) -> Iterable[Frame]:
-    """Read XTC/TRR through MDAnalysis using a separate topology file."""
+def read_mdanalysis(
+    path: Path,
+    topology: Path | None,
+    raw_indexes: Sequence[int] | None = None,
+) -> Iterable[Frame]:
+    """Read selected XTC/TRR frames through MDAnalysis."""
     universe = open_mdanalysis_universe(path, topology)
     try:
         atom_metadata = trajectory_atom_metadata(universe)
-        for raw_frame_index in trajectory_frame_indices_from_length(len(universe.trajectory), stride):
+        indexes = (
+            tuple(range(len(universe.trajectory)))
+            if raw_indexes is None
+            else _validated_raw_indexes(raw_indexes)
+        )
+        if indexes and indexes[-1] >= len(universe.trajectory):
+            raise ValueError(
+                f"Trajectory frame index {indexes[-1]} exceeds the "
+                f"{len(universe.trajectory)} frames in {path}."
+            )
+        for raw_frame_index in indexes:
             yield frame_from_mdanalysis_universe(
                 universe,
                 path,
@@ -374,20 +657,3 @@ def read_mdanalysis(path: Path, topology: Path | None, stride: int = 1) -> Itera
             )
     finally:
         close_mdanalysis_universe(universe)
-
-
-def trajectory_frame_indices_from_length(length: int, stride: int = 1) -> range:
-    """Return a lazy raw-index range for an already-open trajectory."""
-    return range(0, int(length), validated_stride(stride))
-
-
-def validated_stride(value: int) -> int:
-    """Return a positive trajectory stride."""
-    try:
-        stride = int(value)
-    except (TypeError, ValueError) as exc:
-        raise ValueError("input.trajectory_stride must be a positive integer.") from exc
-    if stride < 1:
-        raise ValueError("input.trajectory_stride must be a positive integer.")
-    return stride
-

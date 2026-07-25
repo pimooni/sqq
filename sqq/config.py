@@ -154,7 +154,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "recursive": False,
         "first_file_time_ps": 0.0,
         "frame_time_step_ps": 100.0,
-        "trajectory_stride": 1,
+        "delta_time_ps": None,
         "xyz_scale": 0.1,
         "lammps": {
             "units": "real",
@@ -190,6 +190,9 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "report_sizes": "auto",
         "chordless": True,
         "definition": "chordless",
+    },
+    "half_cage": {
+        "enabled": True,
     },
     "quasi_cage": {
         "search_policy": "bounded",
@@ -565,6 +568,7 @@ def apply_mode_preset(config: dict[str, Any], mode: Any) -> dict[str, Any]:
     config["hydrate_cluster"]["enabled"] = bool(preset["find_cluster"])
     config["output"]["types"] = list(preset["output_types"])
     if is_cpp_mode(normalized):
+        config["half_cage"]["enabled"] = False
         config["quasi_cage"]["enabled"] = False
         config["ice"]["enabled"] = False
         config["order"]["parameters"] = list(DEFAULT_ORDER_PARAMETERS)
@@ -592,11 +596,6 @@ def load_config(path: Path | None, mode: Any = None) -> dict[str, Any]:
     migrated_parameters = migrate_legacy_order_parameters(user_config)
     if migrated_parameters is not None:
         user_config.setdefault("order", {})["parameters"] = list(migrated_parameters)
-    user_input = user_config.get("input", {})
-    if isinstance(user_input, dict) and "xtc_stride" in user_input:
-        if "trajectory_stride" not in user_input:
-            user_input["trajectory_stride"] = user_input["xtc_stride"]
-        user_input.pop("xtc_stride", None)
     strip_legacy_selection_keys(user_config)
 
     selected_mode = normalize_mode(mode if mode is not None else user_config.get("mode", DEFAULT_MODE))
@@ -697,6 +696,13 @@ def validate_cpp_cli(args: Any, config: dict[str, Any]) -> None:
             errors.append(f"{option} is not supported in mode cpp")
             explicit_unsupported.add(attribute)
 
+    find_half = getattr(args, "find_half", None)
+    if find_half not in (None, False, "off"):
+        errors.append("--find-half on is not supported by SQQ-CPP")
+    find_quasi = getattr(args, "find_quasi", None)
+    if find_quasi not in (None, False, "off"):
+        errors.append("--find-quasi on is not supported by SQQ-CPP")
+
     find_cluster = getattr(args, "find_cluster", None)
     if find_cluster not in (None, False, "off"):
         errors.append("--find-cluster on is not supported by SQQ-CPP")
@@ -717,6 +723,11 @@ def validate_cpp_cli(args: Any, config: dict[str, Any]) -> None:
     except (TypeError, ValueError) as exc:
         errors.append(str(exc))
 
+    half = config.setdefault("half_cage", {})
+    if _cpp_requested_on(half.get("enabled", False)):
+        errors.append("half_cage.enabled is not supported in mode cpp")
+    half["enabled"] = False
+
     quasi = config.setdefault("quasi_cage", {})
     if getattr(args, "size", None):
         quasi["base_sizes"] = "auto"
@@ -726,6 +737,8 @@ def validate_cpp_cli(args: Any, config: dict[str, Any]) -> None:
         for key, default in DEFAULT_CONFIG["quasi_cage"].items():
             if key != "enabled" and quasi.get(key, default) != default:
                 errors.append(f"quasi_cage.{key} is not supported in mode cpp")
+    if _cpp_requested_on(quasi.get("enabled", False)):
+        errors.append("quasi_cage.enabled is not supported in mode cpp")
     quasi["enabled"] = False
 
     cage = config.setdefault("cage", {})

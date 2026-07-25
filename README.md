@@ -2,7 +2,7 @@
 
 **SQQ: Python Joint Toolkit for Water-Shell Topology Analysis.**
 
-Current release: **0.3.7**
+Current release: **0.3.8**
 
 SQQ provides the complete SQQ-Py water-shell topology workflow plus the focused SQQ-CPP cage engine. Modes `00` and `py` use SQQ-Py; modes `99` and `cpp` use C++17 for graph, internal ring, cage, occupancy, and F3/F4 analysis. Algorithms are documented in `docs/design.md` and release notes in `docs/update.md`.
 
@@ -21,14 +21,14 @@ Names are listed alphabetically by family name.
 - Fengyi Mi @ Southwest University of Science and Technology
 - Zhengcai Zhang @ Laoshan Laboratory
 
-## Changed in 0.3.7
+## Changed in 0.3.8
 
-- Package and native-core versions are synchronized at `0.3.7`, released Jul 25, 2026.
-- Hydrate phases are assigned independently in every frame from distributed spatial evidence on the cage graph; no temporal smoothing or information from adjacent frames is used.
-- Strict local fingerprints remain high-confidence evidence but are no longer a single on/off gate for an otherwise coherent phase domain.
-- A phase-compatible spatial core and per-cage expansion reduce whole-domain flicker caused by one marginal local contact.
-- Phase/domain labels remain `sI`, `sII`, `sH`, and `boundary`; residual `ambiguous` and `unclassified` sets stay mutually exclusive, while isolated cages remain outside reported cluster components.
-- Running one frame alone produces the same phase assignment as analyzing that frame within a trajectory or compatible multi-file group.
+- Package and native-core versions are synchronized at `0.3.8`, released Jul 25, 2026.
+- `-dt` / `--delta-time` replaces frame-count stride sampling and selects a physical interval in ps for XTC, TRR, LAMMPS trajectories, and stacked GRO trajectories.
+- One GRO file may now contain repeated GRO frames. SQQ streams the blocks, validates a fixed ordered topology, and preserves each title time.
+- `--find-half on|off` and `--find-quasi on|off` independently control the two open-patch searches. `--quasi-max-layer` applies only when quasi search is enabled.
+- Terminal, `config.yaml`, per-frame info, and main summary report the resolved native interval, requested interval, raw frame step, and selected/total frame counts.
+- Cage, phase, order-parameter, and other scientific definitions are unchanged; results change only when the new sampling or search switches intentionally select different work.
 
 ## Install
 
@@ -91,10 +91,16 @@ Glob pattern:
 sqq analyze -i "./gro/*.gro" -o ./result_sqq
 ```
 
-XTC/TRR trajectory with a topology file:
+XTC/TRR trajectory with a topology file; add `-dt 100` to analyze an exact 100 ps interval:
 
 ```bash
-sqq analyze -i traj.xtc --top topol.gro -c config.yaml -o ./result_sqq
+sqq analyze -i traj.xtc --top topol.gro -dt 100 -c config.yaml -o ./result_sqq
+```
+
+A stacked GRO trajectory uses repeated complete GRO blocks in one file and needs no separate topology:
+
+```bash
+sqq analyze -i frames.gro -dt 100 -o ./result_sqq
 ```
 
 LAMMPS dump or DCD with a DATA topology; standard water/methane types are inferred automatically:
@@ -105,11 +111,11 @@ sqq analyze -i traj.lammpstrj -t system.data -o ./result_sqq
 
 ### Input Units and Boxes
 
-GRO and MDAnalysis trajectory coordinates are interpreted in nm. GRO accepts exactly one frame per file and rejects truncated atom blocks, missing or malformed box lines, extra non-empty records, and non-finite coordinates. Trajectory frames also require finite coordinates. XYZ coordinates are multiplied by `input.xyz_scale` / `--xyz-scale`; the default `0.1` assumes angstrom input, while `1.0` keeps nm values. SQQ accepts exactly one declared XYZ frame per file and rejects truncated, extra, malformed, or non-finite atom records. XYZ has no periodic box unless converted through another format.
+GRO and MDAnalysis trajectory coordinates are interpreted in nm. A GRO input may contain one frame or repeated complete GRO blocks in one stacked trajectory. SQQ streams every block, validates atom counts, ordered atom identity, box records, and finite coordinates, and rejects topology changes between stacked frames. A GRO used as `--top` must still contain exactly one frame. Other trajectory frames also require finite coordinates. XYZ coordinates are multiplied by `input.xyz_scale` / `--xyz-scale`; the default `0.1` assumes angstrom input, while `1.0` keeps nm values. SQQ accepts exactly one declared XYZ frame per file and rejects truncated, extra, malformed, or non-finite atom records. XYZ has no periodic box unless converted through another format.
 
 GRO atom counts and the mandatory box line are validated. A three-value positive box is orthorhombic; an all-zero box is treated as non-periodic. Nine-value GRO boxes with nonzero tilt terms and trajectory frames with non-90-degree angles are rejected because triclinic minimum-image calculations are not implemented. GRO molecules are formed from contiguous residue blocks in source order, preventing wrapped or repeated residue IDs from merging distinct molecules. LAMMPS normally uses DATA molecule IDs; automatic inference can rebuild them from unambiguous Bonds components, and dump atom rows may be interleaved.
 
-LAMMPS trajectories require `-t system.data` (equivalent to `--top` / `--topology`). A non-empty `input.lammps.type_map` explicitly maps every numeric atom type to `resname`/`atomname` or `ignore` and always takes priority. If the map is absent or empty, SQQ uses DATA masses, type comments, and Bonds to infer only unambiguous standard water (`1 O + 2 H`, two O-H bonds), all-atom methane (`1 C + 4 H`, four C-H bonds), and labeled single-site methane mappings. If molecule IDs do not define valid molecules but Bonds do, SQQ rebuilds deterministic molecule IDs and reports that decision. Ambiguous masses, inconsistent reuse of one numeric type, unsupported molecular topology, or insufficient topology evidence fail with a request for an explicit map. The resolved mapping is recorded in `config.yaml`, per-frame info, and main-summary configuration. This normalization is shared by SQQ-Py and SQQ-CPP. Supported inputs are LAMMPS DATA with `full`, `molecular`, `bond`, or `angle` atom style, fully periodic `pp pp pp` orthorhombic dump boxes, and LAMMPS DCD. Tilted boxes, nonperiodic dump boundaries, `units lj`, duplicate atom IDs, ambiguous molecule reconstruction, and topology/trajectory ID mismatches fail before analysis. `input.trajectory_stride` applies to XTC, TRR, LAMMPS dump, and LAMMPS DCD.
+LAMMPS trajectories require `-t system.data` (equivalent to `--top` / `--topology`). A non-empty `input.lammps.type_map` explicitly maps every numeric atom type to `resname`/`atomname` or `ignore` and always takes priority. If the map is absent or empty, SQQ uses DATA masses, type comments, and Bonds to infer only unambiguous standard water (`1 O + 2 H`, two O-H bonds), all-atom methane (`1 C + 4 H`, four C-H bonds), and labeled single-site methane mappings. If molecule IDs do not define valid molecules but Bonds do, SQQ rebuilds deterministic molecule IDs and reports that decision. Ambiguous masses, inconsistent reuse of one numeric type, unsupported molecular topology, or insufficient topology evidence fail with a request for an explicit map. The resolved mapping is recorded in `config.yaml`, per-frame info, and main-summary configuration. This normalization is shared by SQQ-Py and SQQ-CPP. Supported inputs are LAMMPS DATA with `full`, `molecular`, `bond`, or `angle` atom style, fully periodic `pp pp pp` orthorhombic dump boxes, and LAMMPS DCD. Tilted boxes, nonperiodic dump boundaries, `units lj`, duplicate atom IDs, ambiguous molecule reconstruction, and topology/trajectory ID mismatches fail before analysis. `input.delta_time_ps` / `-dt` / `--delta-time` selects a physical interval in ps for XTC, TRR, LAMMPS dump/DCD, and stacked GRO trajectories. With no delta time, every stored frame is analyzed. The requested interval must be at least, and an integer multiple of, the regular native interval; missing or irregular time metadata is rejected instead of rounded.
 
 ## Analysis Modes
 
@@ -137,7 +143,7 @@ The default `chordless`/`bounded` path preserves the established scientific defi
 
 Every cage now passes the same mandatory topology validation in SQQ-Py and SQQ-CPP: each edge belongs to exactly two faces, `V - E + F = 2`, the face shell is connected, every vertex link is one cycle, and every shell vertex is trivalent. Optional scientific cage validation adds PBC-aware face-planarity and edge-variation limits, nonzero projected area, positive-volume validation, and volume-centroid cage centers. It remains disabled by default, but disabling it no longer bypasses topology validation. SQQ uses an orthorhombic box representation and rejects non-orthogonal/triclinic input explicitly.
 
-The current release uses the same compact three-row stage model for serial and parallel progress: file preparation (`reading`, `settings`, `selecting`), core topology search (`graph`, `ring`, `half/quasi`, `cage`, and optional `cluster`), and post-processing (`filtering`, `order`, `ice`, `output`). In interactive single-file runs, the active stage is highlighted with bold bright-blue ANSI text. The `cluster` stage appears only when hydrate-cluster analysis is enabled. Parallel runs also show aggregate stage counts and up to six active files with per-stage and per-file timings.
+The current release uses the same compact three-row stage model for serial and parallel progress: file preparation (`reading`, `settings`, `selecting`), core topology search (`graph`, `ring`, optional `half/quasi`, `cage`, and optional `cluster`), and post-processing (`filtering`, `order`, `ice`, `output`). The `half/quasi` stage is hidden when both open-patch searches are disabled. In interactive single-file runs, the active stage is highlighted with bold bright-blue ANSI text. The `cluster` stage appears only when hydrate-cluster analysis is enabled. Parallel runs also show aggregate stage counts and up to six active files with per-stage and per-file timings.
 
 ### Native SQQ-CPP Backend
 
@@ -199,10 +205,16 @@ Analyze connected hydrate clusters from all detected cages:
 sqq analyze -i md.gro -s 4,5,6 --find-cluster on -o ./result_sqq_cluster
 ```
 
-Enable bounded outer quasi-cage layers, or opt into exact connected-subset growth:
+Control standard half-cage and layered quasi-cage searches independently. A quasi layer limit requires quasi search to remain on:
 
 ```bash
-sqq analyze -i md.gro --quasi-max-layer 3 -o ./result_sqq_l3
+sqq analyze -i md.gro --find-half on --find-quasi off -o ./result_half_only
+sqq analyze -i md.gro --find-half off --find-quasi on --quasi-max-layer 3 -o ./result_quasi_l3
+```
+
+Enable exact connected-subset quasi growth when needed:
+
+```bash
 sqq analyze -i md.gro --quasi-max-layer 3 --quasi-search-policy exact -o ./result_sqq_l3_exact
 ```
 
@@ -261,7 +273,7 @@ mode: "py"
 
 input:
   pattern: "*.gro"
-  trajectory_stride: 1
+  delta_time_ps: null
   xyz_scale: 0.1
   lammps:
     units: real
@@ -281,6 +293,9 @@ ring:
   report_sizes: auto
   chordless: true
   definition: chordless
+
+half_cage:
+  enabled: true
 
 quasi_cage:
   enabled: true
@@ -492,7 +507,7 @@ References: Barnes et al., MCG ([DOI 10.1063/1.4871898](https://doi.org/10.1063/
 | `--pattern PATTERN` | Glob; default `*.gro` | Select files when `--input` is a directory |
 | `-t, --top, --topology FILE` | GRO for XTC/TRR or multi-GRO validation; LAMMPS DATA for dump/DCD | Supply trajectory topology or validate a multiple-GRO batch |
 | `--xyz-scale SCALE` | Positive float; default `0.1` | Multiply XYZ coordinates by this value to obtain nm; use `1.0` for XYZ already in nm |
-| `--trajectory-stride N` | Positive integer; default `1` | Read every Nth trajectory frame |
+| `-dt, --delta-time PS` | Positive physical interval in ps; default all stored frames | Analyze frames on an exact time interval for one XTC/TRR/LAMMPS/stacked-GRO trajectory |
 | `--lammps-units STYLE` | `real`, `metal`, `nano` | Select LAMMPS units |
 | `--lammps-timestep DT` | Positive number | Convert LAMMPS steps to ps |
 | `--lammps-atom-style STYLE` | `full`, `molecular`, `bond`, `angle` | Interpret LAMMPS DATA |
@@ -500,6 +515,8 @@ References: Barnes et al., MCG ([DOI 10.1063/1.4871898](https://doi.org/10.1063/
 | `--quasi-size SIZES` | `auto` or a comma-separated subset of searched `4,5,6,7` | Override quasi-cage base and side size lists together |
 | `--quasi-base-size SIZES` | `auto` or a comma-separated subset of searched `4,5,6,7` | Override quasi-cage base-ring size list |
 | `--quasi-side-size SIZES` | `auto` or a comma-separated subset of searched `4,5,6,7` | Override quasi-cage side-ring size list |
+| `--find-half VALUE` | `on`, `off`; SQQ-Py default `on` | Enable or disable standard half-cage search |
+| `--find-quasi VALUE` | `on`, `off`; SQQ-Py default `on` | Enable or disable layered quasi-cage search |
 | `--quasi-max-layer N` | Positive integer; default `1` | Report quasi-cage layers up to N |
 | `--quasi-search-policy POLICY` | `bounded`, `exact`; default `bounded` | Preserve bounded growth or enumerate connected outer-layer subsets |
 | `--ring-definition DEFINITION` | `chordless`, `shortest_path`; default `chordless` | Select the detected ring definition |
@@ -680,7 +697,7 @@ Without `--strict`, standalone serial/process/thread read failures become failed
 
 GRO structure folders, filenames, and title lines use portable ASCII structure labels since version 0.2.4, for example `5^126^2` and `qc_5r_5^36^2_56566`. Markdown and main-summary scientific labels retain their readable superscript notation. This avoids Windows GBK/legacy-reader failures caused by Unicode superscript or subscript characters in generated GRO paths and titles.
 
-Each `*_info.md` report starts with SQQ version, mode/engine, date/time, source, input format, topology when applicable, trajectory stride, frame/time, requested-to-effective graph mode, effective bond mode, ring sizes, status, and molecule counts. Modes display as `00 (sqq-py)`, `py (sqq-py)`, `99 (sqq-cpp)`, or `sqq-cpp`. LAMMPS reports also record units, timestep, atom style, and type-map source.
+Each `*_info.md` report starts with SQQ version, mode/engine, date/time, source, input format, topology when applicable, resolved sampling metadata for trajectory-like input, half/quasi search state, frame/time, requested-to-effective graph mode, effective bond mode, ring sizes, status, and molecule counts. Modes display as `00 (sqq-py)`, `py (sqq-py)`, `99 (sqq-cpp)`, or `sqq-cpp`. LAMMPS reports also record units, timestep, atom style, and type-map source.
 
 When quasi-cage or cage isomers are present, the same report adds description tables:
 

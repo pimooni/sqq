@@ -2,6 +2,43 @@
 
 This file records versioned update notes. New releases should be appended above older entries.
 
+## Version 0.3.8
+
+### Short Summary
+
+Version 0.3.8 replaces raw frame-count stride sampling with exact physical-time sampling, adds streamed stacked-GRO trajectory input, and separates standard half-cage search from layered quasi-cage search. XTC, TRR, supported LAMMPS trajectories, and stacked GRO use one `-dt` / `--delta-time` contract. Search and output metadata now state which open-patch analyses were enabled. Package and native-core metadata are synchronized at `0.3.8`, released Jul 25, 2026.
+
+### Main Changes
+
+1. Physical-time frame sampling
+   - Removed `--trajectory-stride` and `input.trajectory_stride` without a compatibility alias.
+   - Added `-dt` / `--delta-time PS` and `input.delta_time_ps`; omission analyzes every stored frame.
+   - Reads native times from XTC/TRR metadata, LAMMPS step/timestep/unit conversion, or stacked-GRO title `t=` / `time_ps=` values.
+   - Requires a positive requested interval that is at least and an integer multiple of a regular native interval. Missing, decreasing, or irregular time metadata fails explicitly instead of selecting approximate frames.
+   - Preserves original frame times and records the native interval, requested interval, raw frame step, and selected/total frame counts in terminal, `config.yaml`, info, and main summary.
+
+2. Stacked GRO trajectories
+   - A single `.gro` input may contain repeated complete title/count/atom/box blocks and is streamed rather than loaded as one large text object.
+   - Every frame must retain the same atom count and ordered residue/atom identity; topology changes fail before scientific analysis.
+   - Coordinates, optional velocities, boxes, and semicolon annotations are validated per frame. A GRO supplied as `--top` remains single-frame only.
+   - One stacked GRO follows the trajectory path and may use `-dt`; multiple independent GRO files retain topology grouping and do not accept one shared delta-time schedule.
+
+3. Independent half/quasi search controls
+   - Added `--find-half on|off`, `--find-quasi on|off`, `half_cage.enabled`, and `quasi_cage.enabled` for SQQ-Py.
+   - `--quasi-max-layer` / `quasi_cage.max_layers` applies only while quasi search is enabled; contradictory requests fail before analysis.
+   - Standard half-cages and nonstandard layered quasi-cages can now be calculated independently. When both are off, the search and progress stage are skipped.
+   - Explicit disabled-category GRO output requests fail instead of producing misleading empty structure files. SQQ-CPP continues to reject both Python-only searches.
+
+4. Validation and documentation
+   - Added external regression coverage for exact time selection, nonmultiple rejection, stacked-GRO comments/velocities, topology mismatch, CLI removal, and half/quasi linkage.
+   - Verified XTC selection, LAMMPS time discovery, a complete stacked-GRO analysis, direct half/quasi combinations, Python compilation, and the established 0.3.x regression suite.
+   - Updated README, design documentation, release metadata, and development notes.
+
+### Compatibility
+
+- Commands and YAML using trajectory stride must change to a physical interval, for example `--trajectory-stride 10` on a 10 ps trajectory becomes `-dt 100`.
+- With `-dt` omitted and both open-patch searches enabled, existing single-frame and trajectory scientific results are unchanged.
+- Disabling half or quasi search intentionally removes only that result family and its related report content; closed-cage, phase, order-parameter, and ice definitions are unchanged.
 ## Version 0.3.7
 
 ### Short Summary

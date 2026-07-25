@@ -100,7 +100,7 @@ def build_parser() -> argparse.ArgumentParser:
     analyze_parser.add_argument("--pattern", metavar="PATTERN", help='Input pattern when --input is a directory; default "*.gro".')
     analyze_parser.add_argument("-t", "--top", "--topology", metavar="TOPOLOGY", dest="topology", help="GRO topology for XTC/TRR or LAMMPS DATA topology for dump/DCD input.")
     analyze_parser.add_argument("--xyz-scale", metavar="SCALE", type=float, help="Multiply XYZ coordinates by SCALE to obtain nm; default 0.1 assumes angstrom input.")
-    analyze_parser.add_argument("--trajectory-stride", metavar="N", type=int, help="Read every Nth trajectory frame; default 1.")
+    analyze_parser.add_argument("-dt", "--delta-time", metavar="PS", type=float, help="Analyze frames at this physical-time interval in ps; default all stored frames.")
     analyze_parser.add_argument(
         "--lammps-units",
         choices=("real", "metal", "nano"),
@@ -143,6 +143,8 @@ def build_parser() -> argparse.ArgumentParser:
     analyze_parser.add_argument("--quasi-side-size", metavar="4,5,6,7", help="Override quasi-cage side-ring size list.")
     analyze_parser.add_argument("--quasi-max-layer", metavar="N", type=int, help="Override quasi_cage.max_layers; default 1 reports L1 quasi_cage and standard half_cage only.")
     analyze_parser.add_argument("--quasi-search-policy", choices=("bounded", "exact"), help="Layer growth policy: bounded preserves the established search; exact enumerates connected layer subsets.")
+    analyze_parser.add_argument("--find-half", choices=("on", "off"), help="Enable or disable standard half-cage search; default on in SQQ-Py.")
+    analyze_parser.add_argument("--find-quasi", choices=("on", "off"), help="Enable or disable layered quasi-cage search; default on in SQQ-Py.")
     analyze_parser.add_argument("--ring-definition", choices=("chordless", "shortest_path"), help="Ring definition; default chordless preserves established output.")
     analyze_parser.add_argument(
         "--order-parameter",

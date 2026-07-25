@@ -18,7 +18,8 @@ SUBSCRIPT_DIGITS = str.maketrans("0123456789-", "₀₁₂₃₄₅₆₇₈₉�
 def find_cage_patches(
     frame: Frame,
     rings: dict[int, list[Ring]],
-    enabled: bool = False,
+    find_half: bool = False,
+    find_quasi: bool = False,
     base_sizes: list[int] | None = None,
     side_sizes: list[int] | None = None,
     max_combinations_per_base: int = 50000,
@@ -32,7 +33,7 @@ def find_cage_patches(
     warnings: list[str] | None = None,
 ) -> tuple[list[CagePatch], list[CagePatch]]:
     """Find standard half-cages and nonstandard open quasi-cage patches."""
-    if not enabled:
+    if not find_half and not find_quasi:
         return [], []
 
     policy = str(search_policy or "bounded").strip().lower()
@@ -95,9 +96,11 @@ def find_cage_patches(
                 seen_half,
                 seen_quasi,
                 type_counts,
+                find_half=find_half,
+                find_quasi=find_quasi,
                 geometry_cache=patch_geometry_cache,
             )
-            if half_cage_type(base.size, (l1_sequence, "6")) is not None:
+            if find_half and half_cage_type(base.size, (l1_sequence, "6")) is not None:
                 l2_rings = next_layer_candidates(
                     base_patch_rings,
                     side_rings,
@@ -126,36 +129,41 @@ def find_cage_patches(
                     seen_half,
                     seen_quasi,
                     type_counts,
+                    find_half=find_half,
+                    find_quasi=find_quasi,
                     geometry_cache=patch_geometry_cache,
                 )
 
             # L2/L3 grow from exposed frontier edges.
-            add_layered_quasi_cages(
-                frame,
-                ring_by_id,
-                edge_to_rings,
-                side_allowed,
-                ring_centers,
-                base.size,
-                [base.object_id, *side_ids],
-                side_ids,
-                (l1_sequence,),
-                max_layers=max_layers,
-                max_rings_per_layer=max_rings_per_layer,
-                max_layer_states_per_seed=max_layer_states_per_seed,
-                max_layer_candidates=max_layer_candidates,
-                half_cages=half_cages,
-                quasi_cages=quasi_cages,
-                seen_quasi=seen_quasi,
-                seen_half=seen_half,
-                type_counts=type_counts,
-                distance_cache=ring_distance_cache,
-                expansion_cache=layer_expansion_cache,
-                search_policy=policy,
-                warnings=warnings,
-                status=search_status,
-                geometry_cache=patch_geometry_cache,
-            )
+            if find_quasi:
+                add_layered_quasi_cages(
+                    frame,
+                    ring_by_id,
+                    edge_to_rings,
+                    side_allowed,
+                    ring_centers,
+                    base.size,
+                    [base.object_id, *side_ids],
+                    side_ids,
+                    (l1_sequence,),
+                    max_layers=max_layers,
+                    max_rings_per_layer=max_rings_per_layer,
+                    max_layer_states_per_seed=max_layer_states_per_seed,
+                    max_layer_candidates=max_layer_candidates,
+                    half_cages=half_cages,
+                    quasi_cages=quasi_cages,
+                    seen_quasi=seen_quasi,
+                    seen_half=seen_half,
+                    type_counts=type_counts,
+                    find_half=find_half,
+                    find_quasi=find_quasi,
+                    distance_cache=ring_distance_cache,
+                    expansion_cache=layer_expansion_cache,
+                    search_policy=policy,
+                    warnings=warnings,
+                    status=search_status,
+                    geometry_cache=patch_geometry_cache,
+                )
 
     if warnings is not None:
         warning_messages = {
@@ -442,6 +450,8 @@ def add_layered_quasi_cages(
     seen_quasi: set[frozenset[str]],
     seen_half: set[frozenset[str]],
     type_counts: dict[str, int],
+    find_half: bool,
+    find_quasi: bool,
     distance_cache: dict[tuple[str, str], float] | None = None,
     expansion_cache: dict[
         tuple[tuple[str, ...], tuple[str, ...], int, int],
@@ -529,6 +539,8 @@ def add_layered_quasi_cages(
                     seen_half,
                     seen_quasi,
                     type_counts,
+                    find_half=find_half,
+                    find_quasi=find_quasi,
                     geometry_cache=geometry_cache,
                 )
                 next_states.append((all_ids, layer_ids, new_sequences))
@@ -756,12 +768,16 @@ def add_classified_patch(
     seen_half: set[frozenset[str]],
     seen_quasi: set[frozenset[str]],
     type_counts: dict[str, int],
+    find_half: bool,
+    find_quasi: bool,
     geometry_cache: dict[frozenset[str], tuple[tuple[int, ...], np.ndarray]] | None = None,
 ) -> bool:
     """Classify one layered patch as a standard half-cage or quasi-cage."""
     key = frozenset(ring_ids)
     half_type = half_cage_type(base_size, layer_sequences)
     if half_type is not None:
+        if not find_half:
+            return False
         if key in seen_half:
             return False
         layers = (f"{base_size}r", *[layer_label(sequence, False) for sequence in layer_sequences])
@@ -776,6 +792,8 @@ def add_classified_patch(
         )
         return add_patch(patch, half_cages, seen_half, type_counts)
 
+    if not find_quasi:
+        return False
     if key in seen_quasi:
         return False
     label = quasi_label(base_size, layer_sequences)

@@ -433,6 +433,11 @@ def analyze_grouped_gro_serial(
             for item in group_configs.values()
         ),
         cpp_mode=any(is_cpp_mode(item.get("mode")) for item in group_configs.values()),
+        include_patch_stage=any(
+            bool(item.get("half_cage", {}).get("enabled", False))
+            or bool(item.get("quasi_cage", {}).get("enabled", False))
+            for item in group_configs.values()
+        ),
     )
     try:
         for display_index, task in enumerate(tasks):
@@ -470,6 +475,11 @@ def analyze_grouped_gro_threaded(
             for item in group_configs.values()
         ),
         cpp_mode=any(is_cpp_mode(item.get("mode")) for item in group_configs.values()),
+        include_patch_stage=any(
+            bool(item.get("half_cage", {}).get("enabled", False))
+            or bool(item.get("quasi_cage", {}).get("enabled", False))
+            for item in group_configs.values()
+        ),
     )
     display_by_global = {task.global_index: index for index, task in enumerate(tasks)}
     try:
@@ -538,6 +548,11 @@ def analyze_grouped_gro_processes(
             for item in group_configs.values()
         ),
         cpp_mode=any(is_cpp_mode(item.get("mode")) for item in group_configs.values()),
+        include_patch_stage=any(
+            bool(item.get("half_cage", {}).get("enabled", False))
+            or bool(item.get("quasi_cage", {}).get("enabled", False))
+            for item in group_configs.values()
+        ),
     )
     display_by_global = {task.global_index: index for index, task in enumerate(tasks)}
     context = get_context("spawn")

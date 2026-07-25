@@ -12,7 +12,7 @@ input frames
   -> water graph: hydrogen bond / O-O / user pair map
   -> diagnostic coordination distribution
   -> chordless rings (default) or optional shortest-path rings
-  -> half_cage and quasi_cage open patches
+  -> optional half_cage and/or quasi_cage open patches
   -> closed cage search and guest occupancy
   -> optional hydrate_cluster analysis from all detected cages
   -> F3/F4/Q_l plus MCG/DHOP order parameters and ice metrics
@@ -32,6 +32,9 @@ Python input/config/selection
 
 In SQQ-Py, the shared water graph is used by ring, half_cage, quasi_cage, cage, selected F3/F4, graph-mode Q_l, and ice analysis. Selected MCG and DHOP descriptors are calculated during the order stage but use dedicated guest/water cutoff graphs because their published definitions are independent of the selected SQQ bond mode. Hydrate_cluster analysis starts after cage detection and uses all detected cage-ring memberships, not the raw water graph or the report-filtered cage list. In both engines, the graph node is the water oxygen. A graph edge is an O-H...O hydrogen bond in `hbond` mode, an O-O neighbor in `oo` mode, or a user-supplied pair in `pairs` mode. Coordination diagnostics read this graph without adding, removing, or capping edges.
 
+### Stacked GRO trajectory input
+
+A single GRO path may contain one frame or repeated complete GRO blocks. Repeated blocks are one trajectory, not a multiple-GRO batch: SQQ streams them in file order, parses physical time from each title `t=` / `time_ps=` token, and applies the same time-selection contract used by XTC/TRR/LAMMPS. Every block must preserve atom count and ordered `(resid, resname, atomname, atomid)` identity. Coordinates, optional velocities, orthorhombic boxes, and text after a semicolon are parsed frame by frame. A GRO used as `--top` must contain exactly one frame.
 ### Multiple-GRO topology grouping
 
 Grouping is a pre-analysis boundary used only when one invocation contains two or more GRO files. Single GRO files and trajectory readers retain their established paths. The pre-scan parses each GRO atom block and builds a deterministic fingerprint from the total atom count plus ordered contiguous residue blocks. Each block contributes its `resname` and ordered `atomname` sequence. GRO title/time text, coordinates, optional velocities, box values, and numeric atom/residue identifiers are deliberately excluded, so renumbered or coordinate-shifted frames of the same molecular topology stay together. Atom order, residue-block order, names, or atom count changes create a different topology group. Groups are assigned `A` through `Z` in first-occurrence order.
@@ -184,7 +187,7 @@ Topology groups are task-routing metadata, not separate serial jobs. One shared 
 
 While the pool exists, the parent sets the common BLAS/OpenMP thread environment variables to `parallel.math_threads` (default 1). Spawned children inherit the limits before importing NumPy-backed modules. The parent environment is restored after pool shutdown.
 
-For one XTC/TRR or supported LAMMPS trajectory with `-t` / `--top`, the parent opens the trajectory once to resolve `input.trajectory_stride`-selected raw indexes. Each worker initializer opens a private MDAnalysis Universe once, caches its immutable atom metadata once, and tasks contain a small contiguous batch of `(ordered_frame_index, raw_frame_index)` pairs. Batch size is `ceil(selected_frames / (4 * workers))`, clamped to 1 through 8. Parent and worker readers are explicitly closed. Multiple trajectory files and non-process trajectory backends remain serial. SQQ retains an orthorhombic box representation; non-90-degree trajectory angles are detected and rejected instead of being silently approximated.
+For one XTC/TRR or supported LAMMPS trajectory with `-t` / `--top`, the parent reads physical frame times once and resolves `input.delta_time_ps`-selected raw indexes. The requested interval must be at least and an integer multiple of a regular native interval. Each worker initializer opens a private MDAnalysis Universe once, caches immutable atom metadata once, and tasks contain a small contiguous batch of `(ordered_frame_index, raw_frame_index)` pairs. Batch size is `ceil(selected_frames / (4 * workers))`, clamped to 1 through 8. Parent and worker readers are explicitly closed. A stacked GRO is streamed serially; multiple trajectory files and non-process trajectory backends remain serial. SQQ retains an orthorhombic box representation; non-90-degree trajectory angles are detected and rejected instead of being silently approximated.
 
 Both standalone-file and indexed-trajectory process paths, plus the compatibility thread path, maintain at most `3 * workers` submitted tasks and refill the queue as futures complete. This is a bounded submission window, not a worker cap: 100 effective workers retain 100-way execution and at most 300 submitted tasks. It avoids constructing a Future and serializing arguments for every item in a very large input set.
 
@@ -192,11 +195,11 @@ Standalone files whose case-insensitive stems collide inside the same output roo
 
 Terminal and main-summary dashboard metadata share the same display helpers. The requested graph mode is preserved from config/CLI. Explicit graph modes display as `hbond`, `oo`, or `pairs`. For a multiple-GRO topology group, automatic graph mode is resolved once before dispatch and displays as `auto -> hbond` or `auto -> oo`; different topology groups may resolve differently, but their summaries remain separate. Single-file and trajectory paths retain their established pending/final effective-mode reporting.
 
-Root `sqq` / `sqq -h` output renders the banner and product sentence, then `SQQ version: 0.3.7   Release date: Jul 25, 2026`, then the ordinary `usage:` line. Root `sqq -v` / `sqq --version` exits successfully after printing only that version line. Subcommand help retains the standard argparse layout.
+Root `sqq` / `sqq -h` output renders the banner and product sentence, then `SQQ version: 0.3.8   Release date: Jul 25, 2026`, then the ordinary `usage:` line. Root `sqq -v` / `sqq --version` exits successfully after printing only that version line. Subcommand help retains the standard argparse layout.
 
 The mandatory output-root `config.yaml` is the authoritative runtime record. It preserves normalized analysis settings and adds final effective metadata: SQQ version, mode and engine, input/topology provenance, requested and effective graph modes, requested worker policy and resolved workers, backend/math threads, normalized output types, status/error, frame totals, failures, and `summary_write` timing/table dimensions. It is initialized with `status: running` before frame analysis and atomically replaced with `completed` or `failed`; a failed rewrite does not truncate the previous complete file. The detailed `config` worksheet in `summary.xlsx` and `summary/config.csv` are no longer built. Main summaries retain only the compact dashboard Configuration block. `output.types` remains the only output selector; removed `output.disabled_outputs` configurations are rejected rather than migrated.
 
-Configuration is normalized once before execution. Textual booleans use explicit on/off parsing rather than Python truthiness; enum values are canonicalized and rejected when unsupported; cutoffs and scales must be finite and positive where required; counts, strides, and state limits must be positive integers rather than booleans or fractional numbers. Residue-name lists accept comma-separated text or sequences and are normalized deterministically.
+Configuration is normalized once before execution. Textual booleans use explicit on/off parsing rather than Python truthiness; enum values are canonicalized and rejected when unsupported; cutoffs and scales must be finite and positive where required; counts and state limits must be positive integers rather than booleans or fractional numbers; physical sampling intervals must be finite and positive. Residue-name lists accept comma-separated text or sequences and are normalized deterministically.
 ### Terminal Progress Display
 
 SQQ-Py serial and parallel runs share the same three-row stage model:
@@ -207,7 +210,7 @@ core topology search   graph -> ring -> half/quasi -> cage -> cluster
 post-processing        filtering -> order -> ice -> output
 ```
 
-`cluster` is included only when the resolved `hydrate_cluster.enabled` value is true, for example through mode `00` or `--find-cluster on`. When hydrate cluster analysis is disabled, the stage is omitted rather than shown as `cluster:0`.
+`cluster` is included only when the resolved `hydrate_cluster.enabled` value is true, for example through mode `00` or `--find-cluster on`. When hydrate cluster analysis is disabled, the stage is omitted rather than shown as `cluster:0`. Likewise, `half/quasi` is omitted when both `half_cage.enabled` and `quasi_cage.enabled` are false.
 
 SQQ-CPP keeps the same aligned three-row presentation but removes Python-only work:
 
@@ -283,7 +286,7 @@ stage_summary       : reading:0    settings:0  selecting:0
 
 ## Input Validation and Coordinate Units
 
-GRO declares coordinates in nm. SQQ requires the declared atom count, all corresponding finite atom records, one separate 3- or 9-value box line, and no extra non-empty records after that box. Each GRO file therefore contains exactly one frame. Atom and residue names must be non-empty. An all-zero box is normalized to non-periodic `None`; mixed nonpositive lengths are invalid. A nine-value box is accepted only when all six tilt terms are zero. Nonzero tilt and non-finite values fail fast.
+GRO declares coordinates in nm. Each frame requires a title, declared atom count, all corresponding finite atom records, and one separate 3- or 9-value box line. A file may contain one frame or repeated complete blocks; stacked frames must keep identical ordered atom identity. Atom and residue names must be non-empty. Optional velocities are retained, while text after `;` is treated as an annotation and ignored by numeric parsing. An all-zero box is normalized to non-periodic `None`; mixed nonpositive lengths are invalid. A nine-value box is accepted only when all six tilt terms are zero. Nonzero tilt and non-finite values fail fast.
 
 XTC/TRR positions and lengths supplied by MDAnalysis are converted from angstrom to nm. Coordinates and cell angles must be finite, and angles must be 90 degrees within tolerance; triclinic frames are rejected. Non-finite or unparseable trajectory time is retained as unavailable rather than emitted as a numeric time.
 
@@ -425,7 +428,7 @@ L2 = rings grown outward from L1
 L3 = rings grown outward from L2
 ```
 
-L2 and L3 may be dangling rings or connected dangling ring chains. They do not need to close. The default configuration reports L1 quasi-cages and standard half-cages only; L2/L3 remain available by setting `quasi_cage.max_layers` or `--quasi-max-layer`.
+L2 and L3 may be dangling rings or connected dangling ring chains. They do not need to close. `half_cage.enabled` / `--find-half` and `quasi_cage.enabled` / `--find-quasi` independently control the two reported families. Both default on in SQQ-Py. The default quasi search reports L1; L2/L3 remain available by setting `quasi_cage.max_layers` or `--quasi-max-layer`, which is invalid when quasi search is off.
 
 `half_cage` is the standard subset of open patches:
 
@@ -908,7 +911,7 @@ frame_name/
     frame_name_cluster_boundary.gro
 ```
 
-`summary-xlsx` writes the global `summary.xlsx` workbook. `summary-csv` writes the same applicable main-table mapping as separate UTF-8-SIG files under the configured `summary_csv_dir` (default `summary/`), using sheet names as filenames and preserving columns, row order, and values without workbook formatting or tabs. The first `summary` table is a dashboard: Configuration begins with `SQQ version` and `Mode`, then includes input format/trajectory stride and applicable LAMMPS provenance, the same requested/effective `Graph mode` display used by the final terminal run summary, normalized order parameters, resolved `Find cluster`, and normalized output types; `Analysis Results (min / mean / max)` reports per-frame min/mean/max values while `Frames total / ok / failed` remains a run-level frame count. Analysis tables contain one input file or trajectory frame per row. `failures` instead has one failed input/frame per row, and `detail_index` has one generated detail file per row. No detailed `config` table is emitted; the dashboard keeps the compact Configuration block. Exact quasi-cage isomer rows, optional `failures.csv`, and other ordinary multi-row detail tables are written under the configured `summary_detail_dir` only when `summary-detail-csv` is selected. Failure details are always retained in `config.yaml`.
+`summary-xlsx` writes the global `summary.xlsx` workbook. `summary-csv` writes the same applicable main-table mapping as separate UTF-8-SIG files under the configured `summary_csv_dir` (default `summary/`), using sheet names as filenames and preserving columns, row order, and values without workbook formatting or tabs. The first `summary` table is a dashboard: Configuration begins with `SQQ version` and `Mode`, then includes input format, resolved physical sampling metadata, half/quasi search state, and applicable LAMMPS provenance, the same requested/effective `Graph mode` display used by the final terminal run summary, normalized order parameters, resolved `Find cluster`, and normalized output types; `Analysis Results (min / mean / max)` reports per-frame min/mean/max values while `Frames total / ok / failed` remains a run-level frame count. Analysis tables contain one input file or trajectory frame per row. `failures` instead has one failed input/frame per row, and `detail_index` has one generated detail file per row. No detailed `config` table is emitted; the dashboard keeps the compact Configuration block. Exact quasi-cage isomer rows, optional `failures.csv`, and other ordinary multi-row detail tables are written under the configured `summary_detail_dir` only when `summary-detail-csv` is selected. Failure details are always retained in `config.yaml`.
 
 The SQQ-CPP main summary deliberately contains only applicable tables: `summary`, `cage`, `cage_isomer`, and selected F3/F4 `order_parameter`; `failures` is conditional and `cage_occupancy` exists only when at least one frame contains selected guests. Its default `summary-csv` writes these as independent files, while explicit `summary-xlsx` writes the same mapping as workbook sheets. Ring/connection diagnostic tables, half/quasi, cluster, ice, detail index, and detail CSV are omitted from its compact schema. If no selected guests exist, the dashboard and per-frame info state that occupancy was not evaluated.
 

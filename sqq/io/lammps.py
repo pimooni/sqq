@@ -80,7 +80,6 @@ class LammpsInputConfig:
     atom_style: str
     coordinate_convention: str
     type_map: Mapping[str, LammpsTypeMapEntry]
-    stride: int
 
     @property
     def length_to_nm(self) -> float:
@@ -131,7 +130,6 @@ def normalize_lammps_config(
             values.get("coordinate_convention", "auto")
         ),
         type_map=normalize_type_map(values.get("type_map", {})),
-        stride=_positive_int(values.get("stride", 1), "LAMMPS stride"),
     )
 
 
@@ -979,12 +977,12 @@ def frame_from_lammps_universe(
     )
 
 
-def lammps_trajectory_frame_indices(
+def lammps_trajectory_times_ps(
     path: Path,
     topology: Path | None,
     config: Mapping[str, Any] | LammpsInputConfig | None,
-) -> list[int]:
-    """Return raw frame indexes selected by the normalized stride."""
+) -> list[float]:
+    """Return validated physical frame times in ps for one LAMMPS trajectory."""
     settings = normalize_lammps_config(config)
     universe = open_lammps_universe(path, topology, settings)
     try:
@@ -997,7 +995,24 @@ def lammps_trajectory_frame_indices(
                 raise ValueError(
                     f"LAMMPS dump frame-count mismatch between validation and MDAnalysis: {path}."
                 )
-        return list(range(0, len(universe.trajectory), settings.stride))
+            return [
+                float(frame.step * settings.timestep * settings.time_to_ps)
+                for frame in frames
+            ]
+        times: list[float] = []
+        for raw_index, ts in enumerate(universe.trajectory):
+            try:
+                value = float(ts.time)
+            except (TypeError, ValueError) as exc:
+                raise ValueError(
+                    f"LAMMPS DCD frame {raw_index} lacks a valid time: {path}."
+                ) from exc
+            if not np.isfinite(value):
+                raise ValueError(
+                    f"LAMMPS DCD frame {raw_index} has a non-finite time: {path}."
+                )
+            times.append(value)
+        return times
     finally:
         close_lammps_universe(universe)
 
@@ -1006,8 +1021,9 @@ def read_lammps(
     path: Path,
     topology: Path | None,
     config: Mapping[str, Any] | LammpsInputConfig | None,
+    raw_indexes: Sequence[int] | None = None,
 ) -> Iterable[Frame]:
-    """Yield validated LAMMPS frames through the common SQQ model."""
+    """Yield selected validated LAMMPS frames through the common SQQ model."""
     settings = normalize_lammps_config(config)
     universe = open_lammps_universe(path, topology, settings)
     try:
@@ -1020,7 +1036,21 @@ def read_lammps(
                 raise ValueError(
                     f"LAMMPS dump frame-count mismatch between validation and MDAnalysis: {path}."
                 )
-        for raw_index in range(0, len(universe.trajectory), settings.stride):
+        indexes = (
+            tuple(range(len(universe.trajectory)))
+            if raw_indexes is None
+            else tuple(int(value) for value in raw_indexes)
+        )
+        if any(index < 0 for index in indexes):
+            raise ValueError("LAMMPS raw frame indexes must be nonnegative.")
+        if indexes != tuple(sorted(set(indexes))):
+            raise ValueError("LAMMPS raw frame indexes must be sorted and unique.")
+        if indexes and indexes[-1] >= len(universe.trajectory):
+            raise ValueError(
+                f"LAMMPS frame index {indexes[-1]} exceeds the "
+                f"{len(universe.trajectory)} frames in {path}."
+            )
+        for raw_index in indexes:
             yield frame_from_lammps_universe(
                 universe,
                 path,
@@ -1121,16 +1151,4 @@ def _finite_float(value: Any, label: str) -> float:
         raise ValueError(f"{label} must be a finite number.") from exc
     if not np.isfinite(number):
         raise ValueError(f"{label} must be a finite number.")
-    return number
-
-
-def _positive_int(value: Any, label: str) -> int:
-    if isinstance(value, bool):
-        raise ValueError(f"{label} must be a positive integer.")
-    try:
-        number = int(value)
-    except (TypeError, ValueError) as exc:
-        raise ValueError(f"{label} must be a positive integer.") from exc
-    if str(value).strip() not in {str(number), f"+{number}"} or number < 1:
-        raise ValueError(f"{label} must be a positive integer.")
     return number
