@@ -2,6 +2,78 @@
 
 This file records versioned update notes. New releases should be appended above older entries.
 
+## Version 0.3.9
+
+### Short Summary
+
+Version 0.3.9 introduces a compact public CLI, `-e` / `--engine`, singular `--pair`, separate input/resolved configuration files, canonical singular YAML, engine-aware half/quasi `auto` settings, scientific component roles, and graceful SQQ-CPP normalization. Visualization output is replaced by a compact four-file `sqq_render/` package: one topology GRO, one coordinate XTC, one sparse per-frame membership/time TSV, and one VMD Tcl loader. Run-isolated staging, an output-root process lock, bounded cleanup retries, and nonfatal post-finalization cleanup warnings prevent a completed Analyze run from failing with `Directory not empty`. Package and native-core metadata are synchronized at `0.3.9`, dated Jul 30, 2026. Cross-frame cage tracking is deferred and is not included in this release.
+
+### Main Changes
+
+1. Compact VMD visualization package
+   - Writes `sqq_render/sqq-cage.gro` as the stable atom topology and first selected render frame only.
+   - Writes `sqq_render/sqq-cage.xtc` with the coordinates and orthorhombic box for every selected render frame.
+   - Writes `sqq_render/sqq-cage.membership.tsv` as sparse per-frame metadata, preserving render/source frame indexes, physical time, graph mode, cage/guest membership, cage type, and optional frame-local phase/domain/cluster identifiers.
+   - Writes `sqq_render/sqq-cage.vmd.tcl`, which loads the neighboring GRO, XTC, and TSV; users keep all four files together and source only the Tcl script.
+   - Keeps `sqq-cage-gro` as the one-frame topology-only selector. `sqq-render` implies it and writes the complete four-file package.
+   - Replaces the previous repeated full-text GRO trajectory and Tcl frame-splitting path, reducing output size and VMD load overhead without changing per-frame scientific results.
+
+2. Visualization atom and component roles
+   - The compact renderer contains every selected water oxygen plus every atom of each selected guest.
+   - Water hydrogens, additive, environment, and other components are excluded from the default visualization package; scientific water/guest selections remain explicit.
+   - Added water, guest, additive, environment, and other component roles.
+   - Automatic LAMMPS mapping still recognizes strict water and methane topologies, while unrelated bonded components such as walls are retained deterministically as environment/other context instead of causing a mapping failure or entering the water graph.
+   - Explicit type and role maps remain authoritative.
+
+3. Compact public CLI
+   - Replaced public `-m` / `--mode` with `-e` / `--engine`; accepted values remain `00`, `py`, `99`, and `cpp`, with `py` as the default.
+   - Old `--mode VALUE` and `-m VALUE` invocations exit with status 2 and print the exact `--engine` / `-e` migration form rather than running through an alias.
+   - Renamed explicit pair input from `--pairs` to singular `--pair`; old `--pairs FILE` exits with status 2 and prints `Use: --pair FILE`.
+   - Analyze exposes only `-i/-t/-c/-o/-e/-w/-dt/-b/-s`, `--find-half`, `--find-quasi`, `--find-cluster`, `--order-parameter`, `--pair`, and help.
+   - Advanced input, LAMMPS, ring/quasi/cage/cluster, Q_l, pair-ID, backend, and output controls moved to YAML.
+   - Removed legacy compatibility spellings `--workers`, `--no-q`, `-q`, `--q-degree`, `--mcg3`, `--dhop30`, and `--topology`.
+
+4. Configuration files and canonical YAML
+   - `sqq init` writes `sqq_config.yaml` by default; `-o` selects a different template destination, and either form refuses to overwrite an existing file.
+   - Analyze never rewrites the user file. Every result root instead owns `sqq_config_resolved.yaml`, containing the final effective engine, graph, worker, output, input/LAMMPS, adjustment, status/failure, and timing state.
+   - A run without `-c` uses built-in defaults rather than auto-loading a current-directory YAML file.
+   - The generated template includes `#` section/choices comments, defaults `ring.size` to `[4, 5, 6]`, and treats duplicate mapping keys and unknown public keys as errors.
+   - The canonical selector is top-level `engine`, collections are singular, physical units appear in key names, order selection is `order_parameter.enabled`, and pair settings are `graph.pair_file` / `graph.pair_id`.
+   - Legacy top-level `mode`, `graph.bond_mode`, and `order.parameter` migrate with warnings to `engine`, `graph.mode`, and `order_parameter.enabled`. Plural 0.3.x collection keys remain readable; generated and resolved files use the canonical schema.
+   - Generic `sqq init` output uses `half_cage.enabled: auto` and `quasi_cage.enabled: auto`; auto resolves on for SQQ-Py and off for SQQ-CPP.
+   - Legacy YAML that explicitly enables Python-only half/quasi work under C++ is disabled with one concise warning; inactive quasi layer controls and incompatible half/quasi output types are normalized and recorded instead of aborting cage analysis.
+
+5. Engine display and release synchronization
+   - Terminal, info, and summary metadata use `SQQ engine: sqq-py` or `SQQ engine: sqq-cpp`; compound labels such as `py (sqq-py)` are removed.
+   - README documents the primary `py` and `cpp` behavior; compatibility details for `00` and `99` remain in design and release documentation.
+   - Updated Python package metadata, native core metadata, CMake, help/version output, README, design notes, and release notes to `0.3.9`.
+   - Release date metadata is Jul 30, 2026.
+
+6. Analyze output-finalization reliability
+   - Gives every Analyze invocation and topology group a private fragment workspace instead of sharing one fixed `.sqq-cage-fragments` directory.
+   - Holds an output-root process lock for the complete run. A second process targeting the same root stops before cleanup or output writes and reports the owning PID/host when available.
+   - Retries transient `ENOTEMPTY`, `EBUSY`, `EACCES`, and `EPERM` cleanup failures with bounded backoff, covering Linux and delayed shared-filesystem removal.
+   - Treats a persistent temporary-workspace cleanup failure as a warning after successful finalization; completed files remain valid and the retained temporary path is reported.
+   - Propagates the private workspace through serial, threaded, process, trajectory, multi-GRO, SQQ-Py, and SQQ-CPP execution paths.
+   - Adds focused tests for run isolation, cross-process output locking, transient and persistent cleanup failures, repeated output-root use, multi-process multi-GRO output, and 1,001-frame compact finalization.
+
+7. Visualization naming and Tcl interaction
+   - Uses `sqq-cage.vmd.tcl`, matching the `sqq-cage.gro`, `sqq-cage.xtc`, and `sqq-cage.membership.tsv` stem.
+   - Keeps the public output-type selector `sqq-render` unchanged and removes stale root-level or legacy-named visualization files when a reused output root is finalized successfully.
+   - Keeps cage, guest, phase, cluster, and domain display/color commands, labels, current-frame center/guest picking, additive show layers, deterministic cage-family ordering, and the white VMD background.
+   - Cage, cluster, and domain identifiers remain frame-local in 0.3.9; this release does not assign persistent cross-frame cage IDs.
+
+### Compatibility and Result Impact
+
+- Per-frame graph, ring, half/quasi, cage, occupancy, phase, order-parameter, and ice definitions are unchanged.
+- The visualization atom inventory intentionally changes to water oxygens plus complete guests; ordinary scientific GRO outputs retain their established schemas.
+- The visualization trajectory representation changes from repeated full-text GRO blocks to one topology GRO plus XTC coordinates and sparse TSV metadata. Keep all four files in `sqq_render/` and source `sqq-cage.vmd.tcl`.
+- Scripts must replace `-m/--mode` with `-e/--engine` and `--pairs` with `--pair`; advanced CLI overrides must move to canonical YAML.
+- User configuration and resolved runtime configuration are separate files. Newly written configuration uses singular canonical names.
+- Output locking, fragment staging, cleanup, and failure-semantics changes do not alter scientific results.
+- Cross-frame cage tracking, persistent IDs, lifetime/event/residence tables, and Track-specific render packages are intentionally excluded from 0.3.9 and are planned for a later release.
+
+Status: these 0.3.9 implementation and documentation changes are local. No commit or push is implied by this release-note update.
 ## Version 0.3.8
 
 ### Short Summary

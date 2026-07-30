@@ -23,7 +23,7 @@ from ..config import (
     DEFAULT_MODE,
     dump_config,
     is_cpp_mode,
-    mode_display,
+
     normalize_order_parameters,
     order_parameter_display,
     output_enabled,
@@ -1035,7 +1035,7 @@ def write_frame_info(
     ]
     frame_information_rows = [
         ["sqq version", __version__],
-        ["mode", mode_display(analysis_mode)],
+        ["sqq engine", "sqq-cpp" if cpp_mode else "sqq-py"],
         ["date & time", report_datetime_label()],
         ["source", source_label(result.frame.source)],
         *metadata_rows,
@@ -2050,14 +2050,15 @@ def write_run_config(
     """Atomically write mandatory run metadata and return the dumped mapping."""
     outdir.mkdir(parents=True, exist_ok=True)
     config_for_dump = config_with_run_metadata(config, run_info)
-    target = outdir / "config.yaml"
-    legacy_target = outdir / "run_config.yaml"
+    target = outdir / "sqq_config_resolved.yaml"
+    legacy_targets = (outdir / "run_config.yaml",)
     temp_path = temporary_output_path(target)
     try:
         with temp_path.open("w", encoding="utf-8", newline="\n") as handle:
             dump_config(config_for_dump, handle)
         os.replace(temp_path, target)
-        legacy_target.unlink(missing_ok=True)
+        for legacy_target in legacy_targets:
+            legacy_target.unlink(missing_ok=True)
     finally:
         temp_path.unlink(missing_ok=True)
     return config_for_dump
@@ -2073,9 +2074,12 @@ def config_with_run_metadata(config: dict[str, Any], run_info: dict[str, Any]) -
     run.update({
         "sqq_version": run_info.get("sqq_version", __version__),
         "release_date": run_info.get("release_date", __release_date__),
-        "mode": mode_display(config.get("mode", DEFAULT_MODE)),
+        "engine_selector": config.get("mode", DEFAULT_MODE),
         "engine": "sqq-cpp" if is_cpp_mode(config.get("mode", DEFAULT_MODE)) else "sqq-py",
-        "config_output": run_info.get("config_output", "config.yaml"),
+        "config_output": run_info.get(
+            "config_output",
+            "sqq_config_resolved.yaml",
+        ),
         "status": run_info.get("status", ""),
         "error": run_info.get("error", ""),
         "graph_mode_requested": run_info.get("graph_mode", config.get("graph", {}).get("bond_mode", "")),
@@ -2258,11 +2262,11 @@ def summary_dashboard_table(data: pd.DataFrame, run_info: dict[str, Any], config
         ["summary.xlsx", run_info.get("summary_xlsx", "")],
         ["summary_csv", run_info.get("summary_csv", "")],
         ["summary_detail_csv", run_info.get("summary_detail_csv", "")],
-        ["config.yaml", run_info.get("config_output", "")],
+        ["sqq_config_resolved.yaml", run_info.get("config_output", "")],
         ["", ""],
         ["Configuration", ""],
         ["SQQ version", run_info.get("sqq_version", __version__)],
-        ["Mode", mode_display(config.get("mode", DEFAULT_MODE))],
+        ["SQQ engine", "sqq-cpp" if cpp_mode else "sqq-py"],
         ["Config file", run_info.get("config_file", "<built-in defaults>")],
         ["Topology", run_info.get("topology", "<none>")],
         ["Graph mode", graph_mode_value],

@@ -38,7 +38,7 @@ from .config import (
     DEFAULT_MODE,
     is_cpp_mode,
     load_config,
-    mode_display,
+
     mode_worker_count,
     mode_worker_fraction,
     normalize_cpp_output_types,
@@ -107,8 +107,10 @@ from .io.trajectory import (
 from .io.vmd import (
     FRAGMENT_DIRECTORY,
     cleanup_sqq_cage_bundle,
+    cleanup_sqq_cage_fragment_workspace,
     finalize_sqq_cage_bundle,
     prepare_sqq_cage_fragments,
+    sqq_output_lock,
     write_sqq_cage_fragment,
 )
 from .models import Cage, CagePatch, Frame, FrameResult, HydrateOrderResult
@@ -133,18 +135,26 @@ BOND_MODE_DISPLAY_NAMES = {
 
 
 def analyze(args: Namespace) -> None:
-    """Run SQQ analysis from parsed command-line arguments."""
+    """Run SQQ analysis while exclusively owning its output root."""
+    outdir = Path(args.output)
+    outdir.mkdir(parents=True, exist_ok=True)
+    with sqq_output_lock(outdir):
+        _analyze_locked(args)
+
+
+def _analyze_locked(args: Namespace) -> None:
+    """Run SQQ analysis after the output lock has been acquired."""
     run_started_at = datetime.now().astimezone()
     started_at = perf_counter()
-    config = load_config(Path(args.config) if args.config else None, mode=getattr(args, "mode", None))
+    config = load_config(Path(args.config) if args.config else None, mode=getattr(args, "engine", None))
     apply_cli_overrides(config, args)
     validate_cpp_cli(args, config)
     normalize_analysis_scopes(config)
 
     # Directory inputs use one file per frame.
     input_path = Path(args.input)
-    pattern = args.pattern or config["input"]["pattern"]
-    recursive = bool(args.recursive or config["input"]["recursive"])
+    pattern = config["input"]["pattern"]
+    recursive = bool(config["input"]["recursive"])
     paths = expand_inputs(input_path, pattern=pattern, recursive=recursive)
 
     outdir = Path(args.output)
@@ -281,8 +291,9 @@ def analyze(args: Namespace) -> None:
     bundle_gro = output_enabled(config, "sqq-cage-gro")
     bundle_script = output_enabled(config, "sqq-render")
     cleanup_sqq_cage_bundle(outdir)
+    fragment_dir: Path | None = None
     if bundle_gro or bundle_script:
-        prepare_sqq_cage_fragments(outdir)
+        fragment_dir = prepare_sqq_cage_fragments(outdir)
 
     try:
         if workers > 1 and coordinate_parallelizable:
@@ -292,8 +303,9 @@ def analyze(args: Namespace) -> None:
                 config,
                 workers=workers,
                 backend=parallel_backend,
-                strict=bool(args.strict),
+                strict=bool(config.get("run", {}).get("strict", False)),
                 total_started_at=started_at,
+                fragment_dir=fragment_dir,
             )
         elif workers > 1 and trajectory_parallelizable:
             rows = analyze_trajectory_processes(
@@ -303,8 +315,9 @@ def analyze(args: Namespace) -> None:
                 outdir,
                 config,
                 workers=workers,
-                strict=bool(args.strict),
+                strict=bool(config.get("run", {}).get("strict", False)),
                 total_started_at=started_at,
+                fragment_dir=fragment_dir,
             )
         else:
             rows = analyze_paths_serial(
@@ -312,19 +325,22 @@ def analyze(args: Namespace) -> None:
                 outdir,
                 config,
                 topology=topology,
-                strict=bool(args.strict),
+                strict=bool(config.get("run", {}).get("strict", False)),
                 total_started_at=started_at,
                 total_frames=work_items if frame_selection is not None else None,
                 selected_frame_indexes=trajectory_indexes if frame_selection is not None else None,
+                fragment_dir=fragment_dir,
             )
         if bundle_gro or bundle_script:
             finalize_sqq_cage_bundle(
                 outdir,
+                fragment_dir=fragment_dir,
                 write_gro=bundle_gro,
                 write_script=bundle_script,
             )
     except Exception as exc:
-        cleanup_sqq_cage_bundle(outdir)
+        if fragment_dir is not None:
+            cleanup_sqq_cage_fragment_workspace(fragment_dir)
         failed_at = datetime.now().astimezone()
         failed_run_info = build_run_info(
             args,
@@ -440,7 +456,7 @@ def build_run_info(
     finished_at_wall: datetime,
     rows: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
-    """Collect run-level metadata for terminal, config.yaml, and summaries."""
+    """Collect run-level metadata for terminal, resolved config, and summaries."""
     requested_graph_mode = config["graph"]["bond_mode"]
     effective_graph_modes = row_effective_graph_modes(rows or [])
     selected_order_parameters = normalize_order_parameters(
@@ -474,7 +490,8 @@ def build_run_info(
         "time_zone": format_time_zone(started_at_wall),
         "config_file": args.config or "<built-in defaults>",
         "sqq_version": __version__,
-        "mode": mode_display(config.get("mode", DEFAULT_MODE)),
+        "engine_selector": config.get("mode", DEFAULT_MODE),
+        "sqq_engine": "sqq-cpp" if is_cpp_mode(config.get("mode", DEFAULT_MODE)) else "sqq-py",
         "worker_policy": worker_policy_text(config),
         "topology": str(topology) if topology else "<none>",
         "matched_files": len(paths),
@@ -563,7 +580,7 @@ def build_run_info(
             )
             else "<disabled>"
         ),
-        "config_output": str((outdir / "config.yaml").resolve()),
+        "config_output": str((outdir / "sqq_config_resolved.yaml").resolve()),
     }
     if input_format.startswith("lammps-"):
         lammps = config["input"].get("lammps", {})
@@ -606,7 +623,7 @@ def print_run_header(
     print("")
     print("Configuration")
     print_terminal_field("SQQ version", __version__)
-    print_terminal_field("Mode", mode_display(config.get("mode", DEFAULT_MODE)))
+    print_terminal_field("SQQ engine", "sqq-cpp" if is_cpp_mode(config.get("mode", DEFAULT_MODE)) else "sqq-py")
     print_terminal_field("Config file", args.config or "<built-in defaults>")
     print_terminal_field("Topology", topology or "<none>")
     if config["input"].get("sampling"):
@@ -669,10 +686,10 @@ def print_run_summary(run_info: dict[str, Any]) -> None:
     print_terminal_field("Finish time", run_info.get("finish_time", ""))
     print_terminal_field("Duration (s)", run_info.get("elapsed_seconds", ""))
     print_terminal_field("SQQ version", run_info.get("sqq_version", __version__))
-    print_terminal_field("Mode", run_info.get("mode", ""))
+    print_terminal_field("SQQ engine", run_info.get("sqq_engine", ""))
     print_terminal_field("Graph mode", run_info.get("graph_mode_display", run_info.get("graph_mode", "")))
     print_terminal_field("Order parameters", run_info.get("order_parameters", ""))
-    if "sqq-cpp" not in str(run_info.get("mode", "")).strip().lower():
+    if run_info.get("sqq_engine") != "sqq-cpp":
         print_terminal_field("Find cluster", run_info.get("find_cluster", "off"))
     print_terminal_field("Output types", run_info.get("output_types", "none"))
     print_terminal_field("Worker policy", run_info.get("worker_policy", ""))
@@ -1325,6 +1342,7 @@ def analyze_paths_serial(
     total_started_at: float,
     total_frames: int | None = None,
     selected_frame_indexes: list[int] | None = None,
+    fragment_dir: Path | None = None,
 ) -> list[dict[str, Any]]:
     """Analyze frames in input order."""
     rows: list[dict[str, Any]] = []
@@ -1368,6 +1386,7 @@ def analyze_paths_serial(
                         outdir,
                         strict=strict,
                         stage_callback=callback,
+                        fragment_dir=fragment_dir,
                     )
                 rows.append(row)
                 progress.complete_frame(row.get("status") == "ok")
@@ -1406,6 +1425,7 @@ def analyze_paths_serial(
                 outdir,
                 strict=strict,
                 stage_callback=callback,
+                fragment_dir=fragment_dir,
             )
             rows.append(row)
             progress.complete_frame(row.get("status") == "ok")
@@ -1423,14 +1443,19 @@ def analyze_paths_parallel(
     backend: str,
     strict: bool,
     total_started_at: float,
+    fragment_dir: Path | None = None,
 ) -> list[dict[str, Any]]:
     """Analyze independent coordinate files with the selected concurrency backend."""
     resolved_backend = normalize_parallel_backend(backend)
     if resolved_backend == "thread":
-        return analyze_paths_threaded(paths, outdir, config, workers, strict, total_started_at)
+        return analyze_paths_threaded(
+            paths, outdir, config, workers, strict, total_started_at, fragment_dir
+        )
     if resolved_backend != "process":
         raise ValueError("Parallel analysis requires backend=process or backend=thread.")
-    return analyze_paths_processes(paths, outdir, config, workers, strict, total_started_at)
+    return analyze_paths_processes(
+        paths, outdir, config, workers, strict, total_started_at, fragment_dir
+    )
 
 
 def analyze_paths_threaded(
@@ -1440,6 +1465,7 @@ def analyze_paths_threaded(
     workers: int,
     strict: bool,
     total_started_at: float,
+    fragment_dir: Path | None = None,
 ) -> list[dict[str, Any]]:
     """Compatibility backend using the legacy shared-memory thread pool."""
     rows_by_index: dict[int, dict[str, Any]] = {}
@@ -1471,6 +1497,7 @@ def analyze_paths_threaded(
                         outdir,
                         strict,
                         progress,
+                        fragment_dir,
                     )
                     futures[future] = frame_index
 
@@ -1501,6 +1528,7 @@ def analyze_paths_processes(
     workers: int,
     strict: bool,
     total_started_at: float,
+    fragment_dir: Path | None = None,
 ) -> list[dict[str, Any]]:
     """Use spawned processes so CPU-bound topology search can use multiple cores."""
     rows_by_index: dict[int, dict[str, Any]] = {}
@@ -1521,7 +1549,14 @@ def analyze_paths_processes(
                 max_workers=workers,
                 mp_context=context,
                 initializer=initialize_file_worker,
-                initargs=(config, str(outdir), strict, stage_queue),
+                initargs=(
+                    config,
+                    str(outdir),
+                    strict,
+                    stage_queue,
+                    None,
+                    str(fragment_dir) if fragment_dir is not None else None,
+                ),
             ) as executor:
                 task_iterator = iter(enumerate(paths))
                 futures: dict[Any, int] = {}
@@ -1569,6 +1604,7 @@ def analyze_trajectory_processes(
     workers: int,
     strict: bool,
     total_started_at: float,
+    fragment_dir: Path | None = None,
 ) -> list[dict[str, Any]]:
     """Analyze selected frames with one private MDAnalysis Universe per process."""
     if topology is None:
@@ -1599,6 +1635,7 @@ def analyze_trajectory_processes(
                     str(trajectory),
                     str(topology),
                     config["input"].get("lammps", {}),
+                    str(fragment_dir) if fragment_dir is not None else None,
                 ),
             ) as executor:
                 batch_iterator = iter(trajectory_task_batches(raw_frame_indexes, workers))
@@ -1685,6 +1722,7 @@ def process_single_file_path(
     outdir: Path,
     strict: bool,
     progress: ParallelRunProgressDisplay | None = None,
+    fragment_dir: Path | None = None,
 ) -> tuple[int, dict[str, Any]]:
     """Read and analyze one standalone coordinate file."""
     callback = progress.start_file(frame_index, path.name) if progress is not None else None
@@ -1708,6 +1746,7 @@ def process_single_file_path(
         outdir,
         strict=strict,
         stage_callback=callback,
+        fragment_dir=fragment_dir,
     )
 
 
@@ -1720,6 +1759,7 @@ def process_frame(
     stage_callback: Callable[[str], None] | None = None,
     *,
     separated_output: bool = False,
+    fragment_dir: Path | None = None,
 ) -> dict[str, Any]:
     """Analyze one frame, write per-frame files, and return a summary row."""
     if frame.time_ps is None:
@@ -1744,7 +1784,7 @@ def process_frame(
         if output_enabled(config, "sqq-cage-gro"):
             write_sqq_cage_fragment(
                 result,
-                outdir / FRAGMENT_DIRECTORY,
+                fragment_dir or outdir / FRAGMENT_DIRECTORY,
                 frame_index,
                 requested_graph_mode=config["graph"]["bond_mode"],
             )
@@ -1959,7 +1999,7 @@ def worker_policy_text(config: dict[str, Any]) -> str:
         fixed_count = mode_worker_count(mode)
         if fixed_count is not None:
             unit = "worker" if fixed_count == 1 else "workers"
-            return f"mode default ({fixed_count} {unit})"
+            return f"engine default ({fixed_count} {unit})"
         percent = int(round(mode_worker_fraction(mode) * 100))
         return f"auto ({percent}% of physical cores, {reserve_text})"
     try:
@@ -2114,9 +2154,9 @@ def can_parallelize_trajectory(paths: list[Path], topology: Path | None) -> bool
 
 def apply_cli_overrides(config: dict[str, Any], args: Namespace) -> None:
     """Apply command-line options after YAML/default configuration."""
-    if args.pattern:
+    if getattr(args, "pattern", None):
         config["input"]["pattern"] = args.pattern
-    if args.recursive:
+    if getattr(args, "recursive", False):
         config["input"]["recursive"] = True
     if getattr(args, "xyz_scale", None) is not None:
         if not math.isfinite(args.xyz_scale) or args.xyz_scale <= 0:
@@ -2243,17 +2283,16 @@ def apply_cli_overrides(config: dict[str, Any], args: Namespace) -> None:
             raise ValueError("--cluster-min-cage must be at least 1.")
         config["hydrate_cluster"]["min_cage"] = args.cluster_min_cage
     bond_mode = getattr(args, "bond_mode", None)
-    if args.pairs:
+    pair_file = getattr(args, "pair", None)
+    if pair_file:
         if bond_mode not in (None, "pairs"):
-            raise ValueError("--pairs can only be combined with --bond-mode pairs.")
-        config["graph"]["pair_file"] = args.pairs
+            raise ValueError("--pair can only be combined with --bond-mode pairs.")
+        config["graph"]["pair_file"] = pair_file
         config["graph"]["bond_mode"] = "pairs"
     elif bond_mode is not None:
         config["graph"]["bond_mode"] = bond_mode
     if config["graph"]["bond_mode"] == "pairs" and not config["graph"].get("pair_file"):
-        raise ValueError("--bond-mode pairs requires --pairs PAIRS.txt or graph.pair_file in config.yaml.")
-    if args.pair_id:
-        config["graph"]["pair_id"] = args.pair_id
+        raise ValueError("--bond-mode pairs requires --pair PAIRS.txt or graph.pair_file in sqq_config.yaml.")
     if getattr(args, "parallel_backend", None):
         config["parallel"]["backend"] = args.parallel_backend
     if getattr(args, "worker", None) is not None:
@@ -2290,6 +2329,20 @@ def normalize_analysis_scopes(config: dict[str, Any]) -> None:
     """Normalize search and report scopes before frames are analyzed."""
     input_config = config.setdefault("input", {})
     input_config["recursive"] = parse_on_off(input_config.get("recursive", False), "input.recursive")
+    graph_config = config.setdefault("graph", {})
+    if str(graph_config.get("bond_mode", "auto")).strip().lower() == "pairs":
+        pair_file = graph_config.get("pair_file")
+        if pair_file in (None, ""):
+            raise ValueError(
+                "bond_mode=pairs requires --pair PAIRS.txt or graph.pair_file "
+                "in sqq_config.yaml."
+            )
+        pair_path = Path(str(pair_file)).expanduser()
+        if not pair_path.is_absolute():
+            pair_path = Path.cwd() / pair_path
+        if not pair_path.is_file():
+            raise ValueError(f"Pair file does not exist or is not a file: {pair_path}")
+        graph_config["pair_file"] = str(pair_path.resolve())
     input_config["xyz_scale"] = finite_float(
         input_config.get("xyz_scale", 0.1),
         "input.xyz_scale / --xyz-scale",

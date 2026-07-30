@@ -36,7 +36,7 @@ def analyze_frame_cpp(
     if str(graph_config.get("bond_mode", "auto")) == "pairs":
         pair_path = graph_config.get("pair_file")
         if not pair_path:
-            raise ValueError("mode cpp with bond_mode=pairs requires --pairs or graph.pair_file.")
+            raise ValueError("engine cpp with bond_mode=pairs requires --pair or graph.pair_file.")
         pair_edges = read_pair_edges(
             Path(pair_path),
             frame.atoms,
@@ -124,7 +124,7 @@ def _load_native_module():
     except ImportError as exc:  # pragma: no cover - platform/package dependent.
         raise RuntimeError(
             "SQQ-CPP native extension is unavailable. Install a wheel built for this "
-            "Python version and platform; mode cpp never falls back to sqq-py."
+            "Python version and platform; engine cpp never falls back to sqq-py."
         ) from exc
     try:
         native_version = str(_sqq_cpp.core_version())

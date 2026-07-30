@@ -29,6 +29,7 @@ from .io.summary import (
 from .io.trajectory import read_frames, read_gro
 from .io.vmd import (
     cleanup_sqq_cage_bundle,
+    cleanup_sqq_cage_fragment_workspace,
     finalize_sqq_cage_bundle,
     prepare_sqq_cage_fragments,
 )
@@ -65,7 +66,7 @@ def analyze_multi_gro_batch(
     """Analyze heterogeneous GRO inputs in topology-compatible result roots."""
     from . import pipeline as pipeline_api
 
-    strict = bool(args.strict)
+    strict = bool(config.get("run", {}).get("strict", False))
     grouping = scan_and_group_gro_inputs(paths, strict=strict)
     validate_shared_gro_topology(topology, grouping)
 
@@ -204,6 +205,7 @@ def analyze_multi_gro_batch(
             )
 
     bundle_groups: list[int] = []
+    bundle_fragment_dirs: dict[int, Path] = {}
     if not grouping.info_only_fallback_required:
         for group in grouping.groups:
             group_config = group_configs[group.group_index]
@@ -212,7 +214,9 @@ def analyze_multi_gro_batch(
             bundle_script = output_enabled(group_config, "sqq-render")
             cleanup_sqq_cage_bundle(group_outdir)
             if bundle_gro or bundle_script:
-                prepare_sqq_cage_fragments(group_outdir)
+                bundle_fragment_dirs[group.group_index] = (
+                    prepare_sqq_cage_fragments(group_outdir)
+                )
                 bundle_groups.append(group.group_index)
     else:
         cleanup_sqq_cage_bundle(outdir)
@@ -234,18 +238,20 @@ def analyze_multi_gro_batch(
                 backend=active_backend,
                 strict=strict,
                 total_started_at=started_at,
+                fragment_dirs=bundle_fragment_dirs,
             )
         )
         for group_index in bundle_groups:
             group_config = group_configs[group_index]
             finalize_sqq_cage_bundle(
                 group_outdirs[group_index],
+                fragment_dir=bundle_fragment_dirs[group_index],
                 write_gro=output_enabled(group_config, "sqq-cage-gro"),
                 write_script=output_enabled(group_config, "sqq-render"),
             )
     except Exception as exc:
-        for group_outdir in set(group_outdirs.values()):
-            cleanup_sqq_cage_bundle(group_outdir)
+        for fragment_dir in bundle_fragment_dirs.values():
+            cleanup_sqq_cage_fragment_workspace(fragment_dir)
         write_failed_manifests(
             pipeline_api,
             args,
@@ -392,15 +398,18 @@ def analyze_grouped_gro_tasks(
     backend: str,
     strict: bool,
     total_started_at: float,
+    fragment_dirs: dict[int, Path],
 ) -> dict[int, dict[str, Any]]:
     """Analyze every topology group through one shared scheduling pool."""
     if not tasks:
         return {}
     if workers <= 1 or backend == "serial":
-        return analyze_grouped_gro_serial(tasks, group_configs, strict, total_started_at)
+        return analyze_grouped_gro_serial(
+            tasks, group_configs, fragment_dirs, strict, total_started_at
+        )
     if backend == "thread":
         return analyze_grouped_gro_threaded(
-            tasks, group_configs, workers, strict, total_started_at
+            tasks, group_configs, fragment_dirs, workers, strict, total_started_at
         )
     if backend != "process":
         raise ValueError("Parallel analysis requires backend=process or backend=thread.")
@@ -408,6 +417,7 @@ def analyze_grouped_gro_tasks(
         tasks,
         base_config,
         group_configs,
+        fragment_dirs,
         outdir,
         workers,
         strict,
@@ -418,6 +428,7 @@ def analyze_grouped_gro_tasks(
 def analyze_grouped_gro_serial(
     tasks: list[StandaloneFileTask],
     group_configs: dict[int, dict[str, Any]],
+    fragment_dirs: dict[int, Path],
     strict: bool,
     total_started_at: float,
 ) -> dict[int, dict[str, Any]]:
@@ -446,6 +457,7 @@ def analyze_grouped_gro_serial(
                 task,
                 group_configs[task.group_key],
                 strict,
+                fragment_dir=fragment_dirs.get(task.group_key),
                 callback=callback,
             )
             rows[task.global_index] = row
@@ -458,6 +470,7 @@ def analyze_grouped_gro_serial(
 def analyze_grouped_gro_threaded(
     tasks: list[StandaloneFileTask],
     group_configs: dict[int, dict[str, Any]],
+    fragment_dirs: dict[int, Path],
     workers: int,
     strict: bool,
     total_started_at: float,
@@ -499,6 +512,7 @@ def analyze_grouped_gro_threaded(
                         task,
                         group_configs[task.group_key],
                         strict,
+                        fragment_dirs.get(task.group_key),
                         None,
                         progress,
                         display_index,
@@ -530,6 +544,7 @@ def analyze_grouped_gro_processes(
     tasks: list[StandaloneFileTask],
     base_config: dict[str, Any],
     group_configs: dict[int, dict[str, Any]],
+    fragment_dirs: dict[int, Path],
     outdir: Path,
     workers: int,
     strict: bool,
@@ -564,7 +579,15 @@ def analyze_grouped_gro_processes(
                 max_workers=workers,
                 mp_context=context,
                 initializer=initialize_file_worker,
-                initargs=(base_config, str(outdir), strict, stage_queue, group_configs),
+                initargs=(
+                    base_config,
+                    str(outdir),
+                    strict,
+                    stage_queue,
+                    group_configs,
+                    None,
+                    {key: str(value) for key, value in fragment_dirs.items()},
+                ),
             ) as executor:
                 iterator = iter(tasks)
                 futures: dict[Any, StandaloneFileTask] = {}
@@ -634,6 +657,7 @@ def process_thread_task(
     task: StandaloneFileTask,
     config: dict[str, Any],
     strict: bool,
+    fragment_dir: Path | None = None,
     callback: Any = None,
     progress: Any = None,
     display_index: int | None = None,
@@ -661,6 +685,7 @@ def process_thread_task(
             strict=strict,
             stage_callback=callback,
             separated_output=True,
+            fragment_dir=fragment_dir,
         )
     except Exception as exc:
         if strict:
@@ -690,7 +715,12 @@ def cleanup_generated_output_root(root: Path, config: dict[str, Any]) -> None:
     if not root.exists():
         return
     cleanup_sqq_cage_bundle(root)
-    for name in ("summary.xlsx", "summary.md", "config.yaml", "run_config.yaml"):
+    for name in (
+        "summary.xlsx",
+        "summary.md",
+        "sqq_config_resolved.yaml",
+        "run_config.yaml",
+    ):
         (root / name).unlink(missing_ok=True)
     remove_summary_csvs(root, config)
     legacy_config = deepcopy(config)

@@ -37,4 +37,6 @@ config.yaml
 sqq/example/
 tests/
 .sqq-cage-fragments/
+.sqq-cage-fragments-*/
+.sqq.lock
 .sqq-vmd-*/

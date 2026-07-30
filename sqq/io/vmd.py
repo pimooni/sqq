@@ -2,13 +2,21 @@ from __future__ import annotations
 
 """Run-level annotated GRO and VMD rendering outputs."""
 
+from contextlib import contextmanager
 from dataclasses import dataclass
+from datetime import datetime, timezone
+import errno
 import json
 import os
 from pathlib import Path
 import re
 import shutil
-from typing import Any, Iterable
+import socket
+import sys
+from tempfile import mkdtemp
+from time import sleep
+from typing import Any, BinaryIO, Iterable, Iterator
+from uuid import uuid4
 
 import numpy as np
 
@@ -20,8 +28,14 @@ from .occupancy import guest_id
 
 
 FRAGMENT_DIRECTORY = ".sqq-cage-fragments"
+FRAGMENT_DIRECTORY_GLOB = f"{FRAGMENT_DIRECTORY}-*"
+OUTPUT_LOCK_NAME = ".sqq.lock"
+SQQ_RENDER_DIRECTORY = "sqq_render"
 SQQ_CAGE_GRO_NAME = "sqq-cage.gro"
-SQQ_RENDER_SCRIPT_NAME = "sqq-render.vmd.tcl"
+SQQ_CAGE_XTC_NAME = "sqq-cage.xtc"
+SQQ_CAGE_MEMBERSHIP_NAME = "sqq-cage.membership.tsv"
+SQQ_RENDER_SCRIPT_NAME = "sqq-cage.vmd.tcl"
+LEGACY_SQQ_RENDER_SCRIPT_NAME = "sqq-render.vmd.tcl"
 ANNOTATION_PREFIX = "; SQQ1 m="
 ATOM_PREFIX_WIDTH = 44
 EMPTY_VELOCITY_WIDTH = 24
@@ -56,6 +70,34 @@ class SqqCageBundle:
     gro_path: Path | None
     script_path: Path | None
     frame_count: int
+    xtc_path: Path | None = None
+    membership_path: Path | None = None
+    render_dir: Path | None = None
+
+
+@dataclass
+class SqqOutputLock:
+    """One process-held lock for an SQQ output root."""
+
+    path: Path
+    handle: BinaryIO
+    token: str
+
+    def release(self) -> None:
+        if self.handle.closed:
+            return
+        try:
+            self.handle.seek(0)
+            if os.name == "nt":
+                import msvcrt
+
+                msvcrt.locking(self.handle.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                import fcntl
+
+                fcntl.flock(self.handle.fileno(), fcntl.LOCK_UN)
+        finally:
+            self.handle.close()
 
 
 @dataclass(frozen=True)
@@ -79,14 +121,21 @@ class CageMembership:
         )
 
 
+@contextmanager
+def sqq_output_lock(outdir: Path) -> Iterator[SqqOutputLock]:
+    """Prevent concurrent SQQ runs from sharing one output root."""
+    lock = _acquire_output_lock(Path(outdir))
+    try:
+        yield lock
+    finally:
+        lock.release()
+
+
 def prepare_sqq_cage_fragments(outdir: Path) -> Path:
-    """Start a clean run-level fragment workspace."""
+    """Create an isolated run-level fragment workspace."""
     root = Path(outdir)
-    fragment_dir = root / FRAGMENT_DIRECTORY
-    if fragment_dir.exists():
-        shutil.rmtree(fragment_dir)
-    fragment_dir.mkdir(parents=True, exist_ok=True)
-    return fragment_dir
+    root.mkdir(parents=True, exist_ok=True)
+    return Path(mkdtemp(prefix=f"{FRAGMENT_DIRECTORY}-", dir=root))
 
 
 def write_sqq_cage_fragment(
@@ -106,15 +155,17 @@ def write_sqq_cage_fragment(
     manifest_path = root / f"{stem}.json"
 
     memberships = water_cage_memberships(result)
+    output_atoms = visualization_atoms(result)
     guest_memberships = guest_cage_memberships(result)
     graph_display = _frame_graph_display(result, requested_graph_mode)
     block = annotated_gro_block(
         result,
         memberships,
         graph_display,
+        atoms=output_atoms,
         guest_memberships=guest_memberships,
     )
-    signature = atom_signature(result.frame.atoms)
+    signature = atom_signature(output_atoms)
     manifest: dict[str, Any] = {
         "format": "SQQ cage fragment",
         "version": 1,
@@ -122,7 +173,7 @@ def write_sqq_cage_fragment(
         "frame_index": index,
         "frame_name": ascii_gro_text(result.frame.name),
         "time_ps": result.frame.time_ps,
-        "atom_count": len(result.frame.atoms),
+        "atom_count": len(output_atoms),
         "atom_signature": signature,
         "effective_graph_mode": str(result.graph.mode),
         "requested_graph_mode": (
@@ -142,7 +193,7 @@ def write_sqq_cage_fragment(
         frame_index=index,
         gro_path=gro_path,
         manifest_path=manifest_path,
-        atom_count=len(result.frame.atoms),
+        atom_count=len(output_atoms),
         atom_signature=signature,
         effective_graph_mode=str(result.graph.mode),
     )
@@ -152,63 +203,248 @@ def finalize_sqq_cage_bundle(
     outdir: Path,
     fragments: Iterable[SqqCageFragment | Path] | None = None,
     *,
+    fragment_dir: Path | None = None,
     write_gro: bool = True,
     write_script: bool = True,
     cleanup: bool = True,
 ) -> SqqCageBundle:
-    """Merge sorted fragments and write the run-level VMD helper."""
+    """Build the compact run-level VMD visualization bundle."""
     root = Path(outdir)
     root.mkdir(parents=True, exist_ok=True)
-    fragment_dir = root / FRAGMENT_DIRECTORY
-    gro_path = root / SQQ_CAGE_GRO_NAME
-    script_path = root / SQQ_RENDER_SCRIPT_NAME
-    manifests = _fragment_manifests(fragment_dir, fragments)
+    workspace = (
+        Path(fragment_dir)
+        if fragment_dir is not None
+        else root / FRAGMENT_DIRECTORY
+    )
+    render_dir = root / SQQ_RENDER_DIRECTORY
+    gro_path = render_dir / SQQ_CAGE_GRO_NAME
+    xtc_path = render_dir / SQQ_CAGE_XTC_NAME
+    membership_path = render_dir / SQQ_CAGE_MEMBERSHIP_NAME
+    script_path = render_dir / SQQ_RENDER_SCRIPT_NAME
+    manifests = _fragment_manifests(workspace, fragments)
     try:
         if not manifests:
-            gro_path.unlink(missing_ok=True)
-            script_path.unlink(missing_ok=True)
-            return SqqCageBundle(None, None, 0)
+            _remove_visible_render_outputs(root)
+            return SqqCageBundle(None, None, 0, None, None, None)
 
         records = [_read_fragment_manifest(path) for path in manifests]
         records.sort(key=lambda item: item["frame_index"])
         _validate_fragment_records(records)
-
-        if write_gro:
-            _merge_gro_fragments(gro_path, records)
-        else:
-            gro_path.unlink(missing_ok=True)
+        if write_script and not write_gro:
+            raise ValueError(
+                "sqq-render requires sqq-cage-gro; enable sqq-cage-gro first."
+            )
 
         if write_script:
-            if not write_gro and not gro_path.exists():
-                raise ValueError(
-                    "sqq-render requires sqq-cage.gro; enable sqq-cage-gro first."
-                )
-            _atomic_write_text(script_path, vmd_script_text(), encoding="ascii")
+            render_dir.mkdir(parents=True, exist_ok=True)
+            _write_compact_render_data(
+                gro_path,
+                xtc_path,
+                membership_path,
+                records,
+            )
+            _atomic_write_text(
+                script_path,
+                vmd_script_text(
+                    xtc_filename=SQQ_CAGE_XTC_NAME,
+                    membership_filename=SQQ_CAGE_MEMBERSHIP_NAME,
+                ),
+                encoding="ascii",
+            )
+        elif write_gro:
+            render_dir.mkdir(parents=True, exist_ok=True)
+            _write_topology_gro(gro_path, records[0], len(records))
+            for path in (xtc_path, membership_path, script_path):
+                path.unlink(missing_ok=True)
         else:
-            script_path.unlink(missing_ok=True)
+            _resilient_rmtree(
+                render_dir,
+                warn=True,
+                description="SQQ render directory",
+            )
 
+        _remove_legacy_root_render_outputs(root)
         return SqqCageBundle(
-            gro_path if write_gro else None,
-            script_path if write_script else None,
-            len(records),
+            gro_path=gro_path if write_gro else None,
+            script_path=script_path if write_script else None,
+            frame_count=len(records),
+            xtc_path=xtc_path if write_script else None,
+            membership_path=membership_path if write_script else None,
+            render_dir=render_dir if write_gro or write_script else None,
         )
     except Exception:
-        gro_path.unlink(missing_ok=True)
-        script_path.unlink(missing_ok=True)
+        for path, description in (
+            (gro_path, "partial topology GRO"),
+            (xtc_path, "partial XTC"),
+            (membership_path, "partial membership TSV"),
+            (script_path, "partial VMD script"),
+        ):
+            _best_effort_unlink(path, description)
         raise
     finally:
-        if cleanup and fragment_dir.exists():
-            shutil.rmtree(fragment_dir)
+        if cleanup:
+            cleanup_sqq_cage_fragment_workspace(workspace)
+
+def cleanup_sqq_cage_fragment_workspace(fragment_dir: Path) -> bool:
+    """Best-effort removal that cannot invalidate completed outputs."""
+    return _resilient_rmtree(Path(fragment_dir), warn=True)
 
 
-def cleanup_sqq_cage_bundle(outdir: Path) -> None:
+def cleanup_sqq_cage_fragments(outdir: Path) -> None:
+    """Remove abandoned legacy and run-isolated fragment workspaces."""
+    root = Path(outdir)
+    candidates = [root / FRAGMENT_DIRECTORY]
+    if root.exists():
+        candidates.extend(sorted(root.glob(FRAGMENT_DIRECTORY_GLOB)))
+    for path in candidates:
+        cleanup_sqq_cage_fragment_workspace(path)
+
+
+def _remove_legacy_root_render_outputs(root: Path) -> None:
+    for path in (
+        root / SQQ_CAGE_GRO_NAME,
+        root / SQQ_CAGE_XTC_NAME,
+        root / SQQ_CAGE_MEMBERSHIP_NAME,
+        root / SQQ_RENDER_SCRIPT_NAME,
+        root / LEGACY_SQQ_RENDER_SCRIPT_NAME,
+    ):
+        _best_effort_unlink(path, "legacy root-level render output")
+
+
+def _remove_visible_render_outputs(root: Path) -> None:
+    _remove_legacy_root_render_outputs(root)
+    _resilient_rmtree(
+        root / SQQ_RENDER_DIRECTORY,
+        warn=True,
+        description="SQQ render directory",
+    )
+
+
+def cleanup_sqq_cage_bundle(
+    outdir: Path,
+    *,
+    fragment_dir: Path | None = None,
+) -> None:
     """Remove visible bundle outputs and any abandoned fragments."""
     root = Path(outdir)
-    (root / SQQ_CAGE_GRO_NAME).unlink(missing_ok=True)
-    (root / SQQ_RENDER_SCRIPT_NAME).unlink(missing_ok=True)
-    fragment_dir = root / FRAGMENT_DIRECTORY
-    if fragment_dir.exists():
-        shutil.rmtree(fragment_dir)
+    _remove_visible_render_outputs(root)
+    if fragment_dir is None:
+        cleanup_sqq_cage_fragments(root)
+    else:
+        cleanup_sqq_cage_fragment_workspace(fragment_dir)
+
+def _acquire_output_lock(root: Path) -> SqqOutputLock:
+    root.mkdir(parents=True, exist_ok=True)
+    path = root / OUTPUT_LOCK_NAME
+    handle = path.open("a+b")
+    try:
+        handle.seek(0, os.SEEK_END)
+        if handle.tell() == 0:
+            handle.write(b"\0")
+            handle.flush()
+        handle.seek(0)
+        if os.name == "nt":
+            import msvcrt
+
+            msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+        else:
+            import fcntl
+
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError as exc:
+        handle.close()
+        owner = _output_lock_owner(path)
+        detail = f" ({owner})" if owner else ""
+        raise RuntimeError(
+            f"SQQ output directory is already in use: {root}{detail}. "
+            "Wait for the active run or choose another --output directory."
+        ) from exc
+
+    token = uuid4().hex
+    metadata = {
+        "format": "SQQ output lock",
+        "pid": os.getpid(),
+        "host": socket.gethostname(),
+        "started_at": datetime.now(timezone.utc).isoformat(),
+        "token": token,
+    }
+    handle.seek(0)
+    handle.truncate()
+    handle.write(
+        (json.dumps(metadata, ensure_ascii=True, sort_keys=True) + "\n").encode(
+            "ascii"
+        )
+    )
+    handle.flush()
+    try:
+        os.fsync(handle.fileno())
+    except OSError:
+        pass
+    handle.seek(0)
+    return SqqOutputLock(path=path, handle=handle, token=token)
+
+
+def _output_lock_owner(path: Path) -> str:
+    try:
+        metadata = json.loads(path.read_text(encoding="ascii"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return ""
+    values = []
+    if metadata.get("pid") is not None:
+        values.append(f"PID {metadata['pid']}")
+    if metadata.get("host"):
+        values.append(f"host {metadata['host']}")
+    return ", ".join(values)
+
+
+def _best_effort_unlink(path: Path, description: str) -> bool:
+    try:
+        path.unlink(missing_ok=True)
+        return True
+    except OSError as exc:
+        print(
+            f"Warning: SQQ could not remove {description} {path}: {exc}",
+            file=sys.stderr,
+        )
+        return False
+
+
+def _resilient_rmtree(
+    path: Path,
+    *,
+    attempts: int = 5,
+    initial_delay: float = 0.05,
+    warn: bool,
+    description: str = "temporary fragment directory",
+) -> bool:
+    transient = {
+        errno.ENOTEMPTY,
+        errno.EBUSY,
+        errno.EACCES,
+        errno.EPERM,
+    }
+    last_error: OSError | None = None
+    for attempt in range(max(1, int(attempts))):
+        try:
+            shutil.rmtree(path)
+            if not path.exists():
+                return True
+        except FileNotFoundError:
+            return True
+        except OSError as exc:
+            last_error = exc
+            if exc.errno not in transient:
+                break
+        if attempt + 1 < attempts:
+            sleep(initial_delay * (2**attempt))
+    if warn:
+        detail = f": {last_error}" if last_error is not None else ""
+        print(
+            f"Warning: SQQ could not remove {description} "
+            f"{path}{detail}. Finalized outputs, if present, remain valid.",
+            file=sys.stderr,
+        )
+    return False
 
 
 def _cage_membership_records(
@@ -290,11 +526,28 @@ def guest_cage_memberships(result: FrameResult) -> dict[int, tuple[CageMembershi
             memberships[index] = tuple(items)
     return memberships
 
+
+def visualization_atoms(result: FrameResult) -> list[Atom]:
+    """Return stable VMD atoms: every water oxygen and every complete guest."""
+    included = {int(water.oxygen) for water in result.waters}
+    included.update(
+        int(atom_index)
+        for guest in result.guests
+        for atom_index in guest.atoms
+    )
+    atoms = [atom for atom in result.frame.atoms if int(atom.index) in included]
+    if len(atoms) != len(included):
+        missing = sorted(included.difference(int(atom.index) for atom in atoms))
+        raise ValueError(f"SQQ visualization references missing atom indexes: {missing}.")
+    return atoms
+
+
 def annotated_gro_block(
     result: FrameResult,
     memberships: dict[int, tuple[CageMembership, ...]],
     graph_display: str,
     *,
+    atoms: Iterable[Atom] | None = None,
     guest_memberships: dict[int, tuple[CageMembership, ...]] | None = None,
 ) -> str:
     """Return one complete ASCII GRO block with SQQ annotations."""
@@ -305,9 +558,10 @@ def annotated_gro_block(
             raise ValueError("SQQ cage GRO time_ps must be finite when provided.")
         title_parts.append(f"time_ps={time_value:.9g}")
     title_parts.append("graph=" + ascii_gro_text(graph_display))
-    lines = [" ".join(title_parts), f"{len(result.frame.atoms):5d}"]
+    output_atoms = list(result.frame.atoms if atoms is None else atoms)
+    lines = [" ".join(title_parts), f"{len(output_atoms):5d}"]
     guest_memberships = guest_memberships or {}
-    for atom in result.frame.atoms:
+    for atom in output_atoms:
         encoded = ",".join(item.encode() for item in memberships.get(int(atom.index), ()))
         guest_encoded = ",".join(
             item.encode() for item in guest_memberships.get(int(atom.index), ())
@@ -323,10 +577,48 @@ def atom_signature(atoms: Iterable[Atom]) -> str:
     return gro_topology_fingerprint(frame)
 
 
-def vmd_script_text() -> str:
-    """Return the self-contained ASCII Tcl renderer."""
-    return _VMD_SCRIPT
+def _tcl_braced_literal(value: str, *, label: str) -> str:
+    """Return a restricted, substitution-free Tcl literal."""
+    text = str(value)
+    if not text:
+        raise ValueError(f"{label} must not be empty.")
+    if any(character in text for character in "{}\\\r\n\0"):
+        raise ValueError(f"{label} contains unsupported Tcl characters.")
+    try:
+        text.encode("ascii")
+    except UnicodeEncodeError as exc:
+        raise ValueError(f"{label} must contain ASCII text only.") from exc
+    return "{" + text + "}"
 
+
+def vmd_script_text(
+    gro_filename: str = SQQ_CAGE_GRO_NAME,
+    xtc_filename: str = SQQ_CAGE_XTC_NAME,
+    membership_filename: str = SQQ_CAGE_MEMBERSHIP_NAME,
+    molecule_name: str = "SQQ cages",
+) -> str:
+    """Return the shared, parameterized ASCII Tcl renderer."""
+    replacements = {
+        "__SQQ_GRO_FILENAME__": (gro_filename, "VMD GRO filename"),
+        "__SQQ_XTC_FILENAME__": (xtc_filename, "VMD XTC filename"),
+        "__SQQ_MEMBERSHIP_FILENAME__": (
+            membership_filename,
+            "VMD membership filename",
+        ),
+        "__SQQ_MOLECULE_NAME__": (molecule_name, "VMD molecule name"),
+    }
+    script = _VMD_SCRIPT
+    for placeholder, (filename, label) in replacements.items():
+        value = str(filename)
+        if value in {".", ".."} or "/" in value or "\\" in value:
+            raise ValueError(f"{label} must name a file in the script directory.")
+        script = script.replace(
+            placeholder,
+            _tcl_braced_literal(value, label=label),
+        )
+    if "__SQQ_" in script:
+        raise AssertionError("Unresolved SQQ Tcl template placeholder.")
+    return script
 
 def _cage_classification(
     result: FrameResult,
@@ -627,6 +919,191 @@ def _merge_gro_fragments(path: Path, records: list[dict[str, Any]]) -> None:
         temporary.unlink(missing_ok=True)
 
 
+def _write_compact_render_data(
+    gro_path: Path,
+    xtc_path: Path,
+    membership_path: Path,
+    records: list[dict[str, Any]],
+) -> None:
+    _write_topology_gro(gro_path, records[0], len(records))
+    _write_membership_tsv(membership_path, records)
+    _write_xtc(xtc_path, records)
+
+
+def _fragment_lines(record: dict[str, Any]) -> list[str]:
+    path = Path(record["gro_path"])
+    lines = path.read_text(encoding="ascii").splitlines()
+    atom_count = int(record["atom_count"])
+    if len(lines) != atom_count + 3:
+        raise ValueError(f"Invalid SQQ cage fragment: {path}")
+    return lines
+
+
+def _write_topology_gro(
+    path: Path,
+    record: dict[str, Any],
+    frame_count: int,
+) -> None:
+    lines = _fragment_lines(record)
+    atom_count = int(record["atom_count"])
+    output = [
+        f"SQQ cage topology frames={int(frame_count)}",
+        f"{atom_count:5d}",
+    ]
+    output.extend(line[:ATOM_PREFIX_WIDTH] for line in lines[2 : 2 + atom_count])
+    output.append(lines[2 + atom_count])
+    _atomic_write_text(path, "\n".join(output) + "\n", encoding="ascii")
+
+
+def _fragment_coordinates_and_box(
+    record: dict[str, Any],
+) -> tuple[np.ndarray, np.ndarray]:
+    lines = _fragment_lines(record)
+    atom_count = int(record["atom_count"])
+    positions = np.empty((atom_count, 3), dtype=np.float32)
+    for atom_index, line in enumerate(lines[2 : 2 + atom_count]):
+        try:
+            positions[atom_index] = (
+                float(line[20:28]),
+                float(line[28:36]),
+                float(line[36:44]),
+            )
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                f"Invalid GRO coordinates in {record['gro_path']} at atom "
+                f"{atom_index}."
+            ) from exc
+    try:
+        box = np.asarray(
+            [float(value) for value in lines[2 + atom_count].split()[:3]],
+            dtype=np.float32,
+        )
+    except ValueError as exc:
+        raise ValueError(f"Invalid GRO box in {record['gro_path']}.") from exc
+    if box.shape != (3,) or np.any(~np.isfinite(box)):
+        raise ValueError(f"Invalid GRO box in {record['gro_path']}.")
+    return positions, box
+
+
+def _write_xtc(path: Path, records: list[dict[str, Any]]) -> None:
+    try:
+        import MDAnalysis as mda
+        from MDAnalysis.coordinates.XTC import XTCWriter
+    except ImportError as exc:
+        raise RuntimeError(
+            "Writing sqq-cage.xtc requires MDAnalysis."
+        ) from exc
+
+    atom_count = int(records[0]["atom_count"])
+    universe = mda.Universe.empty(atom_count, trajectory=True)
+    timestep = universe.trajectory.ts
+    temporary = path.with_name(f".{path.name}.tmp-{os.getpid()}.xtc")
+    try:
+        with XTCWriter(
+            str(temporary),
+            atom_count,
+            convert_units=True,
+            precision=3,
+        ) as writer:
+            for render_index, record in enumerate(records):
+                positions_nm, box_nm = _fragment_coordinates_and_box(record)
+                timestep.positions = positions_nm * 10.0
+                if np.any(box_nm > 0.0):
+                    timestep.dimensions = np.asarray(
+                        [
+                            box_nm[0] * 10.0,
+                            box_nm[1] * 10.0,
+                            box_nm[2] * 10.0,
+                            90.0,
+                            90.0,
+                            90.0,
+                        ],
+                        dtype=np.float32,
+                    )
+                else:
+                    timestep.dimensions = None
+                timestep.frame = render_index
+                raw_time = record.get("time_ps")
+                timestep.time = (
+                    float(render_index) if raw_time is None else float(raw_time)
+                )
+                timestep.data["step"] = int(record["frame_index"])
+                writer.write(universe.atoms)
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def _write_membership_tsv(
+    path: Path,
+    records: list[dict[str, Any]],
+) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.tmp-{os.getpid()}")
+    header = (
+        "record\trender_frame\tsource_frame\ttime_ps\tgraph_mode\tfamily\t"
+        "cage_id\tcage_type\tphase\tdomain\tcluster\tatom_indices\n"
+    )
+    try:
+        with temporary.open("w", encoding="ascii", newline="\n") as output:
+            output.write(header)
+            for render_index, record in enumerate(records):
+                time_value = record.get("time_ps")
+                time_text = "-" if time_value is None else f"{float(time_value):.9g}"
+                graph_text = _tsv_field(record.get("graph_mode_display", "unknown"))
+                output.write(
+                    f"F\t{render_index}\t{int(record['frame_index'])}\t"
+                    f"{time_text}\t{graph_text}\t-\t-\t-\t-\t-\t-\t-\n"
+                )
+                groups = _fragment_membership_groups(record)
+                for (family, membership), atom_indexes in sorted(groups.items()):
+                    cage_id, cage_type, phase, domain_id, cluster_id = (
+                        membership.split(":")
+                    )
+                    atoms = ",".join(str(value) for value in sorted(set(atom_indexes)))
+                    output.write(
+                        f"M\t{render_index}\t-\t-\t-\t{family}\t{cage_id}\t"
+                        f"{cage_type}\t{phase}\t{domain_id}\t{cluster_id}\t{atoms}\n"
+                    )
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def _fragment_membership_groups(
+    record: dict[str, Any],
+) -> dict[tuple[str, str], list[int]]:
+    lines = _fragment_lines(record)
+    atom_count = int(record["atom_count"])
+    groups: dict[tuple[str, str], list[int]] = {}
+    for atom_index, line in enumerate(lines[2 : 2 + atom_count]):
+        if ANNOTATION_PREFIX not in line:
+            continue
+        payload = line.split(ANNOTATION_PREFIX, 1)[1]
+        if " g=" not in payload:
+            raise ValueError(f"Invalid SQQ annotation in {record['gro_path']}.")
+        cage_payload, guest_payload = payload.split(" g=", 1)
+        for family, family_payload in (
+            ("cage", cage_payload),
+            ("guest", guest_payload),
+        ):
+            if family_payload in {"", "-"}:
+                continue
+            for membership in family_payload.split(","):
+                if len(membership.split(":")) != 5:
+                    raise ValueError(
+                        f"Invalid SQQ membership in {record['gro_path']}."
+                    )
+                groups.setdefault((family, membership), []).append(atom_index)
+    return groups
+
+
+def _tsv_field(value: Any) -> str:
+    text = _ascii_annotation(str(value))
+    if any(character in text for character in "\t\r\n"):
+        raise ValueError(f"Invalid SQQ TSV field: {value!r}")
+    return text
+
 def _atomic_write_text(path: Path, text: str, *, encoding: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(f".{path.name}.tmp-{os.getpid()}")
@@ -640,17 +1117,24 @@ def _atomic_write_text(path: Path, text: str, *, encoding: str) -> None:
 _VMD_SCRIPT = r'''# SQQ annotated cage and guest renderer for VMD.
 namespace eval ::SQQ {
     catch {trace remove variable ::vmd_frame write ::SQQ::frame_changed}
+    catch {trace remove variable ::vmd_pick_atom write ::SQQ::pick_atom_changed}
     if {[info exists frame_after_id] && $frame_after_id ne ""} {
         catch {after cancel $frame_after_id}
     }
     variable molid -1
     variable gro_path ""
+    variable xtc_path ""
+    variable membership_path ""
     variable active_families {cage}
     variable custom_show_active 0
     variable active_targets
     variable representation_names {}
     variable frame_after_id ""
     variable displayed_graph_mode "__unset__"
+    variable label_visible 0
+    variable pick_mode off
+    variable selected_target {}
+    variable graphics_ids {}
     variable group_keys
     variable group_atoms
     variable graph_mode
@@ -684,27 +1168,28 @@ proc ::SQQ::register_object {source key} {
     set known_objects($source,$key) 1
 }
 
-proc ::SQQ::register_cage_object {family cage_type object_id} {
+proc ::SQQ::register_cage_object {frame family cage_type object_id} {
     variable object_aliases
     variable cage_types
     set id_source "${family}-id"
     ::SQQ::register_object $family $cage_type
     ::SQQ::register_object $id_source $object_id
-    set cage_types($object_id) $cage_type
+    set cage_types($frame,$object_id) $cage_type
     set compact [string map [list "^" "" "-" "" "_" ""] $cage_type]
     if {$compact ne $cage_type} {
         set object_aliases($family,$compact) $cage_type
+        if {![string match "${cage_type}_*" $object_id]} { return }
         set suffix [string range $object_id [string length $cage_type] end]
         set object_aliases($id_source,${compact}${suffix}) $object_id
     }
 }
 
-proc ::SQQ::register_cage {cage_type object_id} {
-    ::SQQ::register_cage_object cage $cage_type $object_id
+proc ::SQQ::register_cage {frame cage_type object_id} {
+    ::SQQ::register_cage_object $frame cage $cage_type $object_id
 }
 
-proc ::SQQ::register_guest_cage {cage_type object_id} {
-    ::SQQ::register_cage_object guest $cage_type $object_id
+proc ::SQQ::register_guest_cage {frame cage_type object_id} {
+    ::SQQ::register_cage_object $frame guest $cage_type $object_id
 }
 
 proc ::SQQ::deduplicate_frame_memberships {frame} {
@@ -736,10 +1221,14 @@ proc ::SQQ::cage_object_id {cage_type cage_id} {
     return "${cage_type}_$cage_id"
 }
 
-proc ::SQQ::cage_type_from_object_id {object_id} {
+proc ::SQQ::cage_type_from_object_id {frame object_id} {
     variable cage_types
-    if {[info exists cage_types($object_id)]} { return $cage_types($object_id) }
-    if {[regexp {^(.+)_([0-9]+)$} $object_id -> cage_type number]} { return $cage_type }
+    if {[info exists cage_types($frame,$object_id)]} {
+        return $cage_types($frame,$object_id)
+    }
+    if {[regexp {^(.+)_([0-9]+)$} $object_id -> cage_type number]} {
+        return $cage_type
+    }
     return ""
 }
 
@@ -754,7 +1243,7 @@ proc ::SQQ::read_memberships {frame atom_index family payload} {
         if {$cage_type eq "-"} { continue }
         set object_id [::SQQ::cage_object_id $cage_type $cage_id]
         if {$family eq "cage"} {
-            ::SQQ::register_cage $cage_type $object_id
+            ::SQQ::register_cage $frame $cage_type $object_id
             ::SQQ::add_member $frame cage-id $object_id $atom_index
             if {$phase ne "-"} { ::SQQ::add_member $frame phase $phase $atom_index }
             if {$cluster_id ne "-"} {
@@ -764,7 +1253,7 @@ proc ::SQQ::read_memberships {frame atom_index family payload} {
                 ::SQQ::add_member $frame domain [::SQQ::numbered_id domain $domain_id] $atom_index
             }
         } elseif {$family eq "guest"} {
-            ::SQQ::register_guest_cage $cage_type $object_id
+            ::SQQ::register_guest_cage $frame $cage_type $object_id
             ::SQQ::add_member $frame guest-id $object_id $atom_index
         } else {
             error "Invalid SQQ membership family '$family'"
@@ -772,7 +1261,7 @@ proc ::SQQ::read_memberships {frame atom_index family payload} {
     }
 }
 
-proc ::SQQ::read_annotations {path} {
+proc ::SQQ::read_membership_tsv {path} {
     variable group_keys
     variable group_atoms
     variable graph_mode
@@ -785,55 +1274,68 @@ proc ::SQQ::read_annotations {path} {
     }
     set handle [open $path r]
     fconfigure $handle -encoding ascii -translation auto
-    set frame 0
-    while {[gets $handle title] >= 0} {
-        if {[regexp {graph=(.*)$} $title -> graph_value]} {
-            set graph_mode($frame) [string trim $graph_value]
-        } else {
-            set graph_mode($frame) "unknown"
-        }
-        if {[gets $handle count_line] < 0} {
+    if {[gets $handle header] < 0 || $header ne "record\trender_frame\tsource_frame\ttime_ps\tgraph_mode\tfamily\tcage_id\tcage_type\tphase\tdomain\tcluster\tatom_indices"} {
+        close $handle
+        error "Invalid SQQ membership TSV header: $path"
+    }
+    array set seen_frames {}
+    set frame_count 0
+    set line_number 1
+    while {[gets $handle line] >= 0} {
+        incr line_number
+        if {$line eq ""} { continue }
+        set fields [split $line "\t"]
+        if {[llength $fields] != 12} {
             close $handle
-            error "Truncated sqq-cage.gro after frame title"
+            error "Invalid SQQ membership TSV row $line_number"
         }
-        set atom_count [string trim $count_line]
-        if {![string is integer -strict $atom_count] || $atom_count < 0} {
+        lassign $fields record frame source_frame time_ps graph_value family cage_id cage_type phase domain_id cluster_id atom_indexes
+        if {![string is integer -strict $frame] || $frame < 0} {
             close $handle
-            error "Invalid atom count in sqq-cage.gro: $count_line"
+            error "Invalid SQQ render frame at TSV row $line_number"
         }
-        for {set atom_index 0} {$atom_index < $atom_count} {incr atom_index} {
-            if {[gets $handle line] < 0} {
+        if {$record eq "F"} {
+            if {[info exists seen_frames($frame)]} {
                 close $handle
-                error "Truncated atom records in sqq-cage.gro frame $frame"
+                error "Duplicate SQQ frame metadata for frame $frame"
             }
-            if {![regexp {; SQQ1 m=([^ ]+)(.*)$} $line -> cage_payload suffix]} { continue }
-            set guest_payload "-"
-            if {$suffix ne ""} {
-                if {![regexp {^ g=([^ ]+)$} $suffix -> guest_payload]} {
+            set seen_frames($frame) 1
+            set graph_mode($frame) $graph_value
+            if {$frame + 1 > $frame_count} { set frame_count [expr {$frame + 1}] }
+        } elseif {$record eq "M"} {
+            if {$family ni {cage guest}} {
+                close $handle
+                error "Invalid SQQ membership family at TSV row $line_number"
+            }
+            set payload "$cage_id:$cage_type:$phase:$domain_id:$cluster_id"
+            if {$atom_indexes eq "-" || $atom_indexes eq ""} {
+                close $handle
+                error "Missing SQQ atom indexes at TSV row $line_number"
+            }
+            foreach atom_index [split $atom_indexes ,] {
+                if {![string is integer -strict $atom_index] || $atom_index < 0} {
                     close $handle
-                    error "Invalid SQQ annotation in frame $frame: $suffix"
+                    error "Invalid SQQ atom index at TSV row $line_number"
+                }
+                if {[catch {::SQQ::read_memberships $frame $atom_index $family $payload} message]} {
+                    close $handle
+                    error $message
                 }
             }
-            if {[catch {::SQQ::read_memberships $frame $atom_index cage $cage_payload} message]} {
-                close $handle
-                error $message
-            }
-            if {[catch {::SQQ::read_memberships $frame $atom_index guest $guest_payload} message]} {
-                close $handle
-                error $message
-            }
-        }
-        if {[gets $handle box_line] < 0} {
+        } else {
             close $handle
-            error "Missing box record in sqq-cage.gro frame $frame"
+            error "Invalid SQQ membership record at TSV row $line_number: $record"
         }
-        ::SQQ::deduplicate_frame_memberships $frame
-        incr frame
     }
     close $handle
-    return $frame
+    for {set frame 0} {$frame < $frame_count} {incr frame} {
+        if {![info exists seen_frames($frame)]} {
+            error "Missing SQQ frame metadata for frame $frame"
+        }
+        ::SQQ::deduplicate_frame_memberships $frame
+    }
+    return $frame_count
 }
-
 proc ::SQQ::key_rank {family key} {
     if {$family in {cage guest}} {
         set order {512 51262 51263 51264 435663 51268}
@@ -881,8 +1383,8 @@ proc ::SQQ::generic_cage_rank {cage_type} {
     return [list $total_faces $ring_kinds]
 }
 
-proc ::SQQ::object_render_key {object_id color_priority color_id explicit} {
-    set cage_type [::SQQ::cage_type_from_object_id $object_id]
+proc ::SQQ::object_render_key {frame object_id color_priority color_id explicit} {
+    set cage_type [::SQQ::cage_type_from_object_id $frame $object_id]
     set exact [expr {$explicit || $color_priority == 3}]
     set standard_rank [::SQQ::standard_cage_rank $cage_type]
     if {$standard_rank > 0} {
@@ -973,33 +1475,33 @@ proc ::SQQ::source_family {source} {
     error "Unknown SQQ source '$source'"
 }
 
-proc ::SQQ::default_color_id {source key} {
+proc ::SQQ::default_color_id {frame source key} {
     set family [::SQQ::source_family $source]
     if {$source in {cage-id guest-id}} {
-        set cage_type [::SQQ::cage_type_from_object_id $key]
+        set cage_type [::SQQ::cage_type_from_object_id $frame $key]
         if {$cage_type ne ""} { return [::SQQ::color_id $family $cage_type] }
         return 2
     }
     return [::SQQ::color_id $family $key]
 }
 
-proc ::SQQ::effective_color {source key} {
+proc ::SQQ::effective_color {frame source key} {
     variable color_overrides
     set exact "$source,$key"
     if {[info exists color_overrides($exact)]} {
         if {$color_overrides($exact) eq "default"} {
-            return [list [::SQQ::default_color_id $source $key] 3]
+            return [list [::SQQ::default_color_id $frame $source $key] 3]
         }
         return [list $color_overrides($exact) 3]
     }
     set family [::SQQ::source_family $source]
     if {$source in {cage-id guest-id}} {
-        set cage_type [::SQQ::cage_type_from_object_id $key]
+        set cage_type [::SQQ::cage_type_from_object_id $frame $key]
         if {$cage_type ne ""} {
             set type_key "$family,$cage_type"
             if {[info exists color_overrides($type_key)]} {
                 if {$color_overrides($type_key) eq "default"} {
-                    return [list [::SQQ::default_color_id $source $key] 2]
+                    return [list [::SQQ::default_color_id $frame $source $key] 2]
                 }
                 return [list $color_overrides($type_key) 2]
             }
@@ -1009,7 +1511,7 @@ proc ::SQQ::effective_color {source key} {
     if {[info exists color_overrides($category_key)]} {
         return [list $color_overrides($category_key) 1]
     }
-    return [list [::SQQ::default_color_id $source $key] 0]
+    return [list [::SQQ::default_color_id $frame $source $key] 0]
 }
 
 proc ::SQQ::phase_key {value} {
@@ -1211,6 +1713,9 @@ proc ::SQQ::reset_show {{announce 0}} {
     variable active_targets
     variable color_overrides
     variable custom_show_active
+    variable label_visible
+    variable pick_mode
+    variable selected_target
     set active_families {cage}
     array unset active_targets
     array set active_targets {}
@@ -1218,8 +1723,49 @@ proc ::SQQ::reset_show {{announce 0}} {
     array unset color_overrides
     array set color_overrides {}
     set custom_show_active 0
+    set label_visible 0
+    set pick_mode off
+    set selected_target {}
     ::SQQ::render_current
-    if {$announce} { puts "SQQ clear: restored initial cage view" }
+    if {$announce} { puts "SQQ clear: restored source-time cage view" }
+}
+
+proc ::SQQ::set_label {values} {
+    variable label_visible
+    set count [llength $values]
+    if {$count == 0} {
+        set label_visible [expr {!$label_visible}]
+    } elseif {$count == 1} {
+        set value [string tolower [string trim [lindex $values 0]]]
+        if {$value ni {on off}} { error "Usage: sqq show label ?on|off?" }
+        set label_visible [expr {$value eq "on"}]
+    } else {
+        error "Usage: sqq show label ?on|off?"
+    }
+    ::SQQ::render_current
+    puts "SQQ label: [expr {$label_visible ? "on" : "off"}]"
+}
+
+proc ::SQQ::set_pick_mode {value} {
+    variable pick_mode
+    variable selected_target
+    set mode [string tolower [string trim $value]]
+    if {$mode ni {center guest off}} {
+        error "Usage: sqq pick center|guest|off"
+    }
+    set pick_mode $mode
+    set selected_target {}
+    ::SQQ::render_current
+    if {$mode eq "off"} {
+        puts "SQQ pick: off; restored opaque objects"
+    } else {
+        puts "SQQ pick: $mode; objects are transparent until one is selected"
+    }
+}
+
+proc ::SQQ::base_material {} {
+    variable pick_mode
+    return [expr {$pick_mode eq "off" ? "Opaque" : "Transparent"}]
 }
 
 proc ::SQQ::color_value {value} {
@@ -1301,7 +1847,7 @@ proc ::SQQ::expanded_targets {frame family targets} {
             set group_key "$frame,$id_source"
             if {![info exists group_keys($group_key)]} { continue }
             foreach object_id [lsort -unique $group_keys($group_key)] {
-                if {$key eq "*" || [::SQQ::cage_type_from_object_id $object_id] eq $key} {
+                if {$key eq "*" || [::SQQ::cage_type_from_object_id $frame $object_id] eq $key} {
                     set item [list $id_source $object_id]
                     if {$item ni $expanded} { lappend expanded $item }
                 }
@@ -1330,28 +1876,155 @@ proc ::SQQ::compare_render_keys {left right} {
     return [expr {$left_color < $right_color ? -1 : ($left_color > $right_color)}]
 }
 
-proc ::SQQ::add_dynamic_bonds_representation {indexes color_id radius} {
+proc ::SQQ::add_dynamic_bonds_representation {indexes color_id radius {material Opaque}} {
     variable molid
     if {[llength $indexes] == 0} { return 0 }
     mol representation DynamicBonds 3.5 $radius 12.0
     mol color ColorID $color_id
     mol selection "index [join $indexes { }]"
-    mol material Opaque
+    mol material $material
     mol addrep $molid
     ::SQQ::track_representation [expr {[molinfo $molid get numreps] - 1}]
     return 1
 }
 
-proc ::SQQ::add_guest_representation {indexes color_id} {
+proc ::SQQ::add_guest_representation {indexes color_id {material Opaque}} {
     variable molid
     if {[llength $indexes] == 0} { return 0 }
     mol representation CPK 1.0 0.3 12.0 12.0
     mol color ColorID $color_id
     mol selection "index [join $indexes { }]"
-    mol material Opaque
+    mol material $material
     mol addrep $molid
     ::SQQ::track_representation [expr {[molinfo $molid get numreps] - 1}]
     return 1
+}
+
+proc ::SQQ::clear_graphics {} {
+    variable graphics_ids
+    variable molid
+    if {$molid >= 0} {
+        foreach graphics_id $graphics_ids {
+            catch {graphics $molid delete $graphics_id}
+        }
+    }
+    set graphics_ids {}
+}
+
+proc ::SQQ::object_center {indexes frame} {
+    variable molid
+    if {[llength $indexes] == 0} { return {} }
+    if {[catch {set selection [atomselect $molid "index [join $indexes { }]" frame $frame]}]} {
+        return {}
+    }
+    if {[catch {set coordinates [$selection get {x y z}]}]} {
+        catch {$selection delete}
+        return {}
+    }
+    catch {$selection delete}
+    if {[llength $coordinates] == 0} { return {} }
+    set x 0.0
+    set y 0.0
+    set z 0.0
+    foreach coordinate $coordinates {
+        lassign $coordinate cx cy cz
+        set x [expr {$x + $cx}]
+        set y [expr {$y + $cy}]
+        set z [expr {$z + $cz}]
+    }
+    set count [expr {double([llength $coordinates])}]
+    return [list [expr {$x / $count}] [expr {$y / $count}] [expr {$z / $count}]]
+}
+
+proc ::SQQ::render_labels {frame} {
+    variable graphics_ids
+    variable group_atoms
+    variable group_keys
+    variable label_visible
+    variable molid
+    variable pick_mode
+    if {!$label_visible && $pick_mode ne "center"} { return }
+    set group_key "$frame,cage-id"
+    if {![info exists group_keys($group_key)]} { return }
+    foreach object_id [lsort -dictionary -unique $group_keys($group_key)] {
+        set atom_key "$frame,cage-id,$object_id"
+        if {![info exists group_atoms($atom_key)]} { continue }
+        set center [::SQQ::object_center $group_atoms($atom_key) $frame]
+        if {[llength $center] != 3} { continue }
+        if {$pick_mode eq "center"} {
+            catch {graphics $molid color yellow}
+            if {![catch {graphics $molid sphere $center radius 0.35 resolution 10} graphics_id]} {
+                lappend graphics_ids $graphics_id
+            }
+        }
+        catch {graphics $molid color black}
+        if {![catch {graphics $molid text $center $object_id size 1.0 thickness 1.0} graphics_id]} {
+            lappend graphics_ids $graphics_id
+        }
+    }
+}
+
+proc ::SQQ::find_pick_target {frame atom_index mode} {
+    variable group_atoms
+    variable group_keys
+    set source [expr {$mode eq "guest" ? "guest-id" : "cage-id"}]
+    set group_key "$frame,$source"
+    if {![info exists group_keys($group_key)]} { return {} }
+    set candidates {}
+    foreach object_id $group_keys($group_key) {
+        set atom_key "$frame,$source,$object_id"
+        if {[info exists group_atoms($atom_key)] &&
+            [lsearch -integer -exact $group_atoms($atom_key) $atom_index] >= 0} {
+            lappend candidates $object_id
+        }
+    }
+    set candidates [lsort -dictionary -unique $candidates]
+    if {[llength $candidates] == 0} { return {} }
+    if {[llength $candidates] > 1} {
+        puts "SQQ pick: atom $atom_index matches [join $candidates { }]; selected [lindex $candidates 0]"
+    }
+    return [list cage-id [lindex $candidates 0]]
+}
+
+proc ::SQQ::pick_atom_changed {name1 name2 operation} {
+    variable molid
+    variable pick_mode
+    variable selected_target
+    if {$pick_mode eq "off" || $molid < 0} { return }
+    if {![info exists ::vmd_pick_atom] ||
+        ![string is integer -strict $::vmd_pick_atom] || $::vmd_pick_atom < 0} {
+        return
+    }
+    if {[info exists ::vmd_pick_mol] && $::vmd_pick_mol != $molid} { return }
+    set frame [molinfo $molid get frame]
+    set target [::SQQ::find_pick_target $frame $::vmd_pick_atom $pick_mode]
+    if {[llength $target] != 2} {
+        puts "SQQ pick: atom $::vmd_pick_atom has no $pick_mode target in frame $frame"
+        return
+    }
+    set selected_target $target
+    ::SQQ::render_current
+    puts "SQQ selected: [lindex $selected_target 1] (frame $frame)"
+}
+
+proc ::SQQ::render_selected {frame} {
+    variable group_atoms
+    variable pick_mode
+    variable selected_target
+    if {$pick_mode eq "off" || [llength $selected_target] != 2} { return }
+    lassign $selected_target source key
+    set atom_key "$frame,cage-id,$key"
+    if {![info exists group_atoms($atom_key)]} { return }
+    lassign [::SQQ::effective_color $frame cage-id $key] color_id priority
+    set indexes [lsort -integer -unique $group_atoms($atom_key)]
+    ::SQQ::add_dynamic_bonds_representation $indexes $color_id 0.250 Opaque
+    if {$pick_mode eq "guest"} {
+        set guest_key "$frame,guest-id,$key"
+        if {[info exists group_atoms($guest_key)]} {
+            set guest_indexes [lsort -integer -unique $group_atoms($guest_key)]
+            ::SQQ::add_guest_representation $guest_indexes $color_id Opaque
+        }
+    }
 }
 
 proc ::SQQ::announce_graph_mode {frame} {
@@ -1376,6 +2049,7 @@ proc ::SQQ::ordered_active_families {} {
 proc ::SQQ::render_family {frame family targets} {
     variable group_atoms
     set representation_count 0
+    set material [::SQQ::base_material]
     if {$family in {cage guest}} {
         array set explicit_ids {}
         foreach target $targets {
@@ -1388,9 +2062,9 @@ proc ::SQQ::render_family {frame family targets} {
             lassign $item source key
             set atom_key "$frame,$source,$key"
             if {![info exists group_atoms($atom_key)]} { continue }
-            lassign [::SQQ::effective_color $source $key] color_id color_priority
+            lassign [::SQQ::effective_color $frame $source $key] color_id color_priority
             set explicit [info exists explicit_ids($key)]
-            set layer_key [::SQQ::object_render_key $key $color_priority $color_id $explicit]
+            set layer_key [::SQQ::object_render_key $frame $key $color_priority $color_id $explicit]
             if {![info exists layer_atoms($layer_key)]} {
                 lappend layer_keys $layer_key
                 set layer_atoms($layer_key) {}
@@ -1405,12 +2079,12 @@ proc ::SQQ::render_family {frame family targets} {
             foreach layer_key $layer_keys {
                 set indexes [lsort -integer -unique $layer_atoms($layer_key)]
                 set radius [::SQQ::cage_layer_radius [::SQQ::cage_radius_tier $layer_key] $radius_tiers]
-                incr representation_count [::SQQ::add_dynamic_bonds_representation $indexes [lindex $layer_key 6] $radius]
+                incr representation_count [::SQQ::add_dynamic_bonds_representation $indexes [lindex $layer_key 6] $radius $material]
             }
         } else {
             foreach layer_key $layer_keys {
                 set indexes [lsort -integer -unique $layer_atoms($layer_key)]
-                incr representation_count [::SQQ::add_guest_representation $indexes [lindex $layer_key 6]]
+                incr representation_count [::SQQ::add_guest_representation $indexes [lindex $layer_key 6] $material]
             }
         }
     } else {
@@ -1420,7 +2094,7 @@ proc ::SQQ::render_family {frame family targets} {
             lassign $item source key
             set atom_key "$frame,$source,$key"
             if {![info exists group_atoms($atom_key)]} { continue }
-            lassign [::SQQ::effective_color $source $key] color_id priority
+            lassign [::SQQ::effective_color $frame $source $key] color_id priority
             set render_key "$priority,$color_id"
             if {![info exists color_atoms($render_key)]} { lappend render_keys [list $priority $color_id] }
             foreach atom_index $group_atoms($atom_key) { lappend color_atoms($render_key) $atom_index }
@@ -1428,7 +2102,7 @@ proc ::SQQ::render_family {frame family targets} {
         foreach render_key [lsort -command ::SQQ::compare_render_keys $render_keys] {
             lassign $render_key priority color_id
             set indexes [lsort -integer -unique $color_atoms($priority,$color_id)]
-            incr representation_count [::SQQ::add_dynamic_bonds_representation $indexes $color_id 0.125]
+            incr representation_count [::SQQ::add_dynamic_bonds_representation $indexes $color_id 0.125 $material]
         }
     }
     return $representation_count
@@ -1437,11 +2111,14 @@ proc ::SQQ::render_family {frame family targets} {
 proc ::SQQ::render_current {} {
     ::SQQ::cancel_pending_render
     variable molid
+    variable active_families
     variable active_targets
+    variable pick_mode
     if {$molid < 0 || $molid ni [molinfo list]} { return }
     set frame [molinfo $molid get frame]
     ::SQQ::announce_graph_mode $frame
     ::SQQ::clear_representations
+    ::SQQ::clear_graphics
     foreach family [::SQQ::ordered_active_families] {
         set targets $active_targets($family)
         set representation_count [::SQQ::render_family $frame $family $targets]
@@ -1453,6 +2130,11 @@ proc ::SQQ::render_current {} {
             puts "SQQ show $family: [join $labels { }] (frame $frame)"
         }
     }
+    if {$pick_mode eq "guest" && "guest" ni $active_families} {
+        ::SQQ::render_family $frame guest [list [list guest *]]
+    }
+    ::SQQ::render_selected $frame
+    ::SQQ::render_labels $frame
     display update
 }
 
@@ -1473,69 +2155,31 @@ proc ::SQQ::render_pending {} {
 proc ::SQQ::frame_changed {name1 name2 operation} {
     variable molid
     variable frame_after_id
+    variable selected_target
     if {$name2 ne "$molid"} { return }
+    set selected_target {}
     if {$frame_after_id ne ""} { catch {after cancel $frame_after_id} }
     set frame_after_id [after idle [list ::SQQ::render_pending]]
-}
-
-proc ::SQQ::split_frames {path directory} {
-    file mkdir $directory
-    set input [open $path r]
-    fconfigure $input -encoding ascii -translation auto
-    set files {}
-    set frame 0
-    while {[gets $input title] >= 0} {
-        if {[gets $input count_line] < 0} {
-            close $input
-            error "Truncated sqq-cage.gro after frame title"
-        }
-        set atom_count [string trim $count_line]
-        if {![string is integer -strict $atom_count] || $atom_count < 0} {
-            close $input
-            error "Invalid atom count in sqq-cage.gro: $count_line"
-        }
-        set frame_path [file join $directory [format "frame_%09d.gro" $frame]]
-        set output [open $frame_path w]
-        fconfigure $output -encoding ascii -translation lf
-        puts $output $title
-        puts $output $count_line
-        for {set atom_index 0} {$atom_index < $atom_count} {incr atom_index} {
-            if {[gets $input line] < 0} {
-                close $output
-                close $input
-                error "Truncated atom records in sqq-cage.gro frame $frame"
-            }
-            puts $output $line
-        }
-        if {[gets $input box_line] < 0} {
-            close $output
-            close $input
-            error "Missing box record in sqq-cage.gro frame $frame"
-        }
-        puts $output $box_line
-        close $output
-        lappend files $frame_path
-        incr frame
-    }
-    close $input
-    return $files
 }
 
 proc ::SQQ::startup_help {} {
     puts "SQQ VMD Renderer"
     puts ""
-    puts "Default view : cage all"
+    puts "Default view : cage all (opaque)"
     puts "Show mode    : additive"
     puts ""
     puts "Commands:"
     puts "  sqq show <family> <target...> ?<family> <target...> ...?"
+    puts "  sqq show label ?on|off?"
     puts "  sqq color <family> <target...> <color>"
+    puts "  sqq pick center|guest|off"
     puts "  sqq clear"
     puts "  sqq -h"
     puts ""
     puts "Examples:"
     puts "  sqq show cage 512"
     puts "  sqq show cage 512 guest 512"
+    puts "  sqq pick guest"
 }
 
 proc ::SQQ::help {} {
@@ -1543,7 +2187,9 @@ proc ::SQQ::help {} {
     puts ""
     puts "Usage:"
     puts "  sqq show <family> <target...> ?<family> <target...> ...?"
+    puts "  sqq show label ?on|off?       (lable is accepted)"
     puts "  sqq color <family> <target...> <VMD-color|ColorID|default>"
+    puts "  sqq pick center|guest|off"
     puts "  sqq clear"
     puts "  sqq help | sqq -h | sqq --help"
     puts ""
@@ -1554,34 +2200,43 @@ proc ::SQQ::help {} {
     puts "  cluster   Exact cluster ID"
     puts "  domain    Exact domain ID"
     puts ""
-    puts "Show behavior:"
-    puts "  The first show replaces the default cage-all view."
-    puts "  Later show commands add layers; repeated selections are ignored."
-    puts "  sqq clear restores the default cage-all view and colors."
+    puts "Interaction:"
+    puts "  Labels are off by default; sqq show label toggles their state."
+    puts "  Pick mode makes objects transparent; the selected cage is opaque."
+    puts "  sqq clear restores the source-time cage-all opaque view."
     puts ""
     puts "Examples:"
     puts "  sqq show cage all"
     puts "  sqq show cage 512 51264"
     puts "  sqq show cage 512 guest 512"
-    puts "  sqq show cage 512 guest 512 phase sI"
+    puts "  sqq show label"
+    puts "  sqq pick center"
     puts "  sqq color cage 512 green"
-    puts "  sqq color guest 512 yellow"
     puts "  sqq clear"
 }
 
 proc sqq {{command help} args} {
     switch -- [string tolower $command] {
         show {
-            if {[llength $args] < 2} {
-                error "Usage: sqq show <family> <target...> ?<family> <target...> ...?"
+            if {[llength $args] >= 1 &&
+                [string tolower [lindex $args 0]] in {label lable}} {
+                ::SQQ::set_label [lrange $args 1 end]
+            } else {
+                if {[llength $args] < 2} {
+                    error "Usage: sqq show <family> <target...> ?<family> <target...> ...?"
+                }
+                ::SQQ::set_show $args
             }
-            ::SQQ::set_show $args
         }
         color {
             if {[llength $args] < 3} {
                 error "Usage: sqq color <family> <target> ?target ...? <VMD-color|ColorID|default>"
             }
             ::SQQ::set_colors [lindex $args 0] [lrange $args 1 end-1] [lindex $args end]
+        }
+        pick {
+            if {[llength $args] != 1} { error "Usage: sqq pick center|guest|off" }
+            ::SQQ::set_pick_mode [lindex $args 0]
         }
         clear {
             if {[llength $args] != 0} { error "Usage: sqq clear" }
@@ -1591,24 +2246,26 @@ proc sqq {{command help} args} {
             if {[llength $args] != 0} { error "Usage: sqq help" }
             ::SQQ::help
         }
-        default { error "Unknown SQQ command '$command'; use show, color, clear, or help" }
+        default { error "Unknown SQQ command '$command'; use show, color, pick, clear, or help" }
     }
 }
 
-set ::SQQ::gro_path [file join [file dirname [file normalize [info script]]] "sqq-cage.gro"]
-if {![file isfile $::SQQ::gro_path]} { error "SQQ GRO file not found: $::SQQ::gro_path" }
-set parsed_frames [::SQQ::read_annotations $::SQQ::gro_path]
-set temp_dir [file join [file dirname $::SQQ::gro_path] ".sqq-vmd-[pid]-[clock clicks]"]
-set frame_files [::SQQ::split_frames $::SQQ::gro_path $temp_dir]
-if {[llength $frame_files] == 0} { error "SQQ GRO file contains no frames: $::SQQ::gro_path" }
-set ::SQQ::molid [mol new [lindex $frame_files 0] type gro waitfor all]
-foreach frame_path [lrange $frame_files 1 end] {
-    mol addfile $frame_path type gro waitfor all molid $::SQQ::molid
+set script_dir [file dirname [file normalize [info script]]]
+set ::SQQ::gro_path [file join $script_dir __SQQ_GRO_FILENAME__]
+set ::SQQ::xtc_path [file join $script_dir __SQQ_XTC_FILENAME__]
+set ::SQQ::membership_path [file join $script_dir __SQQ_MEMBERSHIP_FILENAME__]
+foreach {label path} [list GRO $::SQQ::gro_path XTC $::SQQ::xtc_path membership $::SQQ::membership_path] {
+    if {![file isfile $path]} { error "SQQ $label file not found: $path" }
 }
-foreach frame_path $frame_files { file delete -force $frame_path }
-file delete -force $temp_dir
-mol rename $::SQQ::molid "SQQ cages"
+set parsed_frames [::SQQ::read_membership_tsv $::SQQ::membership_path]
+if {$parsed_frames == 0} { error "SQQ membership TSV contains no frames: $::SQQ::membership_path" }
+set ::SQQ::molid [mol new $::SQQ::gro_path type gro waitfor all]
+if {$parsed_frames > 1} {
+    mol addfile $::SQQ::xtc_path type xtc first 1 waitfor all molid $::SQQ::molid
+}
 set loaded_frames [molinfo $::SQQ::molid get numframes]
+molinfo $::SQQ::molid set frame 0
+mol rename $::SQQ::molid __SQQ_MOLECULE_NAME__
 if {$loaded_frames != $parsed_frames} {
     error "SQQ frame count mismatch: parsed $parsed_frames, VMD loaded $loaded_frames"
 }
@@ -1616,6 +2273,9 @@ if {$loaded_frames != $parsed_frames} {
 display projection Orthographic
 catch {trace remove variable ::vmd_frame write ::SQQ::frame_changed}
 trace add variable ::vmd_frame write ::SQQ::frame_changed
+catch {trace remove variable ::vmd_pick_atom write ::SQQ::pick_atom_changed}
+trace add variable ::vmd_pick_atom write ::SQQ::pick_atom_changed
 ::SQQ::startup_help
 ::SQQ::reset_show
+catch {color Display Background white}
 '''

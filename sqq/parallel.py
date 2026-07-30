@@ -35,6 +35,8 @@ StageEvent = tuple[str, int, str, float]
 _WORKER_CONFIG: dict[str, Any] | None = None
 _WORKER_GROUP_CONFIGS: dict[Any, dict[str, Any]] = {}
 _WORKER_OUTDIR: Path | None = None
+_WORKER_FRAGMENT_DIR: Path | None = None
+_WORKER_GROUP_FRAGMENT_DIRS: dict[Any, Path] = {}
 _WORKER_STRICT = False
 _WORKER_STAGE_QUEUE: Any = None
 _WORKER_TRAJECTORY_PATH: Path | None = None
@@ -49,13 +51,20 @@ def initialize_file_worker(
     strict: bool,
     stage_queue: Any,
     group_configs: dict[Any, dict[str, Any]] | None = None,
+    fragment_dir: str | None = None,
+    group_fragment_dirs: dict[Any, str] | None = None,
 ) -> None:
     """Install shared and optional per-group settings in each spawned worker."""
     global _WORKER_CONFIG, _WORKER_GROUP_CONFIGS, _WORKER_OUTDIR
+    global _WORKER_FRAGMENT_DIR, _WORKER_GROUP_FRAGMENT_DIRS
     global _WORKER_STRICT, _WORKER_STAGE_QUEUE
     _WORKER_CONFIG = config
     _WORKER_GROUP_CONFIGS = dict(group_configs or {})
     _WORKER_OUTDIR = Path(outdir)
+    _WORKER_FRAGMENT_DIR = Path(fragment_dir) if fragment_dir else None
+    _WORKER_GROUP_FRAGMENT_DIRS = {
+        key: Path(value) for key, value in (group_fragment_dirs or {}).items()
+    }
     _WORKER_STRICT = bool(strict)
     _WORKER_STAGE_QUEUE = stage_queue
 
@@ -68,9 +77,16 @@ def initialize_trajectory_worker(
     trajectory_path: str,
     topology_path: str,
     lammps_config: dict[str, Any] | None = None,
+    fragment_dir: str | None = None,
 ) -> None:
     """Open one private trajectory handle in every spawned worker."""
-    initialize_file_worker(config, outdir, strict, stage_queue)
+    initialize_file_worker(
+        config,
+        outdir,
+        strict,
+        stage_queue,
+        fragment_dir=fragment_dir,
+    )
     global _WORKER_TRAJECTORY_PATH, _WORKER_UNIVERSE
     global _WORKER_TRAJECTORY_METADATA, _WORKER_LAMMPS_CONFIG
     _WORKER_TRAJECTORY_PATH = Path(trajectory_path)
@@ -129,6 +145,7 @@ def process_trajectory_frame_task(frame_index: int, raw_frame_index: int) -> tup
             _WORKER_OUTDIR,
             strict=_WORKER_STRICT,
             stage_callback=callback,
+            fragment_dir=_WORKER_FRAGMENT_DIR,
         )
     except Exception as exc:
         if _WORKER_STRICT:
@@ -197,6 +214,11 @@ def process_file_task(
                 f"SQQ process worker has no configuration for group {group_key!r}."
             ) from exc
     task_outdir = Path(outdir_text) if outdir_text is not None else _WORKER_OUTDIR
+    task_fragment_dir = (
+        _WORKER_FRAGMENT_DIR
+        if group_key is None
+        else _WORKER_GROUP_FRAGMENT_DIRS.get(group_key)
+    )
     task_index = frame_index if local_index is None else int(local_index)
     display_name = output_name or path.name
     _emit_stage("start", frame_index, display_name, perf_counter())
@@ -226,6 +248,7 @@ def process_file_task(
             frame,
             config,
             task_outdir,
+            fragment_dir=task_fragment_dir,
             **process_kwargs,
         )
     except Exception as exc:

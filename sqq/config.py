@@ -7,6 +7,7 @@ import json
 from pathlib import Path
 import re
 from typing import Any
+import warnings
 
 try:
     import yaml
@@ -14,7 +15,39 @@ except ImportError:  # pragma: no cover - exercised in minimal source-tree runs.
     yaml = None
 
 
+if yaml is not None:
+    class _UniqueKeySafeLoader(yaml.SafeLoader):
+        """Safe YAML loader that rejects duplicate mapping keys."""
+
+        def construct_mapping(self, node, deep: bool = False):
+            self.flatten_mapping(node)
+            mapping: dict[Any, Any] = {}
+            for key_node, value_node in node.value:
+                key = self.construct_object(key_node, deep=deep)
+                try:
+                    duplicate = key in mapping
+                except TypeError as exc:
+                    raise yaml.constructor.ConstructorError(
+                        "while constructing a mapping",
+                        node.start_mark,
+                        "found an unhashable mapping key",
+                        key_node.start_mark,
+                    ) from exc
+                if duplicate:
+                    raise yaml.constructor.ConstructorError(
+                        "while constructing a mapping",
+                        node.start_mark,
+                        f"found duplicate key {key!r}",
+                        key_node.start_mark,
+                    )
+                mapping[key] = self.construct_object(value_node, deep=deep)
+            return mapping
+else:  # pragma: no cover - used only by the JSON source-tree fallback.
+    _UniqueKeySafeLoader = None
+
+
 DEFAULT_MODE = "py"
+CONFIG_SCHEMA_VERSION = "0.3.9"
 DEFAULT_ORDER_PARAMETERS = ("f3", "f4")
 CPP_MODE = "cpp"
 CPP_MODES = frozenset({"99", CPP_MODE})
@@ -100,6 +133,81 @@ GRO_OUTPUT_TYPES = {
     "cage-gro",
     "ice-gro",
 }
+
+# YAML uses singular collection names. Runtime code keeps the established
+# internal names so older callers and the analysis pipeline remain compatible.
+_YAML_KEY_ALIASES: dict[tuple[str, ...], dict[str, str]] = {
+    ("input", "lammps"): {
+        "unit": "units",
+    },
+    ("graph",): {
+        "mode": "bond_mode",
+    },
+    ("water",): {
+        "resname": "resnames",
+        "oxygen_name": "oxygen_names",
+        "hydrogen_name": "hydrogen_names",
+    },
+    ("guest",): {
+        "resname": "resnames",
+        "center_atom": "center_atoms",
+    },
+    ("additive",): {
+        "resname": "resnames",
+    },
+    ("environment",): {
+        "resname": "resnames",
+    },
+    ("ring",): {
+        "size": "sizes",
+        "report_size": "report_sizes",
+    },
+    ("quasi_cage",): {
+        "base_size": "base_sizes",
+        "side_size": "side_sizes",
+        "max_combination_per_base": "max_combinations_per_base",
+        "max_layer": "max_layers",
+        "max_ring_per_layer": "max_rings_per_layer",
+        "max_layer_state_per_seed": "max_layer_states_per_seed",
+        "max_candidate_per_edge": "max_candidates_per_edge",
+        "max_layer_candidate": "max_layer_candidates",
+    },
+    ("cage",): {
+        "report_type": "report_types",
+        "max_face": "max_faces",
+        "max_state_per_seed": "max_states_per_seed",
+        "max_total_state": "max_total_states",
+        "max_boundary_candidate": "max_boundary_candidates",
+        "fast_closure_max_state": "fast_closure_max_states",
+    },
+    ("hydrate_order",): {
+        "mcg_guest_resname": "mcg_guest_resnames",
+        "mcg_min_water": "mcg_min_waters",
+        "dhop_planar_count": "dhop_planar_counts",
+        "dhop_min_qualified_neighbor": "dhop_min_qualified_neighbors",
+    },
+    ("order",): {
+        "enabled": "parameters",
+        "focus_water": "focus_waters",
+    },
+    ("ice",): {
+        "min_six_ring": "min_six_rings",
+        "require_four_coord_neighbor": "require_four_coord_neighbors",
+    },
+    ("output",): {
+        "type": "types",
+        "cage_isomer_row": "cage_isomer_rows",
+        "write_empty_file": "write_empty_files",
+        "context_role": "context_roles",
+    },
+    ("parallel",): {
+        "worker": "workers",
+        "math_thread": "math_threads",
+    },
+    ("debug",): {
+        "use_networkx_check": "use_networkx_checks",
+    },
+}
 MODE_PRESETS: dict[str, dict[str, Any]] = {
     "00": {
         "label": "rigorous",
@@ -146,9 +254,13 @@ MODE_PRESETS: dict[str, dict[str, Any]] = {
 }
 
 
-# Explicit defaults keep the generated config.yaml reproducible.
+# Explicit defaults keep the generated sqq_config.yaml reproducible.
 DEFAULT_CONFIG: dict[str, Any] = {
+    "schema_version": CONFIG_SCHEMA_VERSION,
     "mode": DEFAULT_MODE,
+    "run": {
+        "strict": False,
+    },
     "input": {
         "pattern": "*.gro",
         "recursive": False,
@@ -163,6 +275,18 @@ DEFAULT_CONFIG: dict[str, Any] = {
             "coordinate_convention": "auto",
             "type_map": {},
         },
+    },
+    "component": {
+        "auto_classify": True,
+        "unknown_role": "other",
+        "unknown_action": "warn",
+        "role_map": {},
+    },
+    "additive": {
+        "resnames": [],
+    },
+    "environment": {
+        "resnames": [],
     },
     "water": {
         "resnames": ["SOL", "TIP", "WAT", "HOH"],
@@ -186,17 +310,17 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "box_mode": "orthorhombic",
     },
     "ring": {
-        "sizes": [5, 6],
+        "sizes": [4, 5, 6],
         "report_sizes": "auto",
         "chordless": True,
         "definition": "chordless",
     },
     "half_cage": {
-        "enabled": True,
+        "enabled": "auto",
     },
     "quasi_cage": {
         "search_policy": "bounded",
-        "enabled": True,
+        "enabled": "auto",
         "base_sizes": "auto",
         "side_sizes": "auto",
         "max_combinations_per_base": 50000,
@@ -258,7 +382,8 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "cage_isomer_rows": "nonzero",
         "write_empty_files": False,
         "structure_layout": "grouped",
-        "gro_atom_mode": "full_water",
+        "gro_atom_mode": "cage_oxygen_guest",
+        "context_roles": [],
         "center_resname": "CNT",
     },
     "parallel": {
@@ -279,7 +404,7 @@ def normalize_mode(value: Any) -> str:
         text = text.zfill(2)
     if text not in MODE_PRESETS:
         choices = ", ".join(MODE_PRESETS)
-        raise ValueError(f"mode must be one of: {choices}")
+        raise ValueError(f"engine must be one of: {choices}")
     return text
 
 
@@ -291,6 +416,12 @@ def mode_label(mode: Any) -> str:
 def is_cpp_mode(mode: Any) -> bool:
     """Return whether the native C++ backend was selected."""
     return normalize_mode(mode) in CPP_MODES
+
+
+def engine_display(selector: Any) -> str:
+    """Return the effective public engine name for a selector."""
+    normalized = normalize_mode(selector)
+    return "sqq-cpp" if normalized in CPP_MODES else "sqq-py"
 
 
 def mode_display(mode: Any) -> str:
@@ -311,7 +442,7 @@ def mode_worker_fraction(mode: Any) -> float:
     """Return the automatic worker fraction for a fraction-based mode."""
     preset = MODE_PRESETS[normalize_mode(mode)]
     if "worker_fraction" not in preset:
-        raise ValueError(f"mode {normalize_mode(mode)} uses a fixed worker count")
+        raise ValueError(f"engine {normalize_mode(mode)} uses a fixed worker count")
     return float(preset["worker_fraction"])
 
 
@@ -359,7 +490,7 @@ def normalize_order_parameters(value: Any = None) -> tuple[str, ...]:
 
 
 def normalize_cpp_order_parameters(value: Any = None) -> tuple[str, ...]:
-    """Normalize the F3/F4-only selector used by mode cpp."""
+    """Normalize the F3/F4-only selector used by engine cpp."""
     if value is None or value == "":
         raw_items: list[Any] = list(DEFAULT_ORDER_PARAMETERS)
     elif isinstance(value, str):
@@ -369,7 +500,7 @@ def normalize_cpp_order_parameters(value: Any = None) -> tuple[str, ...]:
             raw_items = [item for item in value if str(item).strip()]
         except TypeError as exc:
             raise ValueError(
-                "mode cpp --order-parameter must be f3, f4, f3,f4, all, or none."
+                "engine cpp --order-parameter must be f3, f4, f3,f4, all, or none."
             ) from exc
     if not raw_items:
         return ()
@@ -377,14 +508,14 @@ def normalize_cpp_order_parameters(value: Any = None) -> tuple[str, ...]:
     keywords = set(cleaned) & {"all", "none"}
     if keywords:
         if len(cleaned) != 1:
-            raise ValueError("Use 'all' or 'none' alone in mode cpp.")
+            raise ValueError("Use 'all' or 'none' alone in engine cpp.")
         return DEFAULT_ORDER_PARAMETERS if cleaned[0] == "all" else ()
     normalized = normalize_order_parameters(cleaned)
     unsupported = [name for name in normalized if name not in {"f3", "f4"}]
     if unsupported:
         names = ", ".join(unsupported)
         raise ValueError(
-            f"order parameter(s) {names} are not supported in mode cpp; use f3 and/or f4."
+            f"order parameter(s) {names} are not supported in engine cpp; use f3 and/or f4."
         )
     return normalized
 
@@ -555,6 +686,230 @@ def legacy_enabled(value: Any) -> bool:
     )
 
 
+def migrate_yaml_keys(config: dict[str, Any]) -> dict[str, Any]:
+    """Convert canonical singular YAML keys to stable runtime keys in place."""
+    config.pop("schema_version", None)
+    if "engine" in config:
+        if "mode" in config:
+            raise ValueError(
+                "Config must not contain both top-level 'engine' and legacy 'mode'; "
+                "use 'engine' only."
+            )
+        config["mode"] = config.pop("engine")
+    elif "mode" in config:
+        warnings.warn(
+            "Top-level config key 'mode' is deprecated; use 'engine'.",
+            UserWarning,
+            stacklevel=2,
+        )
+
+    if "order_parameter" in config:
+        if "order" in config:
+            raise ValueError(
+                "Config must not contain both top-level 'order_parameter' and "
+                "legacy 'order'; use 'order_parameter' only."
+            )
+        config["order"] = config.pop("order_parameter")
+    elif "order" in config:
+        warnings.warn(
+            "Top-level config key 'order' is deprecated; use 'order_parameter'.",
+            UserWarning,
+            stacklevel=2,
+        )
+    order = config.get("order")
+    if isinstance(order, dict) and "parameter" in order:
+        if "enabled" in order:
+            raise ValueError(
+                "Config must not contain both order_parameter.enabled and legacy "
+                "order.parameter; use order_parameter.enabled only."
+            )
+        warnings.warn(
+            "Config key order.parameter is deprecated; use order_parameter.enabled.",
+            UserWarning,
+            stacklevel=2,
+        )
+        order["enabled"] = order.pop("parameter")
+    graph = config.get("graph")
+    if isinstance(graph, dict) and "bond_mode" in graph and "mode" not in graph:
+        warnings.warn(
+            "Config key graph.bond_mode is deprecated; use graph.mode.",
+            UserWarning,
+            stacklevel=2,
+        )
+    if isinstance(graph, dict) and "pairs_file" in graph:
+        if "pair_file" in graph:
+            raise ValueError(
+                "Config must not contain both graph.pair_file and legacy "
+                "graph.pairs_file; use graph.pair_file only."
+            )
+        graph["pair_file"] = graph.pop("pairs_file")
+
+    for path, aliases in _YAML_KEY_ALIASES.items():
+        section = _nested_mapping(config, path)
+        if section is None:
+            continue
+        for canonical, internal in aliases.items():
+            if canonical in section:
+                if internal in section and internal != canonical:
+                    dotted = ".".join((*path, canonical))
+                    legacy = ".".join((*path, internal))
+                    raise ValueError(
+                        f"Config must not contain both {dotted} and legacy {legacy}; "
+                        f"use {dotted} only."
+                    )
+                section[internal] = section.pop(canonical)
+    return config
+
+
+def canonical_config(config: dict[str, Any]) -> dict[str, Any]:
+    """Return a YAML-facing copy with canonical singular field names."""
+    data = deepcopy(config)
+    engine = data.pop("engine", None)
+    internal_mode = data.pop("mode", None)
+    if internal_mode is not None:
+        engine = internal_mode
+    if engine is None:
+        engine = DEFAULT_MODE
+
+    graph = data.get("graph")
+    if isinstance(graph, dict) and "pairs_file" in graph:
+        if "pair_file" not in graph:
+            graph["pair_file"] = graph["pairs_file"]
+        graph.pop("pairs_file", None)
+
+    for path, aliases in _YAML_KEY_ALIASES.items():
+        section = _nested_mapping(data, path)
+        if section is None:
+            continue
+        reverse = {internal: canonical for canonical, internal in aliases.items()}
+        converted: dict[str, Any] = {}
+        for key, value in section.items():
+            converted[reverse.get(key, key)] = value
+        section.clear()
+        section.update(converted)
+    data.pop("schema_version", None)
+    data = {
+        ("order_parameter" if key == "order" else key): value
+        for key, value in data.items()
+    }
+    return {
+        "schema_version": CONFIG_SCHEMA_VERSION,
+        "engine": normalize_mode(engine),
+        **data,
+    }
+
+
+def _nested_mapping(
+    config: dict[str, Any], path: tuple[str, ...]
+) -> dict[str, Any] | None:
+    section: Any = config
+    for key in path:
+        if not isinstance(section, dict):
+            return None
+        section = section.get(key)
+    return section if isinstance(section, dict) else None
+
+
+def normalize_engine_capabilities(
+    config: dict[str, Any],
+    *,
+    user_config: dict[str, Any] | None = None,
+    emit_warnings: bool = True,
+) -> dict[str, Any]:
+    """Resolve auto switches and safely disable unsupported C++ analyses."""
+    cpp = is_cpp_mode(config.get("mode", DEFAULT_MODE))
+    adjustments = list(config.get("adjustments", ()))
+
+    half = config.setdefault("half_cage", {})
+    half_value = _resolve_auto_toggle(half.get("enabled", "auto"), not cpp)
+    quasi = config.setdefault("quasi_cage", {})
+    quasi_value = _resolve_auto_toggle(quasi.get("enabled", "auto"), not cpp)
+
+    if cpp:
+        explicit_half = _explicit_section(user_config, "half_cage")
+        explicit_quasi = _explicit_section(user_config, "quasi_cage")
+        if _explicit_toggle_on(explicit_half.get("enabled")):
+            _record_capability_adjustment(
+                adjustments,
+                "half_cage disabled by SQQ-CPP",
+                emit_warnings,
+            )
+        quasi_customized = any(
+            key != "enabled"
+            and value != DEFAULT_CONFIG["quasi_cage"].get(key)
+            for key, value in explicit_quasi.items()
+        )
+        if _explicit_toggle_on(explicit_quasi.get("enabled")) or quasi_customized:
+            _record_capability_adjustment(
+                adjustments,
+                "quasi_cage disabled by SQQ-CPP; quasi settings ignored",
+                emit_warnings,
+            )
+        _remove_cpp_yaml_outputs(config, adjustments, emit_warnings)
+        half_value = False
+        quasi_value = False
+        for key, value in DEFAULT_CONFIG["quasi_cage"].items():
+            if key != "enabled":
+                quasi[key] = deepcopy(value)
+
+    half["enabled"] = half_value
+    quasi["enabled"] = quasi_value
+    if adjustments:
+        config["adjustments"] = list(dict.fromkeys(str(item) for item in adjustments))
+    return config
+
+
+def _remove_cpp_yaml_outputs(
+    config: dict[str, Any], adjustments: list[Any], emit_warnings: bool
+) -> None:
+    output = config.setdefault("output", {})
+    value = output.get("types", ())
+    if isinstance(value, str):
+        items = [item.strip().lower() for item in value.split(",") if item.strip()]
+    else:
+        try:
+            items = [str(item).strip().lower() for item in value if str(item).strip()]
+        except TypeError:
+            return
+    unsupported = [name for name in ("half-gro", "quasi-gro") if name in items]
+    if not unsupported:
+        return
+    output["types"] = [name for name in items if name not in set(unsupported)]
+    _record_capability_adjustment(
+        adjustments,
+        "SQQ-CPP removed unsupported YAML output type(s): " + ", ".join(unsupported),
+        emit_warnings,
+    )
+
+def _resolve_auto_toggle(value: Any, auto_value: bool) -> bool:
+    if isinstance(value, str) and value.strip().lower() == "auto":
+        return auto_value
+    return legacy_enabled(value)
+
+
+def _explicit_section(
+    config: dict[str, Any] | None, section_name: str
+) -> dict[str, Any]:
+    if not isinstance(config, dict):
+        return {}
+    section = config.get(section_name, {})
+    return section if isinstance(section, dict) else {}
+
+
+def _explicit_toggle_on(value: Any) -> bool:
+    if value is None or (isinstance(value, str) and value.strip().lower() == "auto"):
+        return False
+    return legacy_enabled(value)
+
+
+def _record_capability_adjustment(
+    adjustments: list[Any], message: str, emit_warning: bool
+) -> None:
+    if message not in adjustments:
+        adjustments.append(message)
+    if emit_warning:
+        warnings.warn(message, UserWarning, stacklevel=3)
+
 def apply_mode_preset(config: dict[str, Any], mode: Any) -> dict[str, Any]:
     """Apply the scientific and worker-policy base settings for one mode."""
     normalized = normalize_mode(mode)
@@ -576,14 +931,104 @@ def apply_mode_preset(config: dict[str, Any], mode: Any) -> dict[str, Any]:
     return config
 
 
+_RESOLVED_RUN_KEYS = {
+    "sqq_version",
+    "release_date",
+    "engine_selector",
+    "engine",
+    "config_output",
+    "status",
+    "error",
+    "graph_mode_requested",
+    "graph_mode_effective",
+    "graph_mode_display",
+    "order_parameters",
+    "find_half",
+    "find_quasi",
+    "find_cluster",
+    "output_types",
+    "sampling_interval",
+    "native_frame_interval_ps",
+    "delta_time_ps",
+    "raw_frame_step",
+    "selected_frames",
+    "source_frames_total",
+    "frames_total",
+    "frames_ok",
+    "frames_failed",
+    "failures",
+    "worker_request",
+    "worker_policy",
+    "workers_resolved",
+    "parallel_backend",
+    "math_threads_per_worker",
+    "summary_write",
+    "topology_group_count",
+    "topology_group_limit",
+    "topology_group_limit_exceeded",
+    "topology_group_labels_enabled",
+    "info_only_fallback_required",
+    "topology_grouping",
+    "topology_groups",
+    "topology_source_mapping",
+    "topology_group",
+    "topology_fingerprint",
+    "requested_output_types",
+    "output_policy",
+    "warnings",
+}
+_CONFIG_EXTRA_KEYS: dict[tuple[str, ...], set[str]] = {
+    (): {"adjustments"},
+    ("run",): _RESOLVED_RUN_KEYS,
+    ("input",): {"format", "topology", "sampling"},
+    ("input", "lammps"): {
+        "resolved_type_map",
+        "type_map_source",
+        "rebuilt_molecules",
+    },
+    ("graph",): {"effective_bond_mode"},
+}
+_CONFIG_FLEXIBLE_PATHS = {
+    ("component", "role_map"),
+    ("guest", "center_atoms"),
+    ("input", "sampling"),
+    ("input", "lammps", "type_map"),
+    ("input", "lammps", "resolved_type_map"),
+    ("run", "summary_write"),
+}
+
+
+def validate_user_config_keys(
+    config: dict[str, Any],
+    schema: dict[str, Any] | None = None,
+    path: tuple[str, ...] = (),
+) -> None:
+    """Reject unknown YAML keys after canonical/legacy key migration."""
+    if path in _CONFIG_FLEXIBLE_PATHS:
+        return
+    expected = DEFAULT_CONFIG if schema is None else schema
+    allowed_extra = _CONFIG_EXTRA_KEYS.get(path, set())
+    for key, value in config.items():
+        if key not in expected:
+            if key in allowed_extra:
+                continue
+            dotted = ".".join((*path, str(key)))
+            raise ValueError(f"Unknown configuration key: {dotted}")
+        expected_value = expected[key]
+        if isinstance(expected_value, dict):
+            if not isinstance(value, dict):
+                dotted = ".".join((*path, str(key)))
+                raise ValueError(f"Configuration section must be a mapping: {dotted}")
+            validate_user_config_keys(value, expected_value, (*path, str(key)))
+
 def load_config(path: Path | None, mode: Any = None) -> dict[str, Any]:
-    """Load a mode preset, then merge user configuration over it."""
+    """Load an engine preset, then merge user configuration over it."""
     user_config: dict[str, Any] = {}
     if path is not None:
         with path.open("r", encoding="utf-8-sig") as handle:
             text = handle.read()
         if yaml is not None:
-            user_config = yaml.safe_load(text) or {}
+            user_config = yaml.load(text, Loader=_UniqueKeySafeLoader) or {}
         else:
             # JSON fallback supports source-tree smoke tests without PyYAML.
             try:
@@ -593,15 +1038,27 @@ def load_config(path: Path | None, mode: Any = None) -> dict[str, Any]:
         if not isinstance(user_config, dict):
             raise ValueError(f"Config file must contain a YAML mapping: {path}")
 
+    migrate_yaml_keys(user_config)
+    if path is not None:
+        graph = user_config.get("graph", {})
+        pair_file = graph.get("pair_file") if isinstance(graph, dict) else None
+        if pair_file not in (None, ""):
+            pair_path = Path(str(pair_file)).expanduser()
+            if not pair_path.is_absolute():
+                pair_path = path.resolve().parent / pair_path
+            graph["pair_file"] = str(pair_path.resolve())
     migrated_parameters = migrate_legacy_order_parameters(user_config)
     if migrated_parameters is not None:
         user_config.setdefault("order", {})["parameters"] = list(migrated_parameters)
     strip_legacy_selection_keys(user_config)
+    validate_user_config_keys(user_config)
 
     selected_mode = normalize_mode(mode if mode is not None else user_config.get("mode", DEFAULT_MODE))
     config = apply_mode_preset(deepcopy(DEFAULT_CONFIG), selected_mode)
     merge_config(config, user_config)
     config["mode"] = selected_mode
+    config["schema_version"] = CONFIG_SCHEMA_VERSION
+    normalize_engine_capabilities(config, user_config=user_config)
     return config
 
 
@@ -615,25 +1072,119 @@ def merge_config(base: dict[str, Any], override: dict[str, Any]) -> dict[str, An
     return base
 
 
-def write_default_config(path: Path) -> None:
-    """Write the default configuration template."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", encoding="utf-8", newline="\n") as handle:
-        dump_config(DEFAULT_CONFIG, handle)
+_DEFAULT_CONFIG_SECTION_COMMENTS: dict[str, str] = {
+    "run": "Run behavior",
+    "input": "Input discovery, time sampling, and LAMMPS reader settings",
+    "component": "Automatic component classification",
+    "additive": "Additive residue names",
+    "environment": "Environment or wall residue names",
+    "water": "Water selection",
+    "guest": "Guest selection",
+    "graph": "Water-network construction",
+    "pbc": "Periodic-boundary settings",
+    "ring": "Ring search and reporting",
+    "half_cage": "Standard half-cage search (SQQ-Py)",
+    "quasi_cage": "Layered quasi-cage search (SQQ-Py)",
+    "cage": "Complete-cage recognition",
+    "hydrate_cluster": "Hydrate phase and cluster recognition (SQQ-Py)",
+    "hydrate_order": "MCG and DHOP definitions",
+    "order_parameter": "Order-parameter calculation",
+    "ice": "Ice-like water classification (SQQ-Py)",
+    "output": "Output selection and layout",
+    "parallel": "Worker and math-thread policy",
+    "debug": "Developer diagnostics",
+}
 
+_DEFAULT_CONFIG_INLINE_COMMENTS: dict[tuple[str, ...], str] = {
+    ("schema_version",): "managed by SQQ",
+    ("engine",): "choices: py, cpp; compatibility presets: 00, 99",
+    ("run", "strict"): "choices: true, false",
+    ("input", "pattern"): "glob used for directory input",
+    ("input", "recursive"): "choices: true, false",
+    ("input", "first_file_time_ps"): "ps; independent GRO series",
+    ("input", "frame_time_step_ps"): "ps; independent GRO series",
+    ("input", "delta_time_ps"): "ps; null analyzes every stored frame",
+    ("input", "xyz_scale"): "coordinate-to-nm scale",
+    ("input", "lammps", "unit"): "choices: real, metal, nano",
+    ("input", "lammps", "timestep"): "LAMMPS integration timestep",
+    ("input", "lammps", "atom_style"): "choices: full, molecular, bond, angle",
+    ("input", "lammps", "coordinate_convention"): "choices: auto, x, xs, xu, xsu, unscaled, scaled, unwrapped, scaled_unwrapped",
+    ("component", "unknown_action"): "choices: warn, ignore, error",
+    ("guest", "center_mode"): "choices: center_atom, centroid, auto",
+    ("graph", "mode"): "choices: auto, hbond, oo, pairs",
+    ("graph", "pair_file"): "required when graph.mode is pairs",
+    ("graph", "pair_id"): "choices: resid, oxygen_index, atomid",
+    ("pbc", "box_mode"): "currently orthorhombic only",
+    ("ring", "size"): "supported sizes, normally [4, 5, 6]",
+    ("ring", "report_size"): "auto or a subset of ring.size",
+    ("ring", "definition"): "choices: chordless, shortest_path",
+    ("half_cage", "enabled"): "choices: auto, true, false",
+    ("quasi_cage", "enabled"): "choices: auto, true, false",
+    ("quasi_cage", "search_policy"): "choices: bounded, exact",
+    ("quasi_cage", "max_layer"): "maximum layered growth depth; minimum 1",
+    ("cage", "report_type"): "auto, all, I, II, H, HS-I, TS-I, I2II, or cage labels",
+    ("cage", "scientific_validation"): "choices: true, false",
+    ("hydrate_cluster", "enabled"): "choices: true, false",
+    ("order_parameter", "enabled"): "choices: f3, f4, qN, mcg1, mcg3, dhop35, dhop30, all, none",
+    ("order_parameter", "q_neighbor_mode"): "choices: graph, cutoff, nearest, lammps",
+    ("output", "type"): "documented output names; all or none are accepted",
+    ("output", "structure_layout"): "choices: grouped, flat",
+    ("parallel", "backend"): "choices: process, thread, serial",
+    ("parallel", "worker"): "auto, integer count, fraction, or percentage",
+    ("parallel", "math_thread"): "numeric-library threads per worker",
+}
+
+
+def default_config_template() -> str:
+    """Return the commented, round-trippable configuration template."""
+    payload = canonical_config(DEFAULT_CONFIG)
+    if yaml is None:
+        return json.dumps(payload, ensure_ascii=False, indent=2) + "\n"
+    raw = yaml.safe_dump(payload, allow_unicode=True, sort_keys=False)
+    output: list[str] = []
+    path_by_depth: dict[int, str] = {}
+    key_pattern = re.compile(r"^(?P<indent> *)(?P<key>[A-Za-z0-9_]+):(?P<value>.*)$")
+    for line in raw.splitlines():
+        match = key_pattern.match(line)
+        if match is None:
+            output.append(line)
+            continue
+        depth = len(match.group("indent")) // 2
+        key = match.group("key")
+        path_by_depth[depth] = key
+        for stale_depth in tuple(path_by_depth):
+            if stale_depth > depth:
+                del path_by_depth[stale_depth]
+        path = tuple(path_by_depth[index] for index in range(depth + 1))
+        if depth == 0 and key in _DEFAULT_CONFIG_SECTION_COMMENTS:
+            if output and output[-1] != "":
+                output.append("")
+            output.append(f"# {_DEFAULT_CONFIG_SECTION_COMMENTS[key]}")
+        comment = _DEFAULT_CONFIG_INLINE_COMMENTS.get(path)
+        output.append(f"{line}  # {comment}" if comment else line)
+    return "\n".join(output) + "\n"
+
+
+def write_default_config(path: Path) -> None:
+    """Write the commented default configuration without overwriting a file."""
+    if path.exists():
+        raise FileExistsError(f"Configuration file already exists: {path}")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(default_config_template(), encoding="utf-8", newline="\n")
 
 def dump_config(config: dict[str, Any], handle) -> None:
     """Write YAML when available, otherwise a JSON-compatible fallback."""
+    payload = canonical_config(config)
     if yaml is not None:
-        yaml.safe_dump(config, handle, allow_unicode=True, sort_keys=False)
+        yaml.safe_dump(payload, handle, allow_unicode=True, sort_keys=False)
     else:
-        json.dump(config, handle, ensure_ascii=False, indent=2)
+        json.dump(payload, handle, ensure_ascii=False, indent=2)
         handle.write("\n")
 
 
 
 def normalize_cpp_output_types(value: Any = None) -> tuple[str, ...]:
-    """Normalize the compact output allowlist used by mode cpp."""
+    """Normalize the compact output allowlist used by engine cpp."""
     if value is None:
         raw_items: list[Any] = list(CPP_DEFAULT_OUTPUT_TYPES)
     elif isinstance(value, str):
@@ -651,7 +1202,7 @@ def normalize_cpp_output_types(value: Any = None) -> tuple[str, ...]:
     keywords = set(cleaned) & {"all", "none"}
     if keywords:
         if len(cleaned) != 1:
-            raise ValueError("Use 'all' or 'none' alone in mode cpp.")
+            raise ValueError("Use 'all' or 'none' alone in engine cpp.")
         return CPP_ALL_OUTPUT_TYPES if cleaned[0] == "all" else ()
     unsupported = sorted(set(cleaned) - CPP_OUTPUT_TYPES)
     if unsupported:
@@ -693,7 +1244,7 @@ def validate_cpp_cli(args: Any, config: dict[str, Any]) -> None:
     for attribute, option in unsupported_args:
         value = getattr(args, attribute, None)
         if value not in (None, False):
-            errors.append(f"{option} is not supported in mode cpp")
+            errors.append(f"{option} is not supported in engine cpp")
             explicit_unsupported.add(attribute)
 
     find_half = getattr(args, "find_half", None)
@@ -711,13 +1262,13 @@ def validate_cpp_cli(args: Any, config: dict[str, Any]) -> None:
     ring = config.setdefault("ring", {})
     explicit_ring_definition = getattr(args, "ring_definition", None) not in (None, "chordless")
     if explicit_ring_definition:
-        errors.append("--ring-definition shortest_path is not supported in mode cpp")
+        errors.append("--ring-definition shortest_path is not supported in engine cpp")
     if not explicit_ring_definition and str(ring.get("definition", "chordless")).strip().lower() != "chordless":
-        errors.append("ring.definition must be chordless in mode cpp")
+        errors.append("ring.definition must be chordless in engine cpp")
     if not bool(ring.get("chordless", True)):
-        errors.append("ring.chordless=false is not supported in mode cpp")
+        errors.append("ring.chordless=false is not supported in engine cpp")
     if "ring_size" not in explicit_unsupported and ring.get("report_sizes", "auto") not in (None, "", "auto"):
-        errors.append("public ring reporting is not supported in mode cpp")
+        errors.append("public ring reporting is not supported in engine cpp")
     try:
         ring["sizes"] = _normalize_cpp_ring_sizes(ring.get("sizes", (4, 5, 6)))
     except (TypeError, ValueError) as exc:
@@ -725,7 +1276,7 @@ def validate_cpp_cli(args: Any, config: dict[str, Any]) -> None:
 
     half = config.setdefault("half_cage", {})
     if _cpp_requested_on(half.get("enabled", False)):
-        errors.append("half_cage.enabled is not supported in mode cpp")
+        errors.append("half_cage.enabled is not supported in engine cpp")
     half["enabled"] = False
 
     quasi = config.setdefault("quasi_cage", {})
@@ -736,36 +1287,36 @@ def validate_cpp_cli(args: Any, config: dict[str, Any]) -> None:
     if not explicit_quasi:
         for key, default in DEFAULT_CONFIG["quasi_cage"].items():
             if key != "enabled" and quasi.get(key, default) != default:
-                errors.append(f"quasi_cage.{key} is not supported in mode cpp")
+                errors.append(f"quasi_cage.{key} is not supported in engine cpp")
     if _cpp_requested_on(quasi.get("enabled", False)):
-        errors.append("quasi_cage.enabled is not supported in mode cpp")
+        errors.append("quasi_cage.enabled is not supported in engine cpp")
     quasi["enabled"] = False
 
     cage = config.setdefault("cage", {})
     if str(cage.get("search_mode", "grow")).strip().lower() != "grow":
-        errors.append("cage.search_mode must be grow in mode cpp")
+        errors.append("cage.search_mode must be grow in engine cpp")
     if str(cage.get("seed_mode", "ring")).strip().lower() != "ring":
-        errors.append("cage.seed_mode must be ring in mode cpp")
+        errors.append("cage.seed_mode must be ring in engine cpp")
     default_fast_limit = DEFAULT_CONFIG["cage"]["fast_closure_max_states"]
     if cage.get("fast_closure_max_states", default_fast_limit) != default_fast_limit:
-        errors.append("cage.fast_closure_max_states is not supported in mode cpp")
+        errors.append("cage.fast_closure_max_states is not supported in engine cpp")
     cage["fast_closure"] = False
 
     cluster = config.setdefault("hydrate_cluster", {})
     if "find_cluster" not in explicit_unsupported and _cpp_requested_on(cluster.get("enabled", False)):
-        errors.append("hydrate_cluster.enabled is not supported in mode cpp")
+        errors.append("hydrate_cluster.enabled is not supported in engine cpp")
     default_min_cage = DEFAULT_CONFIG["hydrate_cluster"]["min_cage"]
     if (
         "cluster_min_cage" not in explicit_unsupported
         and cluster.get("min_cage", default_min_cage) != default_min_cage
     ):
-        errors.append("hydrate_cluster.min_cage is not supported in mode cpp")
+        errors.append("hydrate_cluster.min_cage is not supported in engine cpp")
     cluster["enabled"] = False
 
     ice = config.setdefault("ice", {})
     for key, default in DEFAULT_CONFIG["ice"].items():
         if key != "enabled" and ice.get(key, default) != default:
-            errors.append(f"ice.{key} is not supported in mode cpp")
+            errors.append(f"ice.{key} is not supported in engine cpp")
     ice["enabled"] = False
 
     order = config.setdefault("order", {})
@@ -789,10 +1340,10 @@ def validate_cpp_cli(args: Any, config: dict[str, Any]) -> None:
     for key, option_name in q_option_for_key.items():
         default = DEFAULT_CONFIG["order"][key]
         if option_name not in explicit_unsupported and order.get(key, default) != default:
-            errors.append(f"order.{key} is not supported in mode cpp")
+            errors.append(f"order.{key} is not supported in engine cpp")
     for key, default in DEFAULT_CONFIG["hydrate_order"].items():
         if config.get("hydrate_order", {}).get(key, default) != default:
-            errors.append(f"hydrate_order.{key} is not supported in mode cpp")
+            errors.append(f"hydrate_order.{key} is not supported in engine cpp")
 
     output = config.setdefault("output", {})
     output_source = getattr(args, "output_type", None)
@@ -804,11 +1355,11 @@ def validate_cpp_cli(args: Any, config: dict[str, Any]) -> None:
         errors.append(str(exc))
     default_detail_dir = DEFAULT_CONFIG["output"]["summary_detail_dir"]
     if output.get("summary_detail_dir", default_detail_dir) != default_detail_dir:
-        errors.append("output.summary_detail_dir is not supported in mode cpp")
+        errors.append("output.summary_detail_dir is not supported in engine cpp")
 
     parallel_backend = str(config.get("parallel", {}).get("backend", "process"))
     if parallel_backend.strip().lower() == "thread":
-        errors.append("--parallel-backend thread is not supported in mode cpp")
+        errors.append("--parallel-backend thread is not supported in engine cpp")
     if errors:
         raise ValueError("; ".join(dict.fromkeys(errors)))
 
@@ -820,11 +1371,11 @@ def _normalize_cpp_ring_sizes(value: Any) -> list[int]:
         raw = list(value)
     sizes = sorted({int(item) for item in raw})
     if not sizes:
-        raise ValueError("mode cpp requires at least one ring size from 4, 5, and 6")
+        raise ValueError("engine cpp requires at least one ring size from 4, 5, and 6")
     unsupported = [size for size in sizes if size not in {4, 5, 6}]
     if unsupported:
         names = ", ".join(str(size) for size in unsupported)
-        raise ValueError(f"ring size(s) {names} are not supported in mode cpp")
+        raise ValueError(f"ring size(s) {names} are not supported in engine cpp")
     return sizes
 
 

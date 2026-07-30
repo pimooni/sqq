@@ -569,7 +569,7 @@ def _infer_lammps_atom_metadata(
     dict[str, LammpsTypeMapEntry],
     bool,
 ]:
-    """Infer strict H2O/CH4 roles from DATA masses, labels, and Bonds."""
+    """Infer H2O/CH4 roles and safely classify other bonded components."""
     record_by_index = {item[0]: item for item in raw}
     if len(record_by_index) != len(raw):
         raise ValueError("LAMMPS topology contains duplicate internal atom indexes.")
@@ -612,7 +612,7 @@ def _infer_lammps_atom_metadata(
             )
         except ValueError as exc:
             raise ValueError(
-                "Cannot infer LAMMPS water/methane atom roles from DATA topology. "
+                "Cannot infer LAMMPS molecular roles from DATA topology. "
                 f"Molecule-ID partition failed ({molecule_error}); Bonds partition "
                 f"failed ({exc}). Provide input.lammps.type_map explicitly."
             ) from exc
@@ -687,10 +687,10 @@ def _infer_lammps_type_elements(
             if abs(mass - reference) <= tolerance
         ]
         if len(candidates) != 1:
-            raise ValueError(
-                f"LAMMPS atom type {type_id} with mass {mass:g} is not an "
-                "unambiguous H/O/C type; provide input.lammps.type_map explicitly."
-            )
+            # Unknown chemistry is retained as environment rather than guessed
+            # as water or guest. The numeric type stays deterministic.
+            elements[type_id] = f"T{type_id}"
+            continue
         elements[type_id] = candidates[0]
     return elements
 
@@ -880,13 +880,15 @@ def _classify_lammps_component(
     if len(group) == 1 and len(by_element.get("C", ())) == 1 and not edges:
         return {group[0]: ("MET", "C")}
 
-    composition = ", ".join(
-        f"{element}:{len(indexes)}" for element, indexes in sorted(by_element.items())
-    )
-    raise ValueError(
-        f"unsupported molecule composition ({composition or 'unknown'}, "
-        f"{len(edges)} bonds)"
-    )
+    # Surfactants, walls, substrates, ions, and other non-water/non-guest
+    # components stay in the Frame but remain outside default selections.
+    return {
+        node: (
+            "ENV",
+            elements_by_type[record_by_index[node][3]][:5],
+        )
+        for node in group
+    }
 
 def frame_from_lammps_universe(
     universe,
