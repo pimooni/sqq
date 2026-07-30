@@ -2,6 +2,53 @@
 
 This file records versioned update notes. New releases should be appended above older entries.
 
+## Version 0.3.10
+
+### Short Summary
+
+Version 0.3.10 fixes LAMMPS native-time propagation, makes Analyze terminal output deterministic, and replaces the unreliable VMD atom-based cage picker with explicit cage-center and guest pick paths. The compact renderer now stores PBC-aware cage centers and complete guest groups in its sparse TSV metadata. Center picking uses graphics pick points, guest picking uses VMD atom-pick events, labels remain independently controlled, and internal redraws stay quiet. Package and native-core metadata are synchronized at `0.3.10`, dated Jul 30, 2026. Scientific topology and classification definitions are unchanged.
+
+### Main Changes
+
+1. LAMMPS native frame timing
+   - Passes `input.lammps.timestep × units-to-ps` to the MDAnalysis LAMMPS dump reader.
+   - Removes the reader's fallback `dt = 1 ps` warning without globally suppressing warnings.
+   - Keeps `real`, `metal`, and `nano` trajectory times consistent with SQQ's existing physical-time sampling logic in serial and process-worker readers.
+
+2. Deterministic terminal output
+   - Prints the SQQ banner before input/configuration preflight and emits it exactly once.
+   - Keeps Basic Information and Configuration as one complete header before progress starts, including multiple-GRO topology-group fields.
+   - Uses one in-place progress panel only on an interactive terminal; redirected/captured output uses at most 21 plain 5% checkpoints and never writes normal progress through stderr.
+   - Coalesces nonfatal warnings, when present, into one deduplicated Diagnostics section after progress; an empty run adds no diagnostics block.
+   - Makes progress finalization idempotent, removes the unused `tqdm` runtime dependency, and keeps fatal-error output separate from ordinary status output.
+
+3. Reliable VMD cage-center picking
+   - Writes each frame-local cage's existing PBC-aware center to `sqq-cage.membership.tsv` in explicit angstrom coordinates.
+   - `sqq pick center` draws a yellow center sphere plus a VMD graphics pick point and listens to `vmd_pick_graphics`, selecting the exact clicked cage.
+   - Water-atom clicks are intentionally ignored in center mode because one water may belong to several cages.
+   - Frame changes clear only the transient selection, rebuild current-frame pick points, and retain the chosen pick mode.
+
+4. Reliable VMD guest picking and label state
+   - Writes complete guest-molecule atom groups to the sparse membership TSV.
+   - `sqq pick guest` listens to `vmd_pick_event`; clicking any guest atom highlights the complete guest and every cage containing it.
+   - Zero, one, and multiple cage memberships are handled explicitly; overlapping memberships are not reduced to an arbitrary first cage.
+   - `sqq pick center` shows center markers without text by default. Text is controlled only by `sqq show label [on|off]`; the historical `lable` spelling remains a compatibility alias.
+   - Internal frame redraws are silent. Only explicit `show`, `color`, `pick`, `clear`, and actual graph-mode changes print VMD status lines.
+
+5. Release synchronization and validation
+   - Synchronizes Python package, configuration schema, CMake project, native core, and wheel-test metadata at `0.3.10` with release date Jul 30, 2026.
+   - Adds external regression coverage for LAMMPS physical `dt`, warning visibility, terminal stream/order behavior, TSV center/guest records, center/guest callbacks, multi-membership handling, frame changes, and repeated Tcl sourcing.
+
+### Compatibility and Result Impact
+
+- Graph, ring, half/quasi, cage, occupancy, hydrate phase/domain/boundary, order-parameter, and ice algorithms are unchanged.
+- `sqq-cage.membership.tsv` gains explicit cage-center and guest-group records/columns; keep it together with the matching 0.3.10 Tcl script.
+- Existing `sqq show`, `sqq color`, and output-type names are unchanged.
+- Terminal formatting and stream ownership change, but resolved configuration, scientific tables, and structure membership do not.
+- Cross-frame cage tracking and persistent cage IDs remain deferred; Analyze identifiers are still frame-local.
+
+Status: these 0.3.10 changes are local and uncommitted. No commit, tag, push, wheel publication, or PyPI publication has been performed.
+
 ## Version 0.3.9
 
 ### Short Summary

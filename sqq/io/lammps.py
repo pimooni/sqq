@@ -429,6 +429,7 @@ def open_lammps_universe(
             str(path),
             format="LAMMPSDUMP",
             lammps_coordinate_convention=settings.coordinate_convention,
+            dt=settings.timestep * settings.time_to_ps,
             **common,
         )
     elif suffix in LAMMPS_DCD_SUFFIXES:

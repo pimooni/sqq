@@ -12,7 +12,7 @@ from pathlib import Path
 import re
 import shutil
 import socket
-import sys
+import warnings
 from tempfile import mkdtemp
 from time import sleep
 from typing import Any, BinaryIO, Iterable, Iterator
@@ -157,6 +157,8 @@ def write_sqq_cage_fragment(
     memberships = water_cage_memberships(result)
     output_atoms = visualization_atoms(result)
     guest_memberships = guest_cage_memberships(result)
+    cage_centers = _cage_center_manifest_records(result)
+    guest_groups = _guest_group_manifest_records(result, output_atoms)
     graph_display = _frame_graph_display(result, requested_graph_mode)
     block = annotated_gro_block(
         result,
@@ -180,6 +182,8 @@ def write_sqq_cage_fragment(
             None if requested_graph_mode is None else str(requested_graph_mode)
         ),
         "graph_mode_display": graph_display,
+        "cage_centers": cage_centers,
+        "guest_groups": guest_groups,
         "gro_file": gro_path.name,
     }
     _atomic_write_text(gro_path, block, encoding="ascii")
@@ -402,9 +406,10 @@ def _best_effort_unlink(path: Path, description: str) -> bool:
         path.unlink(missing_ok=True)
         return True
     except OSError as exc:
-        print(
-            f"Warning: SQQ could not remove {description} {path}: {exc}",
-            file=sys.stderr,
+        warnings.warn(
+            f"SQQ could not remove {description} {path}: {exc}",
+            UserWarning,
+            stacklevel=2,
         )
         return False
 
@@ -439,10 +444,11 @@ def _resilient_rmtree(
             sleep(initial_delay * (2**attempt))
     if warn:
         detail = f": {last_error}" if last_error is not None else ""
-        print(
-            f"Warning: SQQ could not remove {description} "
+        warnings.warn(
+            f"SQQ could not remove {description} "
             f"{path}{detail}. Finalized outputs, if present, remain valid.",
-            file=sys.stderr,
+            UserWarning,
+            stacklevel=2,
         )
     return False
 
@@ -525,6 +531,89 @@ def guest_cage_memberships(result: FrameResult) -> dict[int, tuple[CageMembershi
                 )
             memberships[index] = tuple(items)
     return memberships
+
+
+def _cage_center_manifest_records(result: FrameResult) -> list[dict[str, Any]]:
+    """Return wrapped PBC-aware cage centers in VMD's angstrom unit."""
+    cages, memberships = _cage_membership_records(result)
+    box = None
+    if result.frame.box is not None:
+        values = np.asarray(result.frame.box, dtype=float).reshape(-1)
+        if len(values) >= 3 and np.all(np.isfinite(values[:3])) and np.all(
+            values[:3] > 0.0
+        ):
+            box = values[:3]
+    output: list[dict[str, Any]] = []
+    for cage in cages:
+        center_nm = np.asarray(cage.center, dtype=float)
+        if center_nm.shape != (3,) or np.any(~np.isfinite(center_nm)):
+            raise ValueError(
+                f"Cage {cage.object_id} has an invalid center for SQQ rendering."
+            )
+        if box is not None:
+            center_nm = np.mod(center_nm, box)
+        membership = memberships[cage.object_id]
+        output.append(
+            {
+                "cage_id": membership.cage_id,
+                "cage_type": membership.cage_type,
+                "phase": membership.class_code,
+                "domain": membership.domain_id,
+                "cluster": membership.cluster_id,
+                "center_angstrom": [
+                    float(value) * 10.0 for value in center_nm
+                ],
+            }
+        )
+    return output
+
+
+def _guest_group_manifest_records(
+    result: FrameResult,
+    output_atoms: list[Atom],
+) -> list[dict[str, Any]]:
+    """Map every complete guest molecule to compact-render atom indexes."""
+    output_index = {
+        int(atom.index): index for index, atom in enumerate(output_atoms)
+    }
+    records: list[dict[str, Any]] = []
+    seen_ids: set[str] = set()
+    claimed_atoms: dict[int, str] = {}
+    for guest in result.guests:
+        identifier = _membership_token(guest_id(guest))
+        if identifier in seen_ids:
+            raise ValueError(
+                f"Duplicate guest id in SQQ cage output: {identifier}"
+            )
+        seen_ids.add(identifier)
+        indexes: list[int] = []
+        for source_index in guest.atoms:
+            atom_index = int(source_index)
+            if atom_index not in output_index:
+                raise ValueError(
+                    f"Guest {identifier} atom {atom_index} is absent from the "
+                    "SQQ visualization topology."
+                )
+            render_index = output_index[atom_index]
+            previous = claimed_atoms.setdefault(render_index, identifier)
+            if previous != identifier:
+                raise ValueError(
+                    f"SQQ visualization atom {render_index} belongs to both "
+                    f"guests {previous} and {identifier}."
+                )
+            indexes.append(render_index)
+        if not indexes:
+            raise ValueError(
+                f"Guest {identifier} has no atoms for SQQ visualization."
+            )
+        records.append(
+            {
+                "guest_id": identifier,
+                "resname": _membership_token(guest.resname),
+                "atom_indices": sorted(set(indexes)),
+            }
+        )
+    return records
 
 
 def visualization_atoms(result: FrameResult) -> list[Atom]:
@@ -1042,7 +1131,8 @@ def _write_membership_tsv(
     temporary = path.with_name(f".{path.name}.tmp-{os.getpid()}")
     header = (
         "record\trender_frame\tsource_frame\ttime_ps\tgraph_mode\tfamily\t"
-        "cage_id\tcage_type\tphase\tdomain\tcluster\tatom_indices\n"
+        "cage_id\tcage_type\tphase\tdomain\tcluster\tatom_indices\t"
+        "center_x_angstrom\tcenter_y_angstrom\tcenter_z_angstrom\n"
     )
     try:
         with temporary.open("w", encoding="ascii", newline="\n") as output:
@@ -1052,9 +1142,119 @@ def _write_membership_tsv(
                 time_text = "-" if time_value is None else f"{float(time_value):.9g}"
                 graph_text = _tsv_field(record.get("graph_mode_display", "unknown"))
                 output.write(
-                    f"F\t{render_index}\t{int(record['frame_index'])}\t"
-                    f"{time_text}\t{graph_text}\t-\t-\t-\t-\t-\t-\t-\n"
+                    "\t".join(
+                        (
+                            "F",
+                            str(render_index),
+                            str(int(record["frame_index"])),
+                            time_text,
+                            graph_text,
+                            "-",
+                            "-",
+                            "-",
+                            "-",
+                            "-",
+                            "-",
+                            "-",
+                            "-",
+                            "-",
+                            "-",
+                        )
+                    )
+                    + "\n"
                 )
+                for center in sorted(
+                    record.get("cage_centers", ()),
+                    key=lambda item: (
+                        str(item.get("cage_type", "")),
+                        str(item.get("cage_id", "")),
+                    ),
+                ):
+                    required = {
+                        "cage_id",
+                        "cage_type",
+                        "phase",
+                        "domain",
+                        "cluster",
+                        "center_angstrom",
+                    }
+                    missing = sorted(required.difference(center))
+                    if missing:
+                        raise ValueError(
+                            "Invalid SQQ cage-center metadata; missing "
+                            + ", ".join(missing)
+                            + "."
+                        )
+                    xyz = np.asarray(center["center_angstrom"], dtype=float)
+                    if xyz.shape != (3,) or np.any(~np.isfinite(xyz)):
+                        raise ValueError(
+                            "Invalid SQQ cage center in fragment metadata."
+                        )
+                    output.write(
+                        "\t".join(
+                            (
+                                "C",
+                                str(render_index),
+                                "-",
+                                "-",
+                                "-",
+                                "cage",
+                                _membership_token(center["cage_id"]),
+                                _membership_token(center["cage_type"]),
+                                _membership_token(center["phase"]),
+                                _membership_token(center["domain"]),
+                                _membership_token(center["cluster"]),
+                                "-",
+                                *(f"{float(value):.17g}" for value in xyz),
+                            )
+                        )
+                        + "\n"
+                    )
+                for guest in sorted(
+                    record.get("guest_groups", ()),
+                    key=lambda item: str(item.get("guest_id", "")),
+                ):
+                    required = {"guest_id", "resname", "atom_indices"}
+                    missing = sorted(required.difference(guest))
+                    if missing:
+                        raise ValueError(
+                            "Invalid SQQ guest-group metadata; missing "
+                            + ", ".join(missing)
+                            + "."
+                        )
+                    atom_indexes = sorted(
+                        {int(value) for value in guest["atom_indices"]}
+                    )
+                    if (
+                        not atom_indexes
+                        or atom_indexes[0] < 0
+                        or atom_indexes[-1] >= int(record["atom_count"])
+                    ):
+                        raise ValueError(
+                            "Invalid SQQ guest atom indexes in fragment metadata."
+                        )
+                    output.write(
+                        "\t".join(
+                            (
+                                "G",
+                                str(render_index),
+                                "-",
+                                "-",
+                                "-",
+                                "guest",
+                                _membership_token(guest["guest_id"]),
+                                _membership_token(guest["resname"]),
+                                "-",
+                                "-",
+                                "-",
+                                ",".join(str(value) for value in atom_indexes),
+                                "-",
+                                "-",
+                                "-",
+                            )
+                        )
+                        + "\n"
+                    )
                 groups = _fragment_membership_groups(record)
                 for (family, membership), atom_indexes in sorted(groups.items()):
                     cage_id, cage_type, phase, domain_id, cluster_id = (
@@ -1062,8 +1262,26 @@ def _write_membership_tsv(
                     )
                     atoms = ",".join(str(value) for value in sorted(set(atom_indexes)))
                     output.write(
-                        f"M\t{render_index}\t-\t-\t-\t{family}\t{cage_id}\t"
-                        f"{cage_type}\t{phase}\t{domain_id}\t{cluster_id}\t{atoms}\n"
+                        "\t".join(
+                            (
+                                "M",
+                                str(render_index),
+                                "-",
+                                "-",
+                                "-",
+                                family,
+                                cage_id,
+                                cage_type,
+                                phase,
+                                domain_id,
+                                cluster_id,
+                                atoms,
+                                "-",
+                                "-",
+                                "-",
+                            )
+                        )
+                        + "\n"
                     )
         os.replace(temporary, path)
     finally:
@@ -1118,9 +1336,13 @@ _VMD_SCRIPT = r'''# SQQ annotated cage and guest renderer for VMD.
 namespace eval ::SQQ {
     catch {trace remove variable ::vmd_frame write ::SQQ::frame_changed}
     catch {trace remove variable ::vmd_pick_atom write ::SQQ::pick_atom_changed}
+    catch {trace remove variable ::vmd_pick_event write ::SQQ::pick_atom_event}
+    catch {trace remove variable ::vmd_pick_graphics write ::SQQ::pick_graphics_changed}
     if {[info exists frame_after_id] && $frame_after_id ne ""} {
         catch {after cancel $frame_after_id}
     }
+    catch {::SQQ::clear_graphics}
+    catch {::SQQ::clear_representations}
     variable molid -1
     variable gro_path ""
     variable xtc_path ""
@@ -1133,7 +1355,8 @@ namespace eval ::SQQ {
     variable displayed_graph_mode "__unset__"
     variable label_visible 0
     variable pick_mode off
-    variable selected_target {}
+    variable selected_cages {}
+    variable selected_guest ""
     variable graphics_ids {}
     variable group_keys
     variable group_atoms
@@ -1142,7 +1365,13 @@ namespace eval ::SQQ {
     variable known_objects
     variable object_aliases
     variable cage_types
-    foreach name {group_keys group_atoms graph_mode color_overrides known_objects object_aliases cage_types active_targets} {
+    variable cage_centers
+    variable graphics_targets
+    variable guest_keys
+    variable guest_atoms
+    variable guest_types
+    variable atom_guest
+    foreach name {group_keys group_atoms graph_mode color_overrides known_objects object_aliases cage_types cage_centers graphics_targets guest_keys guest_atoms guest_types atom_guest active_targets} {
         catch {array unset $name}
         array set $name {}
     }
@@ -1190,6 +1419,43 @@ proc ::SQQ::register_cage {frame cage_type object_id} {
 
 proc ::SQQ::register_guest_cage {frame cage_type object_id} {
     ::SQQ::register_cage_object $frame guest $cage_type $object_id
+}
+
+proc ::SQQ::set_cage_center {frame cage_id cage_type center} {
+    variable cage_centers
+    set object_id [::SQQ::cage_object_id $cage_type $cage_id]
+    ::SQQ::register_cage $frame $cage_type $object_id
+    set key "$frame,$object_id"
+    if {[info exists cage_centers($key)] && $cage_centers($key) ne $center} {
+        error "Conflicting SQQ centers for cage $object_id in frame $frame"
+    }
+    set cage_centers($key) $center
+}
+
+proc ::SQQ::add_guest_group {frame identifier resname indexes} {
+    variable atom_guest
+    variable guest_atoms
+    variable guest_keys
+    variable guest_types
+    set key "$frame,$identifier"
+    if {[info exists guest_atoms($key)]} {
+        error "Duplicate SQQ guest metadata for $identifier in frame $frame"
+    }
+    set indexes [lsort -integer -unique $indexes]
+    if {[llength $indexes] == 0} {
+        error "Empty SQQ guest metadata for $identifier in frame $frame"
+    }
+    set guest_atoms($key) $indexes
+    set guest_types($key) $resname
+    lappend guest_keys($frame) $identifier
+    foreach atom_index $indexes {
+        set atom_key "$frame,$atom_index"
+        if {[info exists atom_guest($atom_key)] &&
+            $atom_guest($atom_key) ne $identifier} {
+            error "SQQ atom $atom_index belongs to multiple guests in frame $frame"
+        }
+        set atom_guest($atom_key) $identifier
+    }
 }
 
 proc ::SQQ::deduplicate_frame_memberships {frame} {
@@ -1268,13 +1534,18 @@ proc ::SQQ::read_membership_tsv {path} {
     variable known_objects
     variable object_aliases
     variable cage_types
-    foreach name {group_keys group_atoms graph_mode known_objects object_aliases cage_types} {
+    variable cage_centers
+    variable guest_keys
+    variable guest_atoms
+    variable guest_types
+    variable atom_guest
+    foreach name {group_keys group_atoms graph_mode known_objects object_aliases cage_types cage_centers guest_keys guest_atoms guest_types atom_guest} {
         array unset $name
         array set $name {}
     }
     set handle [open $path r]
     fconfigure $handle -encoding ascii -translation auto
-    if {[gets $handle header] < 0 || $header ne "record\trender_frame\tsource_frame\ttime_ps\tgraph_mode\tfamily\tcage_id\tcage_type\tphase\tdomain\tcluster\tatom_indices"} {
+    if {[gets $handle header] < 0 || $header ne "record\trender_frame\tsource_frame\ttime_ps\tgraph_mode\tfamily\tcage_id\tcage_type\tphase\tdomain\tcluster\tatom_indices\tcenter_x_angstrom\tcenter_y_angstrom\tcenter_z_angstrom"} {
         close $handle
         error "Invalid SQQ membership TSV header: $path"
     }
@@ -1285,11 +1556,11 @@ proc ::SQQ::read_membership_tsv {path} {
         incr line_number
         if {$line eq ""} { continue }
         set fields [split $line "\t"]
-        if {[llength $fields] != 12} {
+        if {[llength $fields] != 15} {
             close $handle
             error "Invalid SQQ membership TSV row $line_number"
         }
-        lassign $fields record frame source_frame time_ps graph_value family cage_id cage_type phase domain_id cluster_id atom_indexes
+        lassign $fields record frame source_frame time_ps graph_value family cage_id cage_type phase domain_id cluster_id atom_indexes center_x center_y center_z
         if {![string is integer -strict $frame] || $frame < 0} {
             close $handle
             error "Invalid SQQ render frame at TSV row $line_number"
@@ -1302,6 +1573,43 @@ proc ::SQQ::read_membership_tsv {path} {
             set seen_frames($frame) 1
             set graph_mode($frame) $graph_value
             if {$frame + 1 > $frame_count} { set frame_count [expr {$frame + 1}] }
+        } elseif {$record eq "C"} {
+            if {$family ne "cage" || $atom_indexes ne "-"} {
+                close $handle
+                error "Invalid SQQ cage-center record at TSV row $line_number"
+            }
+            foreach value [list $center_x $center_y $center_z] {
+                if {![string is double -strict $value]} {
+                    close $handle
+                    error "Invalid SQQ cage center at TSV row $line_number"
+                }
+            }
+            if {[catch {
+                ::SQQ::set_cage_center $frame $cage_id $cage_type \
+                    [list $center_x $center_y $center_z]
+            } message]} {
+                close $handle
+                error $message
+            }
+        } elseif {$record eq "G"} {
+            if {$family ne "guest" || $atom_indexes in {- ""}} {
+                close $handle
+                error "Invalid SQQ guest record at TSV row $line_number"
+            }
+            set indexes {}
+            foreach atom_index [split $atom_indexes ,] {
+                if {![string is integer -strict $atom_index] || $atom_index < 0} {
+                    close $handle
+                    error "Invalid SQQ guest atom index at TSV row $line_number"
+                }
+                lappend indexes $atom_index
+            }
+            if {[catch {
+                ::SQQ::add_guest_group $frame $cage_id $cage_type $indexes
+            } message]} {
+                close $handle
+                error $message
+            }
         } elseif {$record eq "M"} {
             if {$family ni {cage guest}} {
                 close $handle
@@ -1705,7 +2013,7 @@ proc ::SQQ::set_show {values args} {
         lassign $group family targets
         ::SQQ::merge_show_group $family $targets
     }
-    ::SQQ::render_current
+    ::SQQ::render_current 1
 }
 
 proc ::SQQ::reset_show {{announce 0}} {
@@ -1715,7 +2023,8 @@ proc ::SQQ::reset_show {{announce 0}} {
     variable custom_show_active
     variable label_visible
     variable pick_mode
-    variable selected_target
+    variable selected_cages
+    variable selected_guest
     set active_families {cage}
     array unset active_targets
     array set active_targets {}
@@ -1725,7 +2034,8 @@ proc ::SQQ::reset_show {{announce 0}} {
     set custom_show_active 0
     set label_visible 0
     set pick_mode off
-    set selected_target {}
+    set selected_cages {}
+    set selected_guest ""
     ::SQQ::render_current
     if {$announce} { puts "SQQ clear: restored source-time cage view" }
 }
@@ -1748,18 +2058,23 @@ proc ::SQQ::set_label {values} {
 
 proc ::SQQ::set_pick_mode {value} {
     variable pick_mode
-    variable selected_target
+    variable selected_cages
+    variable selected_guest
     set mode [string tolower [string trim $value]]
     if {$mode ni {center guest off}} {
         error "Usage: sqq pick center|guest|off"
     }
     set pick_mode $mode
-    set selected_target {}
+    set selected_cages {}
+    set selected_guest ""
+    if {$mode ne "off"} {
+        catch {mouse mode 4 0}
+    }
     ::SQQ::render_current
     if {$mode eq "off"} {
         puts "SQQ pick: off; restored opaque objects"
     } else {
-        puts "SQQ pick: $mode; objects are transparent until one is selected"
+        puts "SQQ pick: $mode; mouse query mode enabled; objects are transparent until selected"
     }
 }
 
@@ -1901,6 +2216,7 @@ proc ::SQQ::add_guest_representation {indexes color_id {material Opaque}} {
 }
 
 proc ::SQQ::clear_graphics {} {
+    variable graphics_targets
     variable graphics_ids
     variable molid
     if {$molid >= 0} {
@@ -1909,120 +2225,159 @@ proc ::SQQ::clear_graphics {} {
         }
     }
     set graphics_ids {}
+    array unset graphics_targets
+    array set graphics_targets {}
 }
 
-proc ::SQQ::object_center {indexes frame} {
-    variable molid
-    if {[llength $indexes] == 0} { return {} }
-    if {[catch {set selection [atomselect $molid "index [join $indexes { }]" frame $frame]}]} {
-        return {}
-    }
-    if {[catch {set coordinates [$selection get {x y z}]}]} {
-        catch {$selection delete}
-        return {}
-    }
-    catch {$selection delete}
-    if {[llength $coordinates] == 0} { return {} }
-    set x 0.0
-    set y 0.0
-    set z 0.0
-    foreach coordinate $coordinates {
-        lassign $coordinate cx cy cz
-        set x [expr {$x + $cx}]
-        set y [expr {$y + $cy}]
-        set z [expr {$z + $cz}]
-    }
-    set count [expr {double([llength $coordinates])}]
-    return [list [expr {$x / $count}] [expr {$y / $count}] [expr {$z / $count}]]
-}
-
-proc ::SQQ::render_labels {frame} {
+proc ::SQQ::render_overlays {frame} {
+    variable cage_centers
     variable graphics_ids
-    variable group_atoms
-    variable group_keys
+    variable graphics_targets
     variable label_visible
     variable molid
     variable pick_mode
     if {!$label_visible && $pick_mode ne "center"} { return }
-    set group_key "$frame,cage-id"
-    if {![info exists group_keys($group_key)]} { return }
-    foreach object_id [lsort -dictionary -unique $group_keys($group_key)] {
-        set atom_key "$frame,cage-id,$object_id"
-        if {![info exists group_atoms($atom_key)]} { continue }
-        set center [::SQQ::object_center $group_atoms($atom_key) $frame]
+    set prefix "$frame,"
+    foreach key [lsort -dictionary [array names cage_centers "${frame},*"]] {
+        set object_id [string range $key [string length $prefix] end]
+        set center $cage_centers($key)
         if {[llength $center] != 3} { continue }
         if {$pick_mode eq "center"} {
             catch {graphics $molid color yellow}
             if {![catch {graphics $molid sphere $center radius 0.35 resolution 10} graphics_id]} {
                 lappend graphics_ids $graphics_id
+                set graphics_targets($graphics_id) $object_id
+            }
+            if {![catch {graphics $molid pickpoint $center} graphics_id]} {
+                lappend graphics_ids $graphics_id
+                set graphics_targets($graphics_id) $object_id
             }
         }
-        catch {graphics $molid color black}
-        if {![catch {graphics $molid text $center $object_id size 1.0 thickness 1.0} graphics_id]} {
-            lappend graphics_ids $graphics_id
+        if {$label_visible} {
+            catch {graphics $molid color black}
+            if {![catch {graphics $molid text $center $object_id size 1.0 thickness 1.0} graphics_id]} {
+                lappend graphics_ids $graphics_id
+            }
         }
     }
 }
 
-proc ::SQQ::find_pick_target {frame atom_index mode} {
+proc ::SQQ::guest_cages_for_atom {frame atom_index} {
     variable group_atoms
     variable group_keys
-    set source [expr {$mode eq "guest" ? "guest-id" : "cage-id"}]
-    set group_key "$frame,$source"
+    set group_key "$frame,guest-id"
     if {![info exists group_keys($group_key)]} { return {} }
     set candidates {}
     foreach object_id $group_keys($group_key) {
-        set atom_key "$frame,$source,$object_id"
+        set atom_key "$frame,guest-id,$object_id"
         if {[info exists group_atoms($atom_key)] &&
             [lsearch -integer -exact $group_atoms($atom_key) $atom_index] >= 0} {
             lappend candidates $object_id
         }
     }
-    set candidates [lsort -dictionary -unique $candidates]
-    if {[llength $candidates] == 0} { return {} }
-    if {[llength $candidates] > 1} {
-        puts "SQQ pick: atom $atom_index matches [join $candidates { }]; selected [lindex $candidates 0]"
-    }
-    return [list cage-id [lindex $candidates 0]]
+    return [lsort -dictionary -unique $candidates]
 }
 
-proc ::SQQ::pick_atom_changed {name1 name2 operation} {
+proc ::SQQ::pick_atom_event {name1 name2 operation} {
+    variable atom_guest
     variable molid
     variable pick_mode
-    variable selected_target
-    if {$pick_mode eq "off" || $molid < 0} { return }
+    variable selected_cages
+    variable selected_guest
+    if {$pick_mode ne "guest" || $molid < 0} { return }
     if {![info exists ::vmd_pick_atom] ||
         ![string is integer -strict $::vmd_pick_atom] || $::vmd_pick_atom < 0} {
         return
     }
     if {[info exists ::vmd_pick_mol] && $::vmd_pick_mol != $molid} { return }
     set frame [molinfo $molid get frame]
-    set target [::SQQ::find_pick_target $frame $::vmd_pick_atom $pick_mode]
-    if {[llength $target] != 2} {
-        puts "SQQ pick: atom $::vmd_pick_atom has no $pick_mode target in frame $frame"
+    set atom_key "$frame,$::vmd_pick_atom"
+    if {![info exists atom_guest($atom_key)]} { return }
+    set identifier $atom_guest($atom_key)
+    set cages [::SQQ::guest_cages_for_atom $frame $::vmd_pick_atom]
+    if {[llength $cages] == 0} {
+        set selected_guest ""
+        set selected_cages {}
+        ::SQQ::render_current
+        puts "SQQ pick guest: $identifier has no cage membership (frame $frame)"
         return
     }
-    set selected_target $target
+    set selected_guest $identifier
+    set selected_cages $cages
     ::SQQ::render_current
-    puts "SQQ selected: [lindex $selected_target 1] (frame $frame)"
+    puts "SQQ selected guest: $selected_guest; cage memberships: [join $selected_cages { }] (frame $frame)"
+}
+
+proc ::SQQ::pick_graphics_changed {name1 name2 operation} {
+    variable graphics_targets
+    variable molid
+    variable pick_mode
+    variable selected_cages
+    variable selected_guest
+    if {$pick_mode ne "center" || $molid < 0 ||
+        ![info exists ::vmd_pick_graphics]} {
+        return
+    }
+    set values $::vmd_pick_graphics
+    if {[llength $values] != 4} { return }
+    lassign $values picked_molid graphics_id button shift_state
+    if {![string is integer -strict $picked_molid] ||
+        $picked_molid != $molid ||
+        ![string is integer -strict $graphics_id] ||
+        ![info exists graphics_targets($graphics_id)]} {
+        return
+    }
+    set frame [molinfo $molid get frame]
+    set selected_cages [list $graphics_targets($graphics_id)]
+    set selected_guest ""
+    ::SQQ::render_current
+    puts "SQQ selected center: [lindex $selected_cages 0] (frame $frame)"
+}
+
+proc ::SQQ::render_guest_pick_context {frame} {
+    variable guest_atoms
+    variable guest_keys
+    variable guest_types
+    if {![info exists guest_keys($frame)]} { return }
+    array set color_atoms {}
+    foreach identifier [lsort -dictionary -unique $guest_keys($frame)] {
+        set key "$frame,$identifier"
+        if {![info exists guest_atoms($key)] ||
+            ![info exists guest_types($key)]} {
+            continue
+        }
+        set color_id [::SQQ::color_id guest $guest_types($key)]
+        foreach atom_index $guest_atoms($key) {
+            lappend color_atoms($color_id) $atom_index
+        }
+    }
+    foreach color_id [lsort -integer [array names color_atoms]] {
+        ::SQQ::add_guest_representation \
+            [lsort -integer -unique $color_atoms($color_id)] \
+            $color_id Transparent
+    }
 }
 
 proc ::SQQ::render_selected {frame} {
     variable group_atoms
+    variable guest_atoms
+    variable guest_types
     variable pick_mode
-    variable selected_target
-    if {$pick_mode eq "off" || [llength $selected_target] != 2} { return }
-    lassign $selected_target source key
-    set atom_key "$frame,cage-id,$key"
-    if {![info exists group_atoms($atom_key)]} { return }
-    lassign [::SQQ::effective_color $frame cage-id $key] color_id priority
-    set indexes [lsort -integer -unique $group_atoms($atom_key)]
-    ::SQQ::add_dynamic_bonds_representation $indexes $color_id 0.250 Opaque
-    if {$pick_mode eq "guest"} {
-        set guest_key "$frame,guest-id,$key"
-        if {[info exists group_atoms($guest_key)]} {
-            set guest_indexes [lsort -integer -unique $group_atoms($guest_key)]
-            ::SQQ::add_guest_representation $guest_indexes $color_id Opaque
+    variable selected_cages
+    variable selected_guest
+    if {$pick_mode eq "off"} { return }
+    foreach object_id $selected_cages {
+        set atom_key "$frame,cage-id,$object_id"
+        if {![info exists group_atoms($atom_key)]} { continue }
+        lassign [::SQQ::effective_color $frame cage-id $object_id] color_id priority
+        set indexes [lsort -integer -unique $group_atoms($atom_key)]
+        ::SQQ::add_dynamic_bonds_representation $indexes $color_id 0.250 Opaque
+    }
+    if {$pick_mode eq "guest" && $selected_guest ne ""} {
+        set key "$frame,$selected_guest"
+        if {[info exists guest_atoms($key)] && [info exists guest_types($key)]} {
+            set color_id [::SQQ::color_id guest $guest_types($key)]
+            ::SQQ::add_guest_representation $guest_atoms($key) $color_id Opaque
         }
     }
 }
@@ -2108,7 +2463,7 @@ proc ::SQQ::render_family {frame family targets} {
     return $representation_count
 }
 
-proc ::SQQ::render_current {} {
+proc ::SQQ::render_current {{announce 0}} {
     ::SQQ::cancel_pending_render
     variable molid
     variable active_families
@@ -2120,21 +2475,24 @@ proc ::SQQ::render_current {} {
     ::SQQ::clear_representations
     ::SQQ::clear_graphics
     foreach family [::SQQ::ordered_active_families] {
+        if {$pick_mode eq "guest" && $family eq "guest"} { continue }
         set targets $active_targets($family)
         set representation_count [::SQQ::render_family $frame $family $targets]
         set labels {}
         foreach target $targets { lappend labels [::SQQ::target_label $family $target] }
-        if {$representation_count == 0} {
-            puts "SQQ show $family: no memberships for [join $labels { }] in frame $frame"
-        } else {
-            puts "SQQ show $family: [join $labels { }] (frame $frame)"
+        if {$announce} {
+            if {$representation_count == 0} {
+                puts "SQQ show $family: no memberships for [join $labels { }] in frame $frame"
+            } else {
+                puts "SQQ show $family: [join $labels { }] (frame $frame)"
+            }
         }
     }
-    if {$pick_mode eq "guest" && "guest" ni $active_families} {
-        ::SQQ::render_family $frame guest [list [list guest *]]
+    if {$pick_mode eq "guest"} {
+        ::SQQ::render_guest_pick_context $frame
     }
     ::SQQ::render_selected $frame
-    ::SQQ::render_labels $frame
+    ::SQQ::render_overlays $frame
     display update
 }
 
@@ -2155,9 +2513,11 @@ proc ::SQQ::render_pending {} {
 proc ::SQQ::frame_changed {name1 name2 operation} {
     variable molid
     variable frame_after_id
-    variable selected_target
+    variable selected_cages
+    variable selected_guest
     if {$name2 ne "$molid"} { return }
-    set selected_target {}
+    set selected_cages {}
+    set selected_guest ""
     if {$frame_after_id ne ""} { catch {after cancel $frame_after_id} }
     set frame_after_id [after idle [list ::SQQ::render_pending]]
 }
@@ -2201,7 +2561,9 @@ proc ::SQQ::help {} {
     puts "  domain    Exact domain ID"
     puts ""
     puts "Interaction:"
-    puts "  Labels are off by default; sqq show label toggles their state."
+    puts "  Labels are independent of pick mode and are off by default."
+    puts "  sqq pick center shows yellow pickpoints without enabling labels."
+    puts "  Pick commands enable VMD mouse query mode; pick off does not restore the prior mouse mode."
     puts "  Pick mode makes objects transparent; the selected cage is opaque."
     puts "  sqq clear restores the source-time cage-all opaque view."
     puts ""
@@ -2273,8 +2635,10 @@ if {$loaded_frames != $parsed_frames} {
 display projection Orthographic
 catch {trace remove variable ::vmd_frame write ::SQQ::frame_changed}
 trace add variable ::vmd_frame write ::SQQ::frame_changed
-catch {trace remove variable ::vmd_pick_atom write ::SQQ::pick_atom_changed}
-trace add variable ::vmd_pick_atom write ::SQQ::pick_atom_changed
+catch {trace remove variable ::vmd_pick_event write ::SQQ::pick_atom_event}
+trace add variable ::vmd_pick_event write ::SQQ::pick_atom_event
+catch {trace remove variable ::vmd_pick_graphics write ::SQQ::pick_graphics_changed}
+trace add variable ::vmd_pick_graphics write ::SQQ::pick_graphics_changed
 ::SQQ::startup_help
 ::SQQ::reset_show
 catch {color Display Background white}

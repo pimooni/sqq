@@ -47,7 +47,7 @@ else:  # pragma: no cover - used only by the JSON source-tree fallback.
 
 
 DEFAULT_MODE = "py"
-CONFIG_SCHEMA_VERSION = "0.3.9"
+CONFIG_SCHEMA_VERSION = "0.3.10"
 DEFAULT_ORDER_PARAMETERS = ("f3", "f4")
 CPP_MODE = "cpp"
 CPP_MODES = frozenset({"99", CPP_MODE})

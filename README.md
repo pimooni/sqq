@@ -2,7 +2,7 @@
 
 **SQQ: Python Joint Toolkit for Water-Shell Topology Analysis.**
 
-Current release: **0.3.9**
+Current release: **0.3.10**
 
 SQQ provides the complete SQQ-Py water-shell topology workflow and the focused SQQ-CPP cage engine. Select the Python workflow with `-e py` or the C++17 graph/ring/cage/occupancy/F3/F4 workflow with `-e cpp`. Algorithms are documented in `docs/design.md` and release notes in `docs/update.md`.
 
@@ -21,16 +21,15 @@ Names are listed alphabetically by family name.
 - Fengyi Mi @ Southwest University of Science and Technology
 - Zhengcai Zhang @ Laoshan Laboratory
 
-## Changed in 0.3.9
+## Changed in 0.3.10
 
-- Package and native-core versions are synchronized at `0.3.9`, released Jul 30, 2026.
-- Public YAML collection keys are singular. Generic configs use engine-aware `half_cage.enabled: auto` and `quasi_cage.enabled: auto`; SQQ-Py resolves them on, while SQQ-CPP resolves them off. Legacy explicit Python-only settings are disabled with a concise recorded adjustment under C++ rather than aborting cage analysis.
-- `sqq init` now writes `sqq_config.yaml` by default. A run never rewrites that input file; final effective values are recorded separately as `sqq_config_resolved.yaml`.
-- Public engine selection is `-e` / `--engine`. The retired `-m` / `--mode` spellings stop with a migration message, and the explicit pair-map option is singular `--pair`; retired `--pairs` likewise reports the replacement.
-- Molecules are classified as water, guest, additive, environment, or other. Unrecognized LAMMPS components such as walls remain available as context but are excluded from the water graph and cage occupancy unless mapped explicitly.
-- Visualization output uses one isolated fragment workspace per Analyze run. Concurrent use of the same output root is rejected, transient cleanup failures are retried, and a successfully finalized render bundle remains valid when only temporary-directory removal fails.
-- The compact visualization bundle lives under `sqq_render/`: `sqq-cage.gro` stores the first-frame topology, `sqq-cage.xtc` stores all selected coordinates, `sqq-cage.membership.tsv` stores sparse per-frame membership/time metadata, and `sqq-cage.vmd.tcl` loads the package in VMD.
-- Cross-frame cage tracking is deferred to a later release and is not shipped in 0.3.9.
+- Package and native-core versions are synchronized at `0.3.10`, released Jul 30, 2026.
+- LAMMPS dump readers now receive the native physical frame interval from `timestep × unit conversion`. This removes MDAnalysis's synthetic `1 ps` warning and keeps frame-time metadata correct for `real`, `metal`, and `nano` units.
+- Analyze prints the SQQ banner first and keeps the run header, progress, diagnostics, and final summary in a stable order. Interactive terminals use one in-place panel; redirected or captured output uses plain static progress without duplicate final bars or stderr progress noise.
+- VMD center picking now uses each cage's PBC-aware center and a real graphics pick point. `sqq pick center` responds only to yellow cage centers; clicking a water atom does nothing.
+- `sqq pick guest` now uses VMD's atom-pick event, selects the complete guest molecule, and highlights every cage containing that guest. Multiple cage memberships are retained and reported instead of silently choosing one.
+- Cage-center markers and labels are independent: center markers appear in center-pick mode, while text remains off unless `sqq show label on` is requested. Internal redraws and frame changes no longer repeat command-status lines.
+- These changes affect input timing metadata, terminal presentation, and VMD interaction only; graph, ring, cage, phase, occupancy, and order-parameter definitions are unchanged. Cross-frame cage tracking remains deferred and is not shipped in 0.3.10.
 
 ## Install
 
@@ -119,7 +118,7 @@ GRO and MDAnalysis trajectory coordinates are interpreted in nm. A GRO input may
 
 GRO atom counts and the mandatory box line are validated. A three-value positive box is orthorhombic; an all-zero box is treated as non-periodic. Nine-value GRO boxes with nonzero tilt terms and trajectory frames with non-90-degree angles are rejected because triclinic minimum-image calculations are not implemented. GRO molecules are formed from contiguous residue blocks in source order, preventing wrapped or repeated residue IDs from merging distinct molecules. LAMMPS normally uses DATA molecule IDs; automatic inference can rebuild them from unambiguous Bonds components, and dump atom rows may be interleaved.
 
-LAMMPS trajectories require `-t system.data` (equivalent to `--top`). A non-empty `input.lammps.type_map` explicitly maps numeric atom types to `resname`/`atomname` or `ignore` and always takes priority. If the map is absent or empty, SQQ uses DATA masses, type comments, molecule IDs, and Bonds to identify unambiguous water (`1 O + 2 H`), all-atom methane (`1 C + 4 H`), and labeled single-site methane. Other bonded components are retained deterministically as environment/other context instead of being mistaken for water or guests; they do not enter the water graph or cage occupancy. Use `component.role_map`, `additive.resname`, `environment.resname`, or an explicit `type_map` when the automatic role is not the intended one. If molecule IDs do not define valid water/guest molecules but Bonds do, SQQ rebuilds deterministic molecule IDs and reports that decision. Ambiguous reuse of one atom type, insufficient evidence for a requested water/guest role, or topology/trajectory ID mismatch still fails clearly. The resolved mapping and role provenance are recorded in `sqq_config_resolved.yaml`, per-frame info, and main-summary configuration. This normalization is shared by SQQ-Py and SQQ-CPP. Supported inputs are LAMMPS DATA with `full`, `molecular`, `bond`, or `angle` atom style, fully periodic `pp pp pp` orthorhombic dump boxes, and LAMMPS DCD. Tilted boxes, nonperiodic dump boundaries, `units lj`, duplicate atom IDs, and topology/trajectory ID mismatches fail before analysis. `input.delta_time_ps` / `-dt` / `--delta-time` selects a physical interval in ps for XTC, TRR, LAMMPS dump/DCD, and stacked GRO trajectories. With no delta time, every stored frame is analyzed. The requested interval must be at least, and an integer multiple of, the regular native interval; missing or irregular time metadata is rejected instead of rounded.
+LAMMPS trajectories require `-t system.data` (equivalent to `--top`). A non-empty `input.lammps.type_map` explicitly maps numeric atom types to `resname`/`atomname` or `ignore` and always takes priority. If the map is absent or empty, SQQ uses DATA masses, type comments, molecule IDs, and Bonds to identify unambiguous water (`1 O + 2 H`), all-atom methane (`1 C + 4 H`), and labeled single-site methane. Other bonded components are retained deterministically as environment/other context instead of being mistaken for water or guests; they do not enter the water graph or cage occupancy. Use `component.role_map`, `additive.resname`, `environment.resname`, or an explicit `type_map` when the automatic role is not the intended one. If molecule IDs do not define valid water/guest molecules but Bonds do, SQQ rebuilds deterministic molecule IDs and reports that decision. Ambiguous reuse of one atom type, insufficient evidence for a requested water/guest role, or topology/trajectory ID mismatch still fails clearly. The resolved mapping and role provenance are recorded in `sqq_config_resolved.yaml`, per-frame info, and main-summary configuration. This normalization is shared by SQQ-Py and SQQ-CPP. Supported inputs are LAMMPS DATA with `full`, `molecular`, `bond`, or `angle` atom style, fully periodic `pp pp pp` orthorhombic dump boxes, and LAMMPS DCD. Tilted boxes, nonperiodic dump boundaries, `units lj`, duplicate atom IDs, and topology/trajectory ID mismatches fail before analysis. `input.delta_time_ps` / `-dt` / `--delta-time` selects a physical interval in ps for XTC, TRR, LAMMPS dump/DCD, and stacked GRO trajectories. With no delta time, every stored frame is analyzed. For LAMMPS dumps, the native reader interval is passed explicitly as `input.lammps.timestep × units-to-ps`; this preserves physical time and prevents MDAnalysis from substituting `1 ps` without hiding unrelated warnings. The requested interval must be at least, and an integer multiple of, the regular native interval; missing or irregular time metadata is rejected instead of rounded.
 
 ## Analysis Engines
 
@@ -143,7 +142,7 @@ The default `chordless`/`bounded` path preserves the established scientific defi
 
 Every cage now passes the same mandatory topology validation in SQQ-Py and SQQ-CPP: each edge belongs to exactly two faces, `V - E + F = 2`, the face shell is connected, every vertex link is one cycle, and every shell vertex is trivalent. Optional scientific cage validation adds PBC-aware face-planarity and edge-variation limits, nonzero projected area, positive-volume validation, and volume-centroid cage centers. It remains disabled by default, but disabling it no longer bypasses topology validation. SQQ uses an orthorhombic box representation and rejects non-orthogonal/triclinic input explicitly.
 
-The current release uses the same compact three-row stage model for serial and parallel progress: file preparation (`reading`, `settings`, `selecting`), core topology search (`graph`, `ring`, optional `half/quasi`, `cage`, and optional `cluster`), and post-processing (`filtering`, `order`, `ice`, `output`). The `half/quasi` stage is hidden when both open-patch searches are disabled. In interactive single-file runs, the active stage is highlighted with bold bright-blue ANSI text. The `cluster` stage appears only when hydrate-cluster analysis is enabled. Parallel runs also show aggregate stage counts and up to six active files with per-stage and per-file timings.
+The current release uses the same compact three-row stage model for serial and parallel progress: file preparation (`reading`, `settings`, `selecting`), core topology search (`graph`, `ring`, optional `half/quasi`, `cage`, and optional `cluster`), and post-processing (`filtering`, `order`, `ice`, `output`). The `half/quasi` stage is hidden when both open-patch searches are disabled. In an interactive terminal, one in-place panel highlights the active stage with bold bright-blue ANSI text; redirected or captured output instead emits at most 21 plain 5% checkpoints without ANSI, carriage-return rewrites, or stderr progress. The `cluster` stage appears only when hydrate-cluster analysis is enabled. Parallel runs also show aggregate stage counts and up to six active files with per-stage and per-file timings. The banner is always the first Analyze output. Nonfatal warnings, when present, are deduplicated into one `Diagnostics` block after progress and before `Run Summary`; an ordinary warning-free run adds no empty block.
 
 ### Native SQQ-CPP Backend
 
@@ -223,7 +222,7 @@ Integer worker text is an explicit count. Decimal text and percentages are physi
 The generated file uses YAML `#` comments and canonical singular keys. The main settings are:
 
 ```yaml
-schema_version: "0.3.9"
+schema_version: "0.3.10"
 engine: py  # choices: py, cpp
 
 run:
@@ -572,7 +571,7 @@ result/
   sqq_render/
     sqq-cage.gro              # one-frame topology; with sqq-cage-gro or sqq-render
     sqq-cage.xtc              # every selected render frame; with sqq-render
-    sqq-cage.membership.tsv   # sparse per-frame metadata; with sqq-render
+    sqq-cage.membership.tsv   # typed frame/center/guest/membership metadata
     sqq-cage.vmd.tcl          # with sqq-render
 
 ```
@@ -608,7 +607,7 @@ If more than 26 topologies are found, SQQ warns and switches the whole multi-GRO
 
 For normal multiple-GRO groups, Markdown, membership/order TSV, and legacy per-frame VMD reports are placed under `info/`; ordinary structure files are placed under `gro/<frame>/`.
 
-The four files in `sqq_render/` form one visualization package. `sqq-cage.gro` contains the stable atom topology and first selected frame only. `sqq-cage.xtc` contains the coordinates and box for every selected render frame, with the original physical frame times when available. `sqq-cage.membership.tsv` maps render frames to source frames and times and stores only effective cage and guest membership relationships, including cage type and optional frame-local cage, phase, domain, and cluster identifiers. “Sparse” applies only to this metadata table: atoms with no membership are not repeated there, while XTC still contains every selected atom coordinate in every selected frame. Shared waters and guests assigned to several cages retain all memberships.
+The four files in `sqq_render/` form one visualization package. `sqq-cage.gro` contains the stable atom topology and first selected frame only. `sqq-cage.xtc` contains the coordinates and box for every selected render frame, with the original physical frame times when available. `sqq-cage.membership.tsv` uses four record types: `F` maps render frames to source frames, time, and effective graph mode; `C` stores every frame-local cage center after orthorhombic PBC wrapping in explicit angstrom coordinates; `G` stores every complete guest-molecule atom group, including guests outside cages; and `M` stores cage/guest membership atoms with cage type and optional phase, domain, and cluster identifiers. “Sparse” applies only to the membership metadata: the XTC still contains every selected atom coordinate in every selected frame. Shared waters and guests assigned to several cages retain all memberships.
 
 SQQ permits only one active Analyze run per output root. A concurrent run stops before modifying results and asks for another `--output` directory. Worker fragments use a private run workspace; final render files are replaced atomically. Temporary-directory removal retries transient Linux/shared-filesystem `ENOTEMPTY`, `EBUSY`, and permission delays. If cleanup still fails, SQQ prints the retained temporary path but does not turn an otherwise completed analysis into a failure.
 
@@ -663,11 +662,13 @@ sqq color cluster cluster_00001 cyan
 sqq color cage all default
 ```
 
+```tcl
 sqq show label
 sqq pick center
 sqq pick off
+```
 
-The startup `sqq show cage all` view is a replaceable default. The first `sqq show ...` command after sourcing the script or after `sqq clear` replaces that default; later `show` commands add independent layers without removing earlier selections. One `show` may contain several family/target groups, and an exact repeated family/target selection is ignored rather than creating another VMD representation. `sqq show label` toggles labels; optional `on` or `off` sets an explicit state, and the historical misspelling `lable` is accepted. `sqq pick center` or `sqq pick guest` changes all active objects to transparent and makes the selected cage opaque in the current frame. `sqq pick off` exits pick mode, while `sqq clear` removes custom show/color/pick state and restores the initial opaque cage-all view.
+The startup `sqq show cage all` view is a replaceable default. The first `sqq show ...` command after sourcing the script or after `sqq clear` replaces that default; later `show` commands add independent layers without removing earlier selections. One `show` may contain several family/target groups, and an exact repeated family/target selection is ignored rather than creating another VMD representation. `sqq show label` toggles labels; optional `on` or `off` sets an explicit state, and the historical misspelling `lable` is accepted. Labels are off by default and remain independent of picking. `sqq pick center` makes active objects transparent and creates yellow cage-center spheres/pick points; click a yellow center in VMD Query mode to make exactly that cage opaque. Water-atom clicks are ignored in center mode. `sqq pick guest` instead accepts a click on any guest atom, makes the complete guest and every cage containing it opaque, and reports guests with no cage membership without highlighting them. Center and guest modes are mutually exclusive. A frame change clears the transient selection and rebuilds the current-frame targets without disabling the chosen mode. `sqq pick off` exits pick mode but does not restore a previous VMD mouse mode; `sqq clear` removes custom show/color/label/pick state and restores the initial opaque cage-all view.
 
 Each family token in `show` starts a new group and consumes the following targets until the next family token. For `cage`, a target is `all`, a registered cage type, or an exact frame-local cage ID such as `51262_00053`; generic types such as `4^1-5^10-6^2` also accept `4151062`. For `guest`, the same target identifies guests assigned to all cages, to a cage type, or to one frame-local cage ID. Phase targets are `all`, `sI`, `sII`, `sH`, `boundary`, `ambiguous`, `unclassified`, or `isolated`; cluster/domain targets are `all` or exact frame-local IDs. Multiple targets are accepted within each family group. The former inferred forms such as `sqq show 512` and `sqq color 512 blue` are not accepted.
 
@@ -675,7 +676,7 @@ Unlike `show`, `sqq color` accepts exactly one family per command. Colors accept
 
 The renderer manages representations by VMD's stable representation names, so `show`, `color`, and frame changes remove only SQQ-created representations and preserve representations added by the user. Rapid frame notifications are coalesced into one pending redraw. Fully unknown cage, cage-ID, guest-selection, cluster-ID, and domain-ID targets are rejected against the complete loaded trajectory; recognized phase names remain valid even when the current frame has no matching membership. Re-sourcing a generated script resets its selection/color state.
 
-Cage, cluster, and domain identifiers are frame-local classifications in 0.3.9; the renderer does not claim cross-frame cage identity. Category selections (`phase`, `cluster`, or `domain`) and recognized phase labels simply report no membership when cluster analysis was not run; an explicit cage/type/cluster/domain target that never occurs anywhere in the loaded trajectory is rejected.
+Cage, cluster, and domain identifiers are frame-local classifications in 0.3.10; the renderer does not claim cross-frame cage identity. Category selections (`phase`, `cluster`, or `domain`) and recognized phase labels simply report no membership when cluster analysis was not run; an explicit cage/type/cluster/domain target that never occurs anywhere in the loaded trajectory is rejected.
 
 When cage or guest objects are shown, the generated VMD script uses the following stable cage-type colors; guest defaults follow the cage type that selected them. The visible shades follow the active VMD ColorID palette.
 

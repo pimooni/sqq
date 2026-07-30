@@ -5,32 +5,18 @@ from __future__ import annotations
 import math
 import os
 import sys
+import warnings as python_warnings
 from argparse import Namespace
 from collections import Counter
 from concurrent.futures import FIRST_COMPLETED, ProcessPoolExecutor, ThreadPoolExecutor, as_completed, wait
+from contextlib import contextmanager
 from datetime import datetime
 from multiprocessing import get_context
 from pathlib import Path
 from queue import Empty
 from threading import Event, Lock, Thread
 from time import perf_counter
-from typing import Any, Callable
-
-try:
-    from tqdm import tqdm
-except ImportError:  # pragma: no cover - exercised in minimal source-tree runs.
-    class _NullProgress:
-        def update(self, n: int = 1) -> None:
-            pass
-
-        def set_postfix_str(self, text: str, refresh: bool = True) -> None:
-            pass
-
-        def close(self) -> None:
-            pass
-
-    def tqdm(iterable=None, total=None, desc=None, **kwargs):
-        return iterable if iterable is not None else _NullProgress()
+from typing import Any, Callable, Iterator
 
 from . import __version__
 from .banner import SQQ_BANNER
@@ -134,8 +120,84 @@ BOND_MODE_DISPLAY_NAMES = {
 }
 
 
+def write_terminal_block(lines: list[str], *, stream: Any | None = None) -> None:
+    """Write one complete terminal block without cross-stream interleaving."""
+    target = sys.stdout if stream is None else stream
+    target.write("\n".join(lines) + "\n")
+    target.flush()
+
+
+def print_run_banner() -> None:
+    """Print the SQQ banner before any run preparation can emit diagnostics."""
+    write_terminal_block([SQQ_BANNER])
+
+
+class RunDiagnostics:
+    """Collect, de-duplicate, and emit run warnings outside live progress."""
+
+    def __init__(self, *, stream: Any | None = None) -> None:
+        self._stream = sys.stdout if stream is None else stream
+        self._messages: list[str] = []
+        self._seen: set[str] = set()
+        self._emitted = False
+        self._lock = Lock()
+
+    def add(self, message: Any) -> None:
+        """Record one normalized warning once, preserving first-seen order."""
+        normalized = " ".join(str(message).split())
+        if not normalized:
+            return
+        with self._lock:
+            if normalized in self._seen:
+                return
+            self._seen.add(normalized)
+            self._messages.append(normalized)
+
+    def showwarning(
+        self,
+        message: Warning | str,
+        category: type[Warning],
+        filename: str,
+        lineno: int,
+        file: Any | None = None,
+        line: str | None = None,
+    ) -> None:
+        """warnings.showwarning-compatible collector callback."""
+        del category, filename, lineno, file, line
+        self.add(message)
+
+    def emit(self) -> None:
+        """Write a non-empty diagnostics block once."""
+        with self._lock:
+            if self._emitted:
+                return
+            self._emitted = True
+            messages = list(self._messages)
+        if not messages:
+            return
+        write_terminal_block(
+            [
+                "Diagnostics",
+                f"  {'warnings':<24}: {len(messages)}",
+                *(f"  Warning: {message}" for message in messages),
+                "",
+            ],
+            stream=self._stream,
+        )
+
+
+@contextmanager
+def capture_run_warnings(diagnostics: RunDiagnostics) -> Iterator[None]:
+    """Route Python warnings into the run-level diagnostics collector."""
+    with python_warnings.catch_warnings():
+        python_warnings.simplefilter("always", UserWarning)
+        python_warnings.showwarning = diagnostics.showwarning
+        yield
+
+
 def analyze(args: Namespace) -> None:
     """Run SQQ analysis while exclusively owning its output root."""
+    print_run_banner()
     outdir = Path(args.output)
     outdir.mkdir(parents=True, exist_ok=True)
     with sqq_output_lock(outdir):
@@ -143,7 +205,17 @@ def analyze(args: Namespace) -> None:
 
 
 def _analyze_locked(args: Namespace) -> None:
-    """Run SQQ analysis after the output lock has been acquired."""
+    """Run with centralized diagnostics after the output lock is acquired."""
+    diagnostics = RunDiagnostics()
+    with capture_run_warnings(diagnostics):
+        try:
+            _analyze_locked_impl(args, diagnostics)
+        finally:
+            diagnostics.emit()
+
+
+def _analyze_locked_impl(args: Namespace, diagnostics: RunDiagnostics) -> None:
+    """Run SQQ analysis after the output lock and terminal setup are ready."""
     run_started_at = datetime.now().astimezone()
     started_at = perf_counter()
     config = load_config(Path(args.config) if args.config else None, mode=getattr(args, "engine", None))
@@ -221,6 +293,7 @@ def _analyze_locked(args: Namespace) -> None:
             topology,
             run_started_at,
             started_at,
+            diagnostics=diagnostics,
         )
         return
 
@@ -394,6 +467,7 @@ def _analyze_locked(args: Namespace) -> None:
         run_info["error"] = str(exc)
         write_run_config(outdir, config, run_info)
         raise
+    diagnostics.emit()
     print_run_summary(run_info)
     print(f"Wrote SQQ results: {outdir}")
 
@@ -608,97 +682,114 @@ def print_run_header(
     workers: int,
     parallel_backend: str,
     started_at_wall: datetime,
+    *,
+    extra_configuration_fields: list[tuple[str, Any]] | None = None,
 ) -> None:
-    """Print static run information before the live progress display starts."""
-    print(SQQ_BANNER)
-    print("Basic Information")
-    print_terminal_field("date", started_at_wall.strftime("%Y-%m-%d"))
-    print_terminal_field("start_time", started_at_wall.strftime("%H:%M:%S"))
-    print_terminal_field("time_zone", format_time_zone(started_at_wall))
-    print_terminal_field("working_dir", Path.cwd())
-    print_terminal_field("input", input_path)
-    print_terminal_field("input_format", input_format_label(paths))
-    print_terminal_field("matched_files", len(paths))
-    print_terminal_field("output", outdir)
-    print("")
-    print("Configuration")
-    print_terminal_field("SQQ version", __version__)
-    print_terminal_field("SQQ engine", "sqq-cpp" if is_cpp_mode(config.get("mode", DEFAULT_MODE)) else "sqq-py")
-    print_terminal_field("Config file", args.config or "<built-in defaults>")
-    print_terminal_field("Topology", topology or "<none>")
+    """Print one atomic block of static run information."""
+    lines = ["Basic Information"]
+
+    def add_field(label: str, value: Any) -> None:
+        lines.append(terminal_field_line(label, value))
+
+    add_field("date", started_at_wall.strftime("%Y-%m-%d"))
+    add_field("start_time", started_at_wall.strftime("%H:%M:%S"))
+    add_field("time_zone", format_time_zone(started_at_wall))
+    add_field("working_dir", Path.cwd())
+    add_field("input", input_path)
+    add_field("input_format", input_format_label(paths))
+    add_field("matched_files", len(paths))
+    add_field("output", outdir)
+    lines.extend(["", "Configuration"])
+    add_field("SQQ version", __version__)
+    add_field("SQQ engine", "sqq-cpp" if is_cpp_mode(config.get("mode", DEFAULT_MODE)) else "sqq-py")
+    add_field("Config file", args.config or "<built-in defaults>")
+    add_field("Topology", topology or "<none>")
     if config["input"].get("sampling"):
-        print_terminal_field("Sampling Interval", sampling_interval_display(config))
+        add_field("Sampling Interval", sampling_interval_display(config))
     if input_format_label(paths).startswith("lammps-"):
         lammps = config["input"].get("lammps", {})
-        print_terminal_field("LAMMPS units", lammps.get("units", "real"))
-        print_terminal_field("LAMMPS timestep", lammps.get("timestep", 1.0))
-        print_terminal_field("LAMMPS atom style", lammps.get("atom_style", "full"))
-        print_terminal_field("LAMMPS type map", lammps.get("type_map_source", "<configuration>"))
-    print_terminal_field("Graph mode", graph_mode_display(config["graph"]["bond_mode"]))
-    print_terminal_field("Search sizes", config["ring"]["sizes"])
-    print_terminal_field("Ring definition", config["ring"].get("definition", "chordless"))
+        add_field("LAMMPS units", lammps.get("units", "real"))
+        add_field("LAMMPS timestep", lammps.get("timestep", 1.0))
+        add_field("LAMMPS atom style", lammps.get("atom_style", "full"))
+        add_field("LAMMPS type map", lammps.get("type_map_source", "<configuration>"))
+    add_field("Graph mode", graph_mode_display(config["graph"]["bond_mode"]))
+    add_field("Search sizes", config["ring"]["sizes"])
+    add_field("Ring definition", config["ring"].get("definition", "chordless"))
     if not is_cpp_mode(config.get("mode")):
-        print_terminal_field("Ring report sizes", config["ring"]["report_sizes"])
-        print_terminal_field("Find half", on_off_text(config.get("half_cage", {}).get("enabled", False)))
-        print_terminal_field("Find quasi", on_off_text(config.get("quasi_cage", {}).get("enabled", False)))
+        add_field("Ring report sizes", config["ring"]["report_sizes"])
+        add_field("Find half", on_off_text(config.get("half_cage", {}).get("enabled", False)))
+        add_field("Find quasi", on_off_text(config.get("quasi_cage", {}).get("enabled", False)))
         if config.get("quasi_cage", {}).get("enabled", False):
-            print_terminal_field("Quasi-cage sizes", f"{config['quasi_cage'].get('base_sizes', 'auto')} / {config['quasi_cage'].get('side_sizes', 'auto')}")
-            print_terminal_field("Quasi max layer", config["quasi_cage"].get("max_layers", ""))
-            print_terminal_field("Quasi search policy", config["quasi_cage"].get("search_policy", "bounded"))
-    print_terminal_field("Cage report types", dashboard_cage_targets(config))
-    print_terminal_field("Maximum cage face", config["cage"].get("max_faces", 20))
+            add_field("Quasi-cage sizes", f"{config['quasi_cage'].get('base_sizes', 'auto')} / {config['quasi_cage'].get('side_sizes', 'auto')}")
+            add_field("Quasi max layer", config["quasi_cage"].get("max_layers", ""))
+            add_field("Quasi search policy", config["quasi_cage"].get("search_policy", "bounded"))
+    add_field("Cage report types", dashboard_cage_targets(config))
+    add_field("Maximum cage face", config["cage"].get("max_faces", 20))
     if not is_cpp_mode(config.get("mode")):
-        print_terminal_field("Cage fast closure", on_off_text(config["cage"].get("fast_closure", True)))
-    print_terminal_field("Scientific validation", on_off_text(config["cage"].get("scientific_validation", False)))
+        add_field("Cage fast closure", on_off_text(config["cage"].get("fast_closure", True)))
+    add_field("Scientific validation", on_off_text(config["cage"].get("scientific_validation", False)))
     if not is_cpp_mode(config.get("mode")):
-        print_terminal_field("Find cluster", on_off_text(config.get("hydrate_cluster", {}).get("enabled", False)))
-        print_terminal_field("Cluster min cage", config.get("hydrate_cluster", {}).get("min_cage", 2))
-    print_terminal_field("Order parameters", order_parameter_config_text(config))
+        add_field("Find cluster", on_off_text(config.get("hydrate_cluster", {}).get("enabled", False)))
+        add_field("Cluster min cage", config.get("hydrate_cluster", {}).get("min_cage", 2))
+    add_field("Order parameters", order_parameter_config_text(config))
     if q_degrees_from_order_parameters(config.get("order", {}).get("parameters")):
-        print_terminal_field("Q_l settings", q_config_text(config))
-    print_terminal_field(
+        add_field("Q_l settings", q_config_text(config))
+    add_field(
         "Output types",
         output_type_display(
             config.get("output", {}).get("types"),
             cpp_mode=is_cpp_mode(config.get("mode", DEFAULT_MODE)),
         ),
     )
-    print_terminal_field("Output layout", config["output"].get("structure_layout", "grouped"))
-    print_terminal_field("Worker policy", worker_policy_text(config))
-    print_terminal_field("Parallel backend", parallel_backend)
-    print_terminal_field("Math threads per worker", config.get("parallel", {}).get("math_threads", 1))
-    print_terminal_field("Workers", workers)
-    print("")
+    add_field("Output layout", config["output"].get("structure_layout", "grouped"))
+    add_field("Worker policy", worker_policy_text(config))
+    add_field("Parallel backend", parallel_backend)
+    add_field("Math threads per worker", config.get("parallel", {}).get("math_threads", 1))
+    add_field("Workers", workers)
+    for label, value in extra_configuration_fields or []:
+        add_field(label, value)
+    lines.append("")
+    write_terminal_block(lines)
 
 
 TERMINAL_LABEL_WIDTH = 24
 PROGRESS_BAR_WIDTH = 25
 
 
+def terminal_field_line(label: str, value: Any) -> str:
+    """Format one aligned terminal key-value row."""
+    return f"  {label:<{TERMINAL_LABEL_WIDTH}}: {safe_terminal_text(value)}"
+
+
 def print_terminal_field(label: str, value: Any) -> None:
     """Print one aligned terminal key-value row."""
-    print(f"  {label:<{TERMINAL_LABEL_WIDTH}}: {safe_terminal_text(value)}")
+    write_terminal_block([terminal_field_line(label, value)])
 
 
 def print_run_summary(run_info: dict[str, Any]) -> None:
-    """Print final effective run metadata after frame analysis finishes."""
-    print("Run Summary")
-    print_terminal_field("Finish time", run_info.get("finish_time", ""))
-    print_terminal_field("Duration (s)", run_info.get("elapsed_seconds", ""))
-    print_terminal_field("SQQ version", run_info.get("sqq_version", __version__))
-    print_terminal_field("SQQ engine", run_info.get("sqq_engine", ""))
-    print_terminal_field("Graph mode", run_info.get("graph_mode_display", run_info.get("graph_mode", "")))
-    print_terminal_field("Order parameters", run_info.get("order_parameters", ""))
+    """Print final effective run metadata as one terminal block."""
+    lines = ["Run Summary"]
+
+    def add_field(label: str, value: Any) -> None:
+        lines.append(terminal_field_line(label, value))
+
+    add_field("Finish time", run_info.get("finish_time", ""))
+    add_field("Duration (s)", run_info.get("elapsed_seconds", ""))
+    add_field("SQQ version", run_info.get("sqq_version", __version__))
+    add_field("SQQ engine", run_info.get("sqq_engine", ""))
+    add_field("Graph mode", run_info.get("graph_mode_display", run_info.get("graph_mode", "")))
+    add_field("Order parameters", run_info.get("order_parameters", ""))
     if run_info.get("sqq_engine") != "sqq-cpp":
-        print_terminal_field("Find cluster", run_info.get("find_cluster", "off"))
-    print_terminal_field("Output types", run_info.get("output_types", "none"))
-    print_terminal_field("Worker policy", run_info.get("worker_policy", ""))
-    print_terminal_field("Parallel backend", run_info.get("parallel_backend", "serial"))
-    print_terminal_field("Workers", run_info.get("workers", ""))
+        add_field("Find cluster", run_info.get("find_cluster", "off"))
+    add_field("Output types", run_info.get("output_types", "none"))
+    add_field("Worker policy", run_info.get("worker_policy", ""))
+    add_field("Parallel backend", run_info.get("parallel_backend", "serial"))
+    add_field("Workers", run_info.get("workers", ""))
     summary_write = run_info.get("summary_write", {})
     if isinstance(summary_write, dict) and "total_seconds" in summary_write:
-        print_terminal_field("Summary write (s)", summary_write.get("total_seconds", ""))
-    print("")
+        add_field("Summary write (s)", summary_write.get("total_seconds", ""))
+    lines.append("")
+    write_terminal_block(lines)
 
 
 def row_effective_graph_modes(rows: list[dict[str, Any]]) -> list[str]:
@@ -951,7 +1042,7 @@ def format_stage_label(label: str, width: int, *, active: bool, bold: bool) -> s
 
 
 class RunProgressDisplay:
-    """Render per-run progress with current stage, frame, and total timings."""
+    """Render one stable progress panel or append-only static checkpoints."""
 
     def __init__(
         self,
@@ -975,13 +1066,18 @@ class RunProgressDisplay:
         self.stage = "waiting"
         self.frame_started_at = perf_counter()
         self.stage_started_at = perf_counter()
+        self._stream = sys.stdout
         self._lock = Lock()
+        self._close_lock = Lock()
         self._stop_event = Event()
+        self._closed = False
         self._rendered_lines = 0
-        self._interactive = bool(getattr(sys.stdout, "isatty", lambda: False)())
-        self._progress = None if self._interactive else tqdm(total=total, desc="Files", unit="file")
+        self._interactive = bool(getattr(self._stream, "isatty", lambda: False)())
         self._thread: Thread | None = None
         self._last_render_at = float("-inf")
+        self._last_panel_lines: tuple[str, ...] | None = None
+        self._last_static_state: tuple[int, int] | None = None
+        self._last_static_bucket = -1
         self._render(force=True)
         if self._interactive:
             self._thread = Thread(target=self._tick, daemon=True)
@@ -990,6 +1086,8 @@ class RunProgressDisplay:
     def start_frame(self, frame_index: int, frame_name: str) -> Callable[[str], None]:
         """Select the active frame and return its stage callback."""
         with self._lock:
+            if self._closed:
+                return lambda stage: None
             now = perf_counter()
             self.current_index = frame_index
             self.current_file = frame_name
@@ -1002,6 +1100,8 @@ class RunProgressDisplay:
     def update_stage(self, stage: str) -> None:
         """Update the active stage and reset the stage timer when it changes."""
         with self._lock:
+            if self._closed:
+                return
             if stage != self.stage:
                 self.stage = stage
                 self.stage_started_at = perf_counter()
@@ -1010,22 +1110,31 @@ class RunProgressDisplay:
     def complete_frame(self, success: bool) -> None:
         """Mark the current frame as finished and refresh the display."""
         with self._lock:
+            if self._closed:
+                return
             self.completed += 1
             if not success:
                 self.failed += 1
-            if self._progress is not None:
-                self._progress.update(1)
             self._render_locked(force=True)
 
     def close(self) -> None:
-        """Stop background refresh and close any progress backend."""
-        self._stop_event.set()
-        if self._thread is not None:
-            self._thread.join(timeout=0.2)
-        with self._lock:
-            self._render_locked(force=True)
-        if self._progress is not None:
-            self._progress.close()
+        """Finalize the display exactly once."""
+        with self._close_lock:
+            if self._closed:
+                return
+            self._stop_event.set()
+            if self._thread is not None:
+                self._thread.join(timeout=0.2)
+            with self._lock:
+                if self._closed:
+                    return
+                final_state = (self.completed, self.failed)
+                if not self._interactive and final_state != self._last_static_state:
+                    self._last_static_bucket = -1
+                self._render_locked(force=True)
+                self._stream.write("\n")
+                self._stream.flush()
+                self._closed = True
 
     def _tick(self) -> None:
         while not self._stop_event.wait(1.0):
@@ -1033,24 +1142,50 @@ class RunProgressDisplay:
 
     def _render(self, *, force: bool = False) -> None:
         with self._lock:
+            if self._closed:
+                return
             self._render_locked(force=force)
 
     def _render_locked(self, *, force: bool = False) -> None:
+        if self._closed:
+            return
+        if not self._interactive:
+            state = (self.completed, self.failed)
+            if state == self._last_static_state:
+                return
+            if self.total <= 0 or self.completed >= self.total:
+                current_bucket = 20
+            else:
+                current_bucket = int(max(0, self.completed) * 20 / self.total)
+            if self._last_static_state is not None and current_bucket <= self._last_static_bucket:
+                return
+            if self._last_static_state is None:
+                self._stream.write("Analysis Progress\n")
+            self._stream.write(
+                terminal_field_line(
+                    "completed_files",
+                    f"{self.completed} / {self.total}  [ {self.failed} failed ]",
+                )
+                + "\n"
+            )
+            self._stream.flush()
+            self._last_static_state = state
+            self._last_static_bucket = current_bucket
+            return
         now = perf_counter()
         if not force and now - self._last_render_at < PROGRESS_RENDER_INTERVAL_SECONDS:
             return
         self._last_render_at = now
-        if self._interactive:
-            lines = self._panel_lines()
-            if self._rendered_lines:
-                sys.stdout.write(f"{chr(27)}[{self._rendered_lines}F")
-            for line in lines:
-                sys.stdout.write(chr(13) + f"{chr(27)}[K" + line + chr(10))
-            sys.stdout.flush()
-            self._rendered_lines = len(lines)
+        lines = tuple(self._panel_lines())
+        if lines == self._last_panel_lines:
             return
-        if self._progress is not None and hasattr(self._progress, "set_postfix_str"):
-            self._progress.set_postfix_str(self._postfix_text(), refresh=True)
+        if self._rendered_lines:
+            self._stream.write(f"{chr(27)}[{self._rendered_lines}F")
+        for line in lines:
+            self._stream.write(chr(13) + f"{chr(27)}[K" + line + chr(10))
+        self._stream.flush()
+        self._rendered_lines = len(lines)
+        self._last_panel_lines = lines
 
     def _panel_lines(self) -> list[str]:
         stage_lines = self._stage_lines()
@@ -1130,7 +1265,7 @@ PROGRESS_RENDER_INTERVAL_SECONDS = 0.10
 
 
 class ParallelRunProgressDisplay:
-    """Render aggregate and per-file progress for concurrent frame analysis."""
+    """Render aggregate progress without duplicating completion records."""
 
     def __init__(
         self,
@@ -1153,13 +1288,18 @@ class ParallelRunProgressDisplay:
         self.failed = 0
         self._active: dict[int, dict[str, Any]] = {}
         self._finished: set[int] = set()
+        self._stream = sys.stdout
         self._lock = Lock()
+        self._close_lock = Lock()
         self._stop_event = Event()
+        self._closed = False
         self._rendered_lines = 0
-        self._interactive = bool(getattr(sys.stdout, "isatty", lambda: False)())
-        self._progress = None if self._interactive else tqdm(total=total, desc="Files", unit="file")
+        self._interactive = bool(getattr(self._stream, "isatty", lambda: False)())
         self._thread: Thread | None = None
         self._last_render_at = float("-inf")
+        self._last_panel_lines: tuple[str, ...] | None = None
+        self._last_static_state: tuple[int, int] | None = None
+        self._last_static_bucket = -1
         self._render(force=True)
         if self._interactive:
             self._thread = Thread(target=self._tick, daemon=True)
@@ -1168,7 +1308,7 @@ class ParallelRunProgressDisplay:
     def start_file(self, frame_index: int, frame_name: str, started_at: float | None = None) -> Callable[[str], None]:
         """Register an active file and return its stage callback."""
         with self._lock:
-            if frame_index in self._finished:
+            if self._closed or frame_index in self._finished:
                 return lambda stage: None
             now = perf_counter() if started_at is None else float(started_at)
             self._active[frame_index] = {
@@ -1185,6 +1325,8 @@ class ParallelRunProgressDisplay:
         if stage == "done":
             return
         with self._lock:
+            if self._closed:
+                return
             state = self._active.get(frame_index)
             if state is None:
                 return
@@ -1194,28 +1336,35 @@ class ParallelRunProgressDisplay:
             self._render_locked()
 
     def complete_file(self, frame_index: int, success: bool) -> None:
-        """Move one file from the active set into completed results."""
+        """Move one file from the active set into completed results once."""
         with self._lock:
-            if frame_index in self._finished:
+            if self._closed or frame_index in self._finished:
                 return
             self._active.pop(frame_index, None)
             self._finished.add(frame_index)
             self.completed += 1
             if not success:
                 self.failed += 1
-            if self._progress is not None:
-                self._progress.update(1)
             self._render_locked(force=True)
 
     def close(self) -> None:
-        """Stop background refresh and close the progress backend."""
-        self._stop_event.set()
-        if self._thread is not None:
-            self._thread.join(timeout=0.2)
-        with self._lock:
-            self._render_locked(force=True)
-        if self._progress is not None:
-            self._progress.close()
+        """Finalize the display exactly once."""
+        with self._close_lock:
+            if self._closed:
+                return
+            self._stop_event.set()
+            if self._thread is not None:
+                self._thread.join(timeout=0.2)
+            with self._lock:
+                if self._closed:
+                    return
+                final_state = (self.completed, self.failed)
+                if not self._interactive and final_state != self._last_static_state:
+                    self._last_static_bucket = -1
+                self._render_locked(force=True)
+                self._stream.write("\n")
+                self._stream.flush()
+                self._closed = True
 
     def _tick(self) -> None:
         while not self._stop_event.wait(1.0):
@@ -1223,24 +1372,50 @@ class ParallelRunProgressDisplay:
 
     def _render(self, *, force: bool = False) -> None:
         with self._lock:
+            if self._closed:
+                return
             self._render_locked(force=force)
 
     def _render_locked(self, *, force: bool = False) -> None:
+        if self._closed:
+            return
+        if not self._interactive:
+            state = (self.completed, self.failed)
+            if state == self._last_static_state:
+                return
+            if self.total <= 0 or self.completed >= self.total:
+                current_bucket = 20
+            else:
+                current_bucket = int(max(0, self.completed) * 20 / self.total)
+            if self._last_static_state is not None and current_bucket <= self._last_static_bucket:
+                return
+            if self._last_static_state is None:
+                self._stream.write("Analysis Progress\n")
+            self._stream.write(
+                terminal_field_line(
+                    "completed_files",
+                    f"{self.completed} / {self.total}  [ {self.failed} failed ]",
+                )
+                + "\n"
+            )
+            self._stream.flush()
+            self._last_static_state = state
+            self._last_static_bucket = current_bucket
+            return
         now = perf_counter()
         if not force and now - self._last_render_at < PROGRESS_RENDER_INTERVAL_SECONDS:
             return
         self._last_render_at = now
-        if self._interactive:
-            lines = self._panel_lines()
-            if self._rendered_lines:
-                sys.stdout.write(f"{chr(27)}[{self._rendered_lines}F")
-            for line in lines:
-                sys.stdout.write(chr(13) + f"{chr(27)}[K" + line + chr(10))
-            sys.stdout.flush()
-            self._rendered_lines = len(lines)
+        lines = tuple(self._panel_lines())
+        if lines == self._last_panel_lines:
             return
-        if self._progress is not None and hasattr(self._progress, "set_postfix_str"):
-            self._progress.set_postfix_str(self._postfix_text(), refresh=True)
+        if self._rendered_lines:
+            self._stream.write(f"{chr(27)}[{self._rendered_lines}F")
+        for line in lines:
+            self._stream.write(chr(13) + f"{chr(27)}[K" + line + chr(10))
+        self._stream.flush()
+        self._rendered_lines = len(lines)
+        self._last_panel_lines = lines
 
     def _panel_lines(self) -> list[str]:
         stage_lines = self._stage_summary_lines()
@@ -2316,12 +2491,13 @@ def apply_cli_overrides(config: dict[str, Any], args: Namespace) -> None:
 
 
 def warn_legacy_order_cli(*, ignored: bool) -> None:
-    """Print one visible compatibility warning for pre-0.2.7 selector options."""
+    """Issue one compatibility warning for pre-0.2.7 selector options."""
     suffix = " They were ignored because --order-parameter was also supplied." if ignored else ""
-    print(
-        "Warning: --no-q, -q/--q-degree, --mcg3, and --dhop30 are deprecated; "
+    python_warnings.warn(
+        "--no-q, -q/--q-degree, --mcg3, and --dhop30 are deprecated; "
         f"use --order-parameter instead.{suffix}",
-        file=sys.stderr,
+        UserWarning,
+        stacklevel=2,
     )
 
 
@@ -2633,10 +2809,11 @@ def normalize_analysis_scopes(config: dict[str, Any]) -> None:
         for name in order["parameters"]
     )
     if output_enabled(config, "order-tsv") and not per_water_order:
-        print(
-            "Warning: output type 'order-tsv' has no per-water F3/F4/Q_l selection; "
+        python_warnings.warn(
+            "output type 'order-tsv' has no per-water F3/F4/Q_l selection; "
             "no order-parameter TSV will be written.",
-            file=sys.stderr,
+            UserWarning,
+            stacklevel=2,
         )
     hydrate_order = config.setdefault("hydrate_order", {})
     positive_values = (

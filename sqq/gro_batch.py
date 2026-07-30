@@ -11,7 +11,7 @@ from datetime import datetime
 from multiprocessing import get_context
 from pathlib import Path
 from queue import Empty
-import sys
+import warnings as python_warnings
 from time import perf_counter
 from typing import Any
 
@@ -62,6 +62,8 @@ def analyze_multi_gro_batch(
     topology: Path | None,
     run_started_at: datetime,
     started_at: float,
+    *,
+    diagnostics: Any | None = None,
 ) -> None:
     """Analyze heterogeneous GRO inputs in topology-compatible result roots."""
     from . import pipeline as pipeline_api
@@ -81,7 +83,7 @@ def analyze_multi_gro_batch(
             "output are disabled for this run."
         )
         warnings.append(warning)
-        print(f"Warning: {warning}", file=sys.stderr)
+        python_warnings.warn(warning, UserWarning, stacklevel=2)
         execution_config["output"]["types"] = ["info"]
 
     cleanup_previous_multi_gro_outputs(outdir, execution_config)
@@ -145,10 +147,11 @@ def analyze_multi_gro_batch(
         workers,
         active_backend,
         run_started_at,
+        extra_configuration_fields=[
+            ("Topology groups", grouping.group_count),
+            ("Grouping policy", topology_grouping_policy(grouping)),
+        ],
     )
-    pipeline_api.print_terminal_field("Topology groups", grouping.group_count)
-    pipeline_api.print_terminal_field("Grouping policy", topology_grouping_policy(grouping))
-    print("")
 
     initial_info = pipeline_api.build_run_info(
         args,
@@ -384,6 +387,8 @@ def analyze_multi_gro_batch(
             exc,
         )
         raise
+    if diagnostics is not None:
+        diagnostics.emit()
     pipeline_api.print_run_summary(root_info)
     print(f"Wrote SQQ results: {outdir}")
 
