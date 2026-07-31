@@ -6,6 +6,7 @@ from collections import Counter, defaultdict
 from copy import deepcopy
 from datetime import datetime
 import os
+import shutil
 from pathlib import Path
 import re
 import tempfile
@@ -23,6 +24,7 @@ from ..config import (
     DEFAULT_MODE,
     dump_config,
     is_cpp_mode,
+    load_config,
 
     normalize_order_parameters,
     order_parameter_display,
@@ -1736,6 +1738,124 @@ def write_summary(
     write_xlsx: bool = True,
     run_info: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    """Publish config, XLSX, and CSV summaries as one output transaction."""
+    root = Path(outdir)
+    root.mkdir(parents=True, exist_ok=True)
+    directory_names = summary_directory_names(root, config)
+    staging_root = Path(
+        tempfile.mkdtemp(prefix=".sqq-summary-stage-", dir=root)
+    )
+    try:
+        metrics = _write_summary_staged(
+            rows,
+            staging_root,
+            config,
+            write_xlsx=write_xlsx,
+            run_info=run_info,
+        )
+        completed_info = deepcopy(run_info or {})
+        completed_info["summary_write"] = metrics
+        write_run_config(staging_root, config, completed_info)
+        pending = [
+            (source, root / source.relative_to(staging_root))
+            for source in staging_root.rglob("*")
+            if source.is_file()
+        ]
+        removals = summary_generated_paths(root, directory_names)
+        commit_output_bundle(pending, removals)
+    finally:
+        shutil.rmtree(staging_root, ignore_errors=True)
+    remove_empty_summary_directories(root, directory_names)
+    return metrics
+
+
+def clear_previous_summary_outputs(outdir: Path, config: dict[str, Any]) -> None:
+    """Remove one previous SQQ summary generation before a new run starts."""
+    root = Path(outdir)
+    if not root.exists():
+        return
+    directory_names = summary_directory_names(root, config)
+    commit_output_bundle([], summary_generated_paths(root, directory_names))
+    remove_empty_summary_directories(root, directory_names)
+
+
+def summary_directory_names(outdir: Path, config: dict[str, Any]) -> tuple[str, ...]:
+    """Return current, previous, default, and legacy summary directories."""
+    names = {
+        summary_directory_name(config),
+        "summary",
+        "summary_csv",
+        LEGACY_SUMMARY_DETAIL_DIRECTORY,
+    }
+    previous_path = Path(outdir) / "sqq_config_resolved.yaml"
+    if previous_path.is_file():
+        try:
+            previous = load_config(previous_path)
+        except Exception:
+            previous = None
+        if isinstance(previous, dict):
+            names.add(summary_directory_name(previous))
+    return tuple(sorted(name for name in names if safe_summary_directory_name(name)))
+
+
+def summary_directory_name(config: dict[str, Any]) -> str:
+    """Return the configured relative summary directory."""
+    return (
+        str(config.get("output", {}).get("summary_csv_dir", "summary")).strip()
+        or "summary"
+    )
+
+
+def safe_summary_directory_name(name: str) -> bool:
+    """Restrict cleanup to relative paths contained by the result root."""
+    path = Path(name)
+    return not path.is_absolute() and ".." not in path.parts
+
+
+def summary_generated_paths(
+    outdir: Path,
+    directory_names: tuple[str, ...],
+) -> list[Path]:
+    """Enumerate only known SQQ summary files."""
+    paths = [
+        outdir / "summary.xlsx",
+        outdir / "summary.md",
+        outdir / "sqq_config_resolved.yaml",
+        outdir / "run_config.yaml",
+    ]
+    csv_names = tuple(
+        dict.fromkeys(
+            (*SUMMARY_MAIN_TABLE_NAMES, *SUMMARY_DETAIL_TABLE_NAMES)
+        )
+    )
+    for directory_name in directory_names:
+        directory = outdir / directory_name
+        paths.extend(directory / f"{name}.csv" for name in csv_names)
+    return list(dict.fromkeys(paths))
+
+
+def remove_empty_summary_directories(
+    outdir: Path,
+    directory_names: tuple[str, ...],
+) -> None:
+    """Remove empty known summary directories without touching user files."""
+    for directory_name in directory_names:
+        directory = outdir / directory_name
+        if directory == outdir:
+            continue
+        try:
+            directory.rmdir()
+        except OSError:
+            pass
+
+
+def _write_summary_staged(
+    rows: list[dict[str, Any]],
+    outdir: Path,
+    config: dict[str, Any],
+    write_xlsx: bool = True,
+    run_info: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     """Write global summaries and return deterministic output timing metadata."""
     started = perf_counter()
     outdir.mkdir(parents=True, exist_ok=True)
@@ -2014,6 +2134,7 @@ def commit_output_bundle(
             os.replace(target, backup)
             backups[target] = backup
         for temp_path, target in pending:
+            target.parent.mkdir(parents=True, exist_ok=True)
             os.replace(temp_path, target)
             committed.append(target)
     except Exception:

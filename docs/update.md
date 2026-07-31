@@ -2,6 +2,52 @@
 
 This file records versioned update notes. New releases should be appended above older entries.
 
+## Version 0.3.12
+
+### Short Summary
+
+Version 0.3.12 unifies per-frame output placement for every multi-frame trajectory and multi-file analysis, including multiple trajectory paths and independent XYZ inputs. Markdown reports are collected directly under `info/`, while selected structures are written under `gro/<frame>/`; SQQ no longer creates one directory per frame merely to hold one information file. Output-root reuse now cleans known artifacts across input-name and grouped/flat-layout changes, and frame/summary publication is transactional so failures do not expose half-written results. This release also adds explicit per-water `f3-gro` and `f4-gro` outputs. Package, configuration schema, and native-core metadata are synchronized at `0.3.12`, dated Jul 31, 2026. Scientific analysis definitions are unchanged.
+
+### Main Changes
+
+1. Unified multi-frame and multi-file layout
+   - Routes one or more XTC/TRR/LAMMPS/DCD paths, stacked GRO, and multiple independent GRO/XYZ inputs to `info/<frame>_info.md`.
+   - Routes selected per-frame structures to `gro/<frame>/` consistently in serial, thread, and process execution.
+   - Keeps a single ordinary one-frame GRO or XYZ in its compact frame-root layout.
+   - Avoids empty or information-only frame directories.
+
+2. Reuse cleanup and transactional output
+   - Reads the preceding resolved run metadata and removes known per-frame artifacts across old/new source basenames rather than cleaning only the current stem.
+   - Cleans grouped and flat structure layouts, stale `result_A`-`result_Z` topology roots, and F3/F4 GRO files while preserving unknown user files.
+   - Stages every frame's selected Markdown, TSV, and GRO files and publishes them only as one complete frame bundle.
+   - Stages selected XLSX/main CSV/detail CSV output as one recoverable summary set; a failed write removes temporary data and does not expose a mixed generation.
+
+3. Per-water F3/F4 GRO output
+   - Adds explicit `f3-gro` and `f4-gro` output types for SQQ-Py and SQQ-CPP; neither is enabled by default.
+   - Writes only waters with a defined per-water value while retaining each complete water molecule in source atom order.
+   - Annotates only the oxygen record with an eight-decimal F3 or F4 value after the fixed-width velocity field.
+   - Places grouped files under `gro/<frame>/order/` for separated multi-frame jobs and applies the existing empty-file policy.
+
+4. Release and documentation
+   - Synchronizes Python package, configuration schema, native-core, CMake, and wheel validation at `0.3.12`.
+   - Updates README output trees and design documentation to describe one consistent multi-frame layout.
+   - Normalizes README acknowledgement entries to plain text without institution-specific emphasis.
+
+5. Regression coverage
+   - Covers multiple XYZ inputs and multiple trajectory paths in serial and parallel execution.
+   - Covers output-root reuse after source basename, selected-frame, grouped/flat-layout, and single/multi-system job-shape changes.
+   - Covers F3/F4 stale-file cleanup, preservation of unknown user files, and failure injection during per-frame and summary publication.
+   - Retains single-frame GRO/XYZ compact-layout regression coverage.
+
+### Compatibility and Result Impact
+
+- Graph, ring, half/quasi, cage, occupancy, phase/domain/boundary, F3/F4, other order-parameter, and ice algorithms are unchanged.
+- User-visible changes are limited to output selection, placement, cleanup, and failure-safe publication. Scripts that consume trajectory-frame reports must read them from `info/` instead of one directory per frame.
+- Cleanup and transactional-write changes affect generated-file lifecycle only; they do not alter analyzed values or table schemas.
+- A single ordinary one-frame GRO or XYZ retains its previous compact layout.
+
+Status: these 0.3.12 changes are local and uncommitted. No commit, tag, push, wheel publication, or PyPI publication has been performed.
+
 ## Version 0.3.11
 
 ### Short Summary
@@ -44,12 +90,6 @@ Version 0.3.11 fixes the remaining VMD cage-center/guest picking problems and si
    - Writes main, detail, and optional cluster-detail CSVs into the same configured `summary/` directory with disjoint filenames.
    - Retires `output.summary_detail_dir`; old files in the default `summary_detail/` directory are removed conservatively by known filename only.
 
-7. Per-water F3/F4 GRO output
-   - Adds explicit `f3-gro` and `f4-gro` output types for SQQ-Py and SQQ-CPP; neither is enabled by default.
-   - Writes only waters with a defined per-water value while retaining each complete water molecule in source atom order.
-   - Annotates only the oxygen record with an eight-decimal F3 or F4 value after the fixed-width velocity field.
-   - Places grouped files under `<frame>/order/` and applies the existing empty-file policy.
-   - Keeps all F3/F4 calculations and scientific results unchanged.
 
 ### Compatibility and Result Impact
 

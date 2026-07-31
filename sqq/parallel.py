@@ -145,6 +145,7 @@ def process_trajectory_frame_task(frame_index: int, raw_frame_index: int) -> tup
             _WORKER_OUTDIR,
             strict=_WORKER_STRICT,
             stage_callback=callback,
+            separated_output=True,
             fragment_dir=_WORKER_FRAGMENT_DIR,
         )
     except Exception as exc:

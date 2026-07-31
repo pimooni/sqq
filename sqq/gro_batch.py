@@ -20,6 +20,7 @@ from .core.graph import resolve_bond_mode
 from .core.selection import select_waters
 from .io.gro_grouping import GroGroupingResult, gro_topology_descriptor, scan_and_group_gro_inputs
 from .io.summary import (
+    clear_previous_summary_outputs,
     failed_row,
     remove_summary_csvs,
     remove_summary_detail_csvs,
@@ -717,6 +718,7 @@ def cleanup_generated_output_root(root: Path, config: dict[str, Any]) -> None:
     if not root.exists():
         return
     cleanup_sqq_cage_bundle(root)
+    clear_previous_summary_outputs(root, config)
     for name in (
         "summary.xlsx",
         "summary.md",
@@ -737,15 +739,42 @@ def cleanup_generated_output_root(root: Path, config: dict[str, Any]) -> None:
         "_f3f4.tsv",
         "_view.vmd.tcl",
     )
-    gro_markers = ("_ring_", "_hc_", "_qc_", "_cage_", "_ice", "_cluster_")
+    gro_markers = (
+        "_ring_",
+        "_hc_",
+        "_half_cage",
+        "_qc_",
+        "_quasi_cage",
+        "_cage_",
+        "_ice",
+        "_cluster_",
+        "_f3.gro",
+        "_f4.gro",
+    )
+    generated_gro_dirs = {
+        "ring",
+        "half_cage",
+        "quasi_cage",
+        "cage",
+        "hydrate_cluster",
+        "ice",
+        "order",
+    }
     for candidate in root.rglob("*"):
         if not candidate.is_file():
             continue
         name = candidate.name.casefold()
         if name.endswith(report_suffixes):
             candidate.unlink(missing_ok=True)
-        elif name.endswith(".gro") and any(marker in name for marker in gro_markers):
-            candidate.unlink(missing_ok=True)
+        elif name.endswith(".gro"):
+            relative_parts = {
+                part.casefold() for part in candidate.relative_to(root).parts[:-1]
+            }
+            if (
+                any(marker in name for marker in gro_markers)
+                or relative_parts & generated_gro_dirs
+            ):
+                candidate.unlink(missing_ok=True)
     remove_empty_tree(root, keep_root=True)
 
 

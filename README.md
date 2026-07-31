@@ -2,7 +2,7 @@
 
 **SQQ: Python Joint Toolkit for Water-Shell Topology Analysis.**
 
-Current release: **0.3.11**
+Current release: **0.3.12**
 
 SQQ provides the complete SQQ-Py water-shell topology workflow and the focused SQQ-CPP cage engine. Select the Python workflow with `-e py` or the C++17 graph/ring/cage/occupancy/F3/F4 workflow with `-e cpp`. Algorithms are documented in `docs/design.md` and release notes in `docs/update.md`.
 
@@ -19,17 +19,19 @@ Names are listed alphabetically by family name.
 - Bo Liao @ China University of Petroleum (East China)
 - Yingxu Lu @ Wuhan Institute of Technology
 - Fengyi Mi @ Southwest University of Science and Technology
-- Yingtao Sun @ The ***Hong Kong University of Science and Technology***
+- Yingtao Sun @ The Hong Kong University of Science and Technology
 - Zhengcai Zhang @ Laoshan Laboratory
 
-## Changed in 0.3.11
+## Changed in 0.3.12
 
-- Package, configuration-schema, and native-core versions are synchronized at `0.3.11`, released Jul 31, 2026.
-- `sqq pick center` now enters the correct VMD mouse mode automatically and maps VMD's internal graphics pickpoint tag, so clicking a yellow center highlights the exact cage.
-- `sqq pick guest` now enters VMD Pick mode and uses its atom callback to highlight the complete guest molecule and every cage containing it.
-- Persistent yellow cage and orange guest highlight layers are updated in place, preventing the selected representation from disappearing during a VMD mouse callback.
-- New explicit `f3-gro` and `f4-gro` outputs write complete valid water molecules and annotate each oxygen with its per-water F3 or F4 value.
-- Scientific graph, ring, cage, phase, occupancy, and order-parameter definitions are unchanged. Cross-frame cage tracking remains deferred and is not shipped in 0.3.11.
+- Package, configuration-schema, and native-core versions are synchronized at `0.3.12`, released Jul 31, 2026.
+- Every trajectory-like input, including multiple XTC/TRR/LAMMPS paths and stacked GRO, and every multi-file GRO/XYZ job now places per-frame Markdown reports directly under `info/` and selected structures under `gro/<frame>/`.
+- A single ordinary one-frame GRO or XYZ keeps the compact frame-root layout; empty or information-only frame directories are not retained.
+- Reusing an output root removes known SQQ artifacts even when the input basename or job shape changes, including obsolete `result_A`-`result_Z` group roots. Grouped/flat F3/F4 files are included, while unknown user files remain untouched.
+- Per-frame files and summary outputs use private staging and transactional publication, so a failed frame or summary write does not leave a partial new result set.
+- Explicit `f3-gro` and `f4-gro` outputs write complete valid water molecules and annotate each oxygen with its per-water F3 or F4 value.
+- Scientific graph, ring, cage, phase, occupancy, and order-parameter definitions are unchanged.
+
 ## Install
 
 Install the released package from PyPI:
@@ -222,7 +224,7 @@ Integer worker text is an explicit count. Decimal text and percentages are physi
 The generated file uses YAML `#` comments and canonical singular keys. The main settings are:
 
 ```yaml
-schema_version: "0.3.11"
+schema_version: "0.3.12"
 engine: py  # choices: py, cpp
 
 run:
@@ -551,11 +553,13 @@ SQQ-CPP accepts `info`, `gro`, `cage-gro`, `f3-gro`, `f4-gro`, `sqq-render`, `su
 
 ### Per-water F3/F4 GRO
 
-`--output-type f3-gro` and `--output-type f4-gro` are explicit, non-default outputs supported by both engines. The matching parameter must also be selected, for example `--order-parameter f3,f4 --output-type f3-gro,f4-gro`. Each file contains only waters with a defined per-water value, but retains every atom of each selected water in source order. Only the oxygen record is annotated (`; SQQ F3=<value>` or `; SQQ F4=<value>`); hydrogen and virtual-site records are unannotated. GRO coordinate columns and available velocity columns remain fixed-width, and the annotation begins after the velocity field. Grouped output is written below `<frame>/order/`; in separated multi-GRO output it is below `gro/<frame>/order/`. Empty files follow `output.write_empty_file`. These files expose existing per-water values and do not change their calculation.
+`--output-type f3-gro` and `--output-type f4-gro` are explicit, non-default outputs supported by both engines. The matching parameter must also be selected, for example `--order-parameter f3,f4 --output-type f3-gro,f4-gro`. Each file contains only waters with a defined per-water value, but retains every atom of each selected water in source order. Only the oxygen record is annotated (`; SQQ F3=<value>` or `; SQQ F4=<value>`); hydrogen and virtual-site records are unannotated. GRO coordinate columns and available velocity columns remain fixed-width, and the annotation begins after the velocity field. Grouped output is written below `<frame>/order/`; in separated multi-frame/multi-file output it is below `gro/<frame>/order/`. Empty files follow `output.write_empty_file`. These files expose existing per-water values and do not change their calculation.
 
 ## Output Structure
 
-A single GRO file and trajectory inputs retain their established per-frame layout. For two or more GRO files, topology grouping controls only the aggregation root. If every GRO has one compatible topology, all selected outputs are written directly under the requested result directory:
+The layout decision is based on the complete job rather than a particular reader or scheduler. A single ordinary one-frame GRO or XYZ keeps the compact frame-root layout. Every trajectory-like input, including one or more XTC/TRR/LAMMPS/DCD paths or a stacked GRO, and every multi-file GRO/XYZ job uses the separated `info/` plus `gro/<frame>/` layout in serial, thread, and process execution.
+
+For two or more independent GRO files, topology grouping controls only the aggregation root. If every GRO has one compatible topology, all selected outputs are written directly under the requested result directory:
 
 ```text
 result/
@@ -611,11 +615,13 @@ result/
 
 If more than 26 topologies are found, SQQ warns and switches the whole multi-GRO run to information-only output. It still analyzes every readable GRO, but writes only the root `sqq_config_resolved.yaml` and `result/info/*_info.md`; summary XLSX/CSV/detail files, ordinary GRO files, and the complete `sqq_render/` bundle are suppressed. This safety override has precedence over engine defaults and configured output requests.
 
-For normal multiple-GRO groups, Markdown, membership/order TSV, and legacy per-frame VMD reports are placed under `info/`; ordinary structure files are placed under `gro/<frame>/`.
+For every normal multi-frame or multi-file result root, Markdown and optional membership/order TSV reports are placed under `info/`; selected per-frame structure files are placed under `gro/<frame>/`. Serial, thread, and process execution use the same placement. No per-frame directory is created merely to hold one Markdown file.
 
 The four files in `sqq_render/` form one visualization package. `sqq_cage.gro` contains the stable atom topology and first selected frame only. `sqq_cage.xtc` contains the coordinates and box for every selected render frame, with the original physical frame times when available. `sqq_cage.membership.tsv` uses four record types: `F` maps render frames to source frames, time, and effective graph mode; `C` stores every frame-local cage center after orthorhombic PBC wrapping in explicit angstrom coordinates; `G` stores every complete guest-molecule atom group, including guests outside cages; and `M` stores cage/guest membership atoms with cage type and optional phase, domain, and cluster identifiers. “Sparse” applies only to the membership metadata: the XTC still contains every selected atom coordinate in every selected frame. Shared waters and guests assigned to several cages retain all memberships.
 
 SQQ permits only one active Analyze run per output root. A concurrent run stops before modifying results and asks for another `--output` directory. Worker fragments use a private run workspace; final render files are replaced atomically. Temporary-directory removal retries transient Linux/shared-filesystem `ENOTEMPTY`, `EBUSY`, and permission delays. If cleanup still fails, SQQ prints the retained temporary path but does not turn an otherwise completed analysis into a failure.
+
+Each frame stages its Markdown, TSV, and selected GRO files privately and publishes the complete frame bundle only after every selected writer succeeds. Summary XLSX/CSV/detail files use the same recoverable publication rule. A failed write removes its staging data rather than exposing empty directories or a mixture of old and new generated files. Reusing an output root clears known SQQ artifacts from previous source names, grouped/flat layouts, and obsolete lettered topology roots, including F3/F4 output; unknown user files remain untouched.
 
 Keep all four files together in `sqq_render/`, then source only the script from the VMD Tk Console:
 
@@ -682,7 +688,7 @@ Unlike `show`, `sqq color` accepts exactly one family per command. Colors accept
 
 The renderer manages representations by VMD's stable representation names, so `show`, `color`, and frame changes remove only SQQ-created representations and preserve representations added by the user. Rapid frame notifications are coalesced into one pending redraw. Fully unknown cage, cage-ID, guest-selection, cluster-ID, and domain-ID targets are rejected against the complete loaded trajectory; recognized phase names remain valid even when the current frame has no matching membership. Re-sourcing a generated script resets its selection/color state.
 
-Cage, cluster, and domain identifiers are frame-local classifications in 0.3.11; the renderer does not claim cross-frame cage identity. Category selections (`phase`, `cluster`, or `domain`) and recognized phase labels simply report no membership when cluster analysis was not run; an explicit cage/type/cluster/domain target that never occurs anywhere in the loaded trajectory is rejected.
+Cage, cluster, and domain identifiers are frame-local classifications in 0.3.12; the renderer does not claim cross-frame cage identity. Category selections (`phase`, `cluster`, or `domain`) and recognized phase labels simply report no membership when cluster analysis was not run; an explicit cage/type/cluster/domain target that never occurs anywhere in the loaded trajectory is rejected.
 
 When cage or guest objects are shown, the generated VMD script uses the following stable cage-type colors; guest defaults follow the cage type that selected them. The visible shades follow the active VMD ColorID palette.
 

@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import math
 import os
+import shutil
 import sys
+import tempfile
 import warnings as python_warnings
 from argparse import Namespace
 from collections import Counter
@@ -276,7 +278,11 @@ def _analyze_locked_impl(args: Namespace, diagnostics: RunDiagnostics) -> None:
         lammps_config["type_map_source"] = (
             f"{source}: {mapping_text}" if mapping_text else source
         )
-    from .gro_batch import analyze_multi_gro_batch, is_multi_gro_batch
+    from .gro_batch import (
+        analyze_multi_gro_batch,
+        cleanup_previous_multi_gro_outputs,
+        is_multi_gro_batch,
+    )
 
     if is_multi_gro_batch(paths):
         if config["input"].get("delta_time_ps") is not None:
@@ -302,6 +308,7 @@ def _analyze_locked_impl(args: Namespace, diagnostics: RunDiagnostics) -> None:
     parallel_backend = normalize_parallel_backend(config.get("parallel", {}).get("backend", "process"))
     trajectory_indexes: list[int] = []
     frame_selection: TrajectorySelection | None = None
+    separated_frame_output = len(paths) > 1
     validate_unique_output_names(paths)
     trajectory_like_suffixes = {".gro", ".xtc", ".trr"} | set(LAMMPS_TRAJECTORY_SUFFIXES)
     if len(paths) == 1 and paths[0].suffix.lower() in trajectory_like_suffixes:
@@ -312,6 +319,10 @@ def _analyze_locked_impl(args: Namespace, diagnostics: RunDiagnostics) -> None:
             lammps_config=config["input"].get("lammps", {}),
         )
         trajectory_indexes = list(frame_selection.raw_indexes)
+        separated_frame_output = should_use_separated_frame_output(
+            paths,
+            frame_selection,
+        )
         if (
             paths[0].suffix.lower() != ".gro"
             or frame_selection.total_frames > 1
@@ -328,6 +339,7 @@ def _analyze_locked_impl(args: Namespace, diagnostics: RunDiagnostics) -> None:
     else:
         config["input"].pop("sampling", None)
         work_items = len(paths)
+    cleanup_previous_multi_gro_outputs(outdir, config)
     parallelizable = coordinate_parallelizable or (
         trajectory_parallelizable and parallel_backend == "process"
     )
@@ -377,6 +389,7 @@ def _analyze_locked_impl(args: Namespace, diagnostics: RunDiagnostics) -> None:
                 backend=parallel_backend,
                 strict=bool(config.get("run", {}).get("strict", False)),
                 total_started_at=started_at,
+                separated_output=separated_frame_output,
                 fragment_dir=fragment_dir,
             )
         elif workers > 1 and trajectory_parallelizable:
@@ -401,6 +414,7 @@ def _analyze_locked_impl(args: Namespace, diagnostics: RunDiagnostics) -> None:
                 total_started_at=started_at,
                 total_frames=work_items if frame_selection is not None else None,
                 selected_frame_indexes=trajectory_indexes if frame_selection is not None else None,
+                separated_output=separated_frame_output,
                 fragment_dir=fragment_dir,
             )
         if bundle_enabled:
@@ -1511,6 +1525,7 @@ def analyze_paths_serial(
     total_started_at: float,
     total_frames: int | None = None,
     selected_frame_indexes: list[int] | None = None,
+    separated_output: bool = False,
     fragment_dir: Path | None = None,
 ) -> list[dict[str, Any]]:
     """Analyze frames in input order."""
@@ -1555,6 +1570,7 @@ def analyze_paths_serial(
                         outdir,
                         strict=strict,
                         stage_callback=callback,
+                        separated_output=separated_output,
                         fragment_dir=fragment_dir,
                     )
                 rows.append(row)
@@ -1594,6 +1610,7 @@ def analyze_paths_serial(
                 outdir,
                 strict=strict,
                 stage_callback=callback,
+                separated_output=separated_output,
                 fragment_dir=fragment_dir,
             )
             rows.append(row)
@@ -1612,18 +1629,33 @@ def analyze_paths_parallel(
     backend: str,
     strict: bool,
     total_started_at: float,
+    separated_output: bool = False,
     fragment_dir: Path | None = None,
 ) -> list[dict[str, Any]]:
     """Analyze independent coordinate files with the selected concurrency backend."""
     resolved_backend = normalize_parallel_backend(backend)
     if resolved_backend == "thread":
         return analyze_paths_threaded(
-            paths, outdir, config, workers, strict, total_started_at, fragment_dir
+            paths,
+            outdir,
+            config,
+            workers,
+            strict,
+            total_started_at,
+            separated_output,
+            fragment_dir,
         )
     if resolved_backend != "process":
         raise ValueError("Parallel analysis requires backend=process or backend=thread.")
     return analyze_paths_processes(
-        paths, outdir, config, workers, strict, total_started_at, fragment_dir
+        paths,
+        outdir,
+        config,
+        workers,
+        strict,
+        total_started_at,
+        separated_output,
+        fragment_dir,
     )
 
 
@@ -1634,6 +1666,7 @@ def analyze_paths_threaded(
     workers: int,
     strict: bool,
     total_started_at: float,
+    separated_output: bool = False,
     fragment_dir: Path | None = None,
 ) -> list[dict[str, Any]]:
     """Compatibility backend using the legacy shared-memory thread pool."""
@@ -1666,6 +1699,7 @@ def analyze_paths_threaded(
                         outdir,
                         strict,
                         progress,
+                        separated_output,
                         fragment_dir,
                     )
                     futures[future] = frame_index
@@ -1697,6 +1731,7 @@ def analyze_paths_processes(
     workers: int,
     strict: bool,
     total_started_at: float,
+    separated_output: bool = False,
     fragment_dir: Path | None = None,
 ) -> list[dict[str, Any]]:
     """Use spawned processes so CPU-bound topology search can use multiple cores."""
@@ -1737,7 +1772,16 @@ def analyze_paths_processes(
                             frame_index, path = next(task_iterator)
                         except StopIteration:
                             return
-                        future = executor.submit(process_file_task, frame_index, str(path))
+                        future = executor.submit(
+                            process_file_task,
+                            frame_index,
+                            str(path),
+                            None,
+                            None,
+                            None,
+                            None,
+                            separated_output,
+                        )
                         futures[future] = frame_index
 
                 fill_queue()
@@ -1891,6 +1935,7 @@ def process_single_file_path(
     outdir: Path,
     strict: bool,
     progress: ParallelRunProgressDisplay | None = None,
+    separated_output: bool = False,
     fragment_dir: Path | None = None,
 ) -> tuple[int, dict[str, Any]]:
     """Read and analyze one standalone coordinate file."""
@@ -1916,6 +1961,7 @@ def process_single_file_path(
         strict=strict,
         stage_callback=callback,
         fragment_dir=fragment_dir,
+        separated_output=separated_output,
     )
 
 
@@ -1946,23 +1992,132 @@ def process_frame(
         else:
             report_dir = outdir / frame.name
             frame_dir = report_dir
-        report_dir.mkdir(parents=True, exist_ok=True)
-        frame_dir.mkdir(parents=True, exist_ok=True)
         report_stage(stage_callback, "writing outputs")
-        write_frame_outputs(result, frame_dir, config, report_dir=report_dir)
-        if output_enabled(config, "sqq-render"):
-            write_sqq_cage_fragment(
+        staging_root = Path(
+            tempfile.mkdtemp(prefix=".sqq-frame-stage-", dir=outdir)
+        )
+        staged_frame_dir = staging_root / "frame"
+        staged_report_dir = (
+            staging_root / "info" if report_dir != frame_dir else staged_frame_dir
+        )
+        fragment = None
+        try:
+            write_frame_outputs(
                 result,
-                fragment_dir or outdir / FRAGMENT_DIRECTORY,
-                frame_index,
-                requested_graph_mode=config["graph"]["bond_mode"],
+                staged_frame_dir,
+                config,
+                report_dir=staged_report_dir,
             )
+            if output_enabled(config, "sqq-render"):
+                fragment = write_sqq_cage_fragment(
+                    result,
+                    fragment_dir or outdir / FRAGMENT_DIRECTORY,
+                    frame_index,
+                    requested_graph_mode=config["graph"]["bond_mode"],
+                )
+            commit_staged_frame_outputs(
+                frame.name,
+                staged_report_dir,
+                staged_frame_dir,
+                report_dir,
+                frame_dir,
+                staging_root,
+            )
+        except Exception:
+            if fragment is not None:
+                fragment.gro_path.unlink(missing_ok=True)
+                fragment.manifest_path.unlink(missing_ok=True)
+            raise
+        finally:
+            shutil.rmtree(staging_root, ignore_errors=True)
         report_stage(stage_callback, "done")
         return result_row(result)
     except Exception as exc:
         if strict:
             raise
         return failed_row(frame.name, str(frame.source or ""), str(exc))
+
+
+def commit_staged_frame_outputs(
+    frame_name: str,
+    staged_report_dir: Path,
+    staged_frame_dir: Path,
+    report_dir: Path,
+    frame_dir: Path,
+    staging_root: Path,
+) -> None:
+    """Commit one complete frame output set and roll back a failed commit."""
+    root_pairs: list[tuple[Path, Path]] = []
+    for source, target in (
+        (staged_report_dir, report_dir),
+        (staged_frame_dir, frame_dir),
+    ):
+        if any(existing_target == target for _, existing_target in root_pairs):
+            continue
+        root_pairs.append((source, target))
+
+    backup_root = staging_root / "backup"
+    backups: list[tuple[Path, Path]] = []
+    installed: list[Path] = []
+    try:
+        for root_index, (_, target_root) in enumerate(root_pairs):
+            if not target_root.is_dir():
+                continue
+            for existing in sorted(
+                (path for path in target_root.rglob("*") if path.is_file()),
+                key=lambda path: path.as_posix(),
+            ):
+                if not is_generated_frame_output(existing, frame_name):
+                    continue
+                relative = existing.relative_to(target_root)
+                backup = backup_root / str(root_index) / relative
+                backup.parent.mkdir(parents=True, exist_ok=True)
+                os.replace(existing, backup)
+                backups.append((backup, existing))
+
+        for source_root, target_root in root_pairs:
+            if not source_root.is_dir():
+                continue
+            for source in sorted(
+                (path for path in source_root.rglob("*") if path.is_file()),
+                key=lambda path: path.as_posix(),
+            ):
+                target = target_root / source.relative_to(source_root)
+                target.parent.mkdir(parents=True, exist_ok=True)
+                os.replace(source, target)
+                installed.append(target)
+    except Exception:
+        for target in reversed(installed):
+            target.unlink(missing_ok=True)
+        for backup, target in reversed(backups):
+            target.parent.mkdir(parents=True, exist_ok=True)
+            os.replace(backup, target)
+        raise
+    finally:
+        cleanup_empty_output_directories(report_dir, frame_dir)
+
+
+def is_generated_frame_output(path: Path, frame_name: str) -> bool:
+    """Recognize only SQQ-owned files for one frame."""
+    name = path.name.casefold()
+    prefix = f"{frame_name}_".casefold()
+    return name.startswith(prefix) and name.endswith((".md", ".tsv", ".gro", ".vmd.tcl"))
+
+
+def cleanup_empty_output_directories(report_dir: Path, frame_dir: Path) -> None:
+    """Remove empty per-frame directories after commit or rollback."""
+    roots = {report_dir, frame_dir}
+    for root in roots:
+        if root.is_dir():
+            for directory in sorted(
+                (path for path in root.rglob("*") if path.is_dir()),
+                key=lambda path: len(path.parts),
+                reverse=True,
+            ):
+                remove_frame_directory_if_empty(directory)
+        remove_frame_directory_if_empty(root)
+    if frame_dir.parent.name == "gro":
+        remove_frame_directory_if_empty(frame_dir.parent)
 
 
 def report_stage(callback: Callable[[str], None] | None, stage: str) -> None:
@@ -2086,6 +2241,93 @@ def write_frame_outputs(
         remove_frame_directory_if_empty(frame_dir.parent)
 
 
+def cleanup_previous_trajectory_frame_outputs(
+    outdir: Path,
+    source_stem: str | None = None,
+) -> None:
+    """Remove known per-frame files from every previous SQQ layout."""
+    del source_stem
+    report_suffixes = (
+        "_info.md",
+        "_membership.tsv",
+        "_order_parameter.tsv",
+        "_f3f4.tsv",
+        "_view.vmd.tcl",
+    )
+    gro_markers = (
+        "_ring_",
+        "_hc_",
+        "_half_cage",
+        "_qc_",
+        "_quasi_cage",
+        "_cage_",
+        "_ice",
+        "_cluster_",
+        "_f3.gro",
+        "_f4.gro",
+    )
+
+    generated_gro_dirs = {
+        "ring",
+        "half_cage",
+        "quasi_cage",
+        "cage",
+        "hydrate_cluster",
+        "ice",
+        "order",
+    }
+
+    def generated(path: Path) -> bool:
+        name = path.name.casefold()
+        if name.endswith(report_suffixes):
+            return True
+        if not name.endswith(".gro"):
+            return False
+        relative_parts = {
+            part.casefold() for part in path.relative_to(outdir).parts[:-1]
+        }
+        return (
+            any(marker in name for marker in gro_markers)
+            or bool(relative_parts & generated_gro_dirs)
+        )
+
+    for staging_dir in outdir.glob(".sqq-frame-stage-*"):
+        if staging_dir.is_dir():
+            shutil.rmtree(staging_dir, ignore_errors=True)
+
+    info_dir = outdir / "info"
+    if info_dir.is_dir():
+        for candidate in info_dir.iterdir():
+            if candidate.is_file() and generated(candidate):
+                candidate.unlink(missing_ok=True)
+        remove_frame_directory_if_empty(info_dir)
+
+    candidate_roots: list[Path] = []
+    gro_root = outdir / "gro"
+    if gro_root.is_dir():
+        candidate_roots.extend(path for path in gro_root.iterdir() if path.is_dir())
+    excluded = {"info", "gro", "summary", "summary_csv", "summary_detail", "sqq_render"}
+    candidate_roots.extend(
+        path
+        for path in outdir.iterdir()
+        if path.is_dir()
+        and path.name.casefold() not in excluded
+        and not path.name.startswith(".")
+    )
+    for root in dict.fromkeys(candidate_roots):
+        for candidate in root.rglob("*"):
+            if candidate.is_file() and generated(candidate):
+                candidate.unlink(missing_ok=True)
+        for directory in sorted(
+            (path for path in root.rglob("*") if path.is_dir()),
+            key=lambda path: len(path.parts),
+            reverse=True,
+        ):
+            remove_frame_directory_if_empty(directory)
+        remove_frame_directory_if_empty(root)
+    remove_frame_directory_if_empty(gro_root)
+
+
 def remove_optional_info_output(result: FrameResult, frame_dir: Path) -> None:
     """Remove stale info output when info output is disabled."""
     (frame_dir / f"{result.frame.name}_info.md").unlink(missing_ok=True)
@@ -2123,6 +2365,7 @@ def remove_water_order_gro_output(
             path.parent.rmdir()
         except OSError:
             pass
+
 
 def remove_generated_gro_outputs(
     result: FrameResult,
@@ -2316,6 +2559,23 @@ def resolve_explicit_worker_request(value: Any, physical_total: int) -> int:
     if kind == "count":
         return int(amount)
     raise worker_value_error()
+
+
+def should_use_separated_frame_output(
+    paths: list[Path],
+    frame_selection: TrajectorySelection | None = None,
+) -> bool:
+    """Use shared info/GRO roots for every multi-file or trajectory run."""
+    if len(paths) > 1:
+        return True
+    if len(paths) != 1:
+        return False
+    suffix = paths[0].suffix.lower()
+    if suffix == ".xyz":
+        return False
+    if suffix == ".gro":
+        return bool(frame_selection and frame_selection.total_frames > 1)
+    return suffix in ({".xtc", ".trr"} | set(LAMMPS_TRAJECTORY_SUFFIXES))
 
 
 def validate_unique_output_names(paths: list[Path]) -> None:
