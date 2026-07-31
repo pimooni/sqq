@@ -67,6 +67,7 @@ from .io.gro_writer import (
     write_ice_gro_file,
     write_quasi_cage_gro_files,
     write_ring_gro_files,
+    write_water_order_gro_file,
 )
 from .io.lammps import (
     LAMMPS_TRAJECTORY_SUFFIXES,
@@ -82,7 +83,6 @@ from .io.summary import (
     write_membership,
     write_run_config,
     write_summary,
-    write_vmd_script,
 )
 from .io.trajectory import (
     TrajectorySelection,
@@ -361,11 +361,10 @@ def _analyze_locked_impl(args: Namespace, diagnostics: RunDiagnostics) -> None:
     initial_run_info["status"] = "running"
     initial_run_info["error"] = ""
     write_run_config(outdir, config, initial_run_info)
-    bundle_gro = output_enabled(config, "sqq-cage-gro")
-    bundle_script = output_enabled(config, "sqq-render")
+    bundle_enabled = output_enabled(config, "sqq-render")
     cleanup_sqq_cage_bundle(outdir)
     fragment_dir: Path | None = None
-    if bundle_gro or bundle_script:
+    if bundle_enabled:
         fragment_dir = prepare_sqq_cage_fragments(outdir)
 
     try:
@@ -404,13 +403,8 @@ def _analyze_locked_impl(args: Namespace, diagnostics: RunDiagnostics) -> None:
                 selected_frame_indexes=trajectory_indexes if frame_selection is not None else None,
                 fragment_dir=fragment_dir,
             )
-        if bundle_gro or bundle_script:
-            finalize_sqq_cage_bundle(
-                outdir,
-                fragment_dir=fragment_dir,
-                write_gro=bundle_gro,
-                write_script=bundle_script,
-            )
+        if bundle_enabled:
+            finalize_sqq_cage_bundle(outdir, fragment_dir=fragment_dir)
     except Exception as exc:
         if fragment_dir is not None:
             cleanup_sqq_cage_fragment_workspace(fragment_dir)
@@ -642,8 +636,8 @@ def build_run_info(
                     outdir
                     / str(
                         config.get("output", {}).get(
-                            "summary_detail_dir",
-                            "summary_detail",
+                            "summary_csv_dir",
+                            "summary",
                         )
                     )
                 ).resolve()
@@ -1956,7 +1950,7 @@ def process_frame(
         frame_dir.mkdir(parents=True, exist_ok=True)
         report_stage(stage_callback, "writing outputs")
         write_frame_outputs(result, frame_dir, config, report_dir=report_dir)
-        if output_enabled(config, "sqq-cage-gro"):
+        if output_enabled(config, "sqq-render"):
             write_sqq_cage_fragment(
                 result,
                 fragment_dir or outdir / FRAGMENT_DIRECTORY,
@@ -2021,13 +2015,20 @@ def write_frame_outputs(
             remove_order=True,
         )
 
-    if not cpp_mode and output_enabled(config, "vmd"):
-        write_vmd_script(result, report_dir)
-    else:
-        remove_optional_vmd_output(result, report_dir)
+    remove_optional_vmd_output(result, report_dir)
 
     layout = str(output.get("structure_layout", "grouped"))
     write_empty = bool(output.get("write_empty_files", False))
+    for parameter in ("f3", "f4"):
+        remove_water_order_gro_output(result, frame_dir, parameter, layout)
+        if output_enabled(config, f"{parameter}-gro"):
+            write_water_order_gro_file(
+                result,
+                frame_dir,
+                parameter,
+                write_empty=write_empty,
+                layout=layout,
+            )
     remove_generated_gro_outputs(result, frame_dir, "ring-gro", layout)
     if not cpp_mode and output_enabled(config, "ring-gro"):
         write_ring_gro_files(
@@ -2106,6 +2107,22 @@ def remove_optional_vmd_output(result: FrameResult, frame_dir: Path) -> None:
     """Remove stale optional VMD helper scripts when disabled."""
     (frame_dir / f"{result.frame.name}_view.vmd.tcl").unlink(missing_ok=True)
 
+
+def remove_water_order_gro_output(
+    result: FrameResult,
+    frame_dir: Path,
+    parameter: str,
+    layout: str,
+) -> None:
+    """Remove one stale F3/F4 GRO output without touching the other."""
+    filename = f"{result.frame.name}_{parameter}.gro"
+    path = frame_dir / filename if layout == "flat" else frame_dir / "order" / filename
+    path.unlink(missing_ok=True)
+    if layout == "grouped":
+        try:
+            path.parent.rmdir()
+        except OSError:
+            pass
 
 def remove_generated_gro_outputs(
     result: FrameResult,
@@ -2756,22 +2773,14 @@ def normalize_analysis_scopes(config: dict[str, Any]) -> None:
         output.get("write_empty_files", False),
         "output.write_empty_files",
     )
-    for key, default in (
-        ("summary_csv_dir", "summary"),
-        ("summary_detail_dir", "summary_detail"),
-    ):
-        directory = str(output.get(key, default)).strip() or default
-        directory_path = Path(directory)
-        if directory_path.is_absolute() or ".." in directory_path.parts:
-            raise ValueError(f"output.{key} must be a relative directory inside the output folder.")
-        output[key] = directory
-    if (
-        Path(output["summary_csv_dir"]).as_posix().casefold()
-        == Path(output["summary_detail_dir"]).as_posix().casefold()
-    ):
-        raise ValueError(
-            "output.summary_csv_dir and output.summary_detail_dir must be different."
-        )
+    output.pop("summary_detail_dir", None)
+    key = "summary_csv_dir"
+    default = "summary"
+    directory = str(output.get(key, default)).strip() or default
+    directory_path = Path(directory)
+    if directory_path.is_absolute() or ".." in directory_path.parts:
+        raise ValueError(f"output.{key} must be a relative directory inside the output folder.")
+    output[key] = directory
     cage_isomer_rows = str(output.get("cage_isomer_rows", "nonzero")).strip().lower()
     if cage_isomer_rows not in {"nonzero", "all"}:
         raise ValueError("output.cage_isomer_rows / --cage-isomer-rows must be nonzero or all.")
@@ -2804,6 +2813,13 @@ def normalize_analysis_scopes(config: dict[str, Any]) -> None:
         order["focus_waters"] = sorted({int(item) for item in focus_items})
     except (TypeError, ValueError) as exc:
         raise ValueError("order.focus_waters must contain integer residue ids.") from exc
+    selected_order_parameters = set(order["parameters"])
+    for parameter in ("f3", "f4"):
+        if output_enabled(config, f"{parameter}-gro") and parameter not in selected_order_parameters:
+            raise ValueError(
+                f"{parameter}-gro output requires {parameter} in --order-parameter "
+                "or order_parameter.enabled."
+            )
     per_water_order = any(
         name in {"f3", "f4"} or name.startswith("q")
         for name in order["parameters"]

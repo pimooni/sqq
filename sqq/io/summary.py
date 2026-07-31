@@ -151,13 +151,13 @@ SUMMARY_COLUMNS = [
 ]
 
 SUMMARY_DETAIL_TABLE_NAMES = (
-    "failures",
     "cage_occupancy",
     "cage_isomer",
     "quasi_cage_isomer",
     "hydrate_domain",
     "hydrate_cluster_detail",
 )
+LEGACY_SUMMARY_DETAIL_DIRECTORY = "summary_detail"
 
 # Main summary CSV filenames mirror the workbook sheet names. Keeping the
 # allow-list explicit prevents cleanup from touching unrelated files.
@@ -172,8 +172,6 @@ SUMMARY_MAIN_TABLE_NAMES = (
     "half_cage",
     "quasi_cage",
     "cage",
-    "cage_occupancy",
-    "cage_isomer",
     "hydrate_cluster",
     "order_parameter",
     "ice",
@@ -1889,7 +1887,7 @@ def summary_output_tables(
         (sheet_name, table, True)
         for sheet_name, table in summary_sheet_tables(data, config).items()
     )
-    if not is_cpp_mode(config.get("mode", DEFAULT_MODE)) and not detail_index.empty:
+    if not detail_index.empty:
         tables.append(("detail_index", detail_index, True))
     return tables
 
@@ -2148,9 +2146,13 @@ def write_summary_detail_csvs(
 ) -> pd.DataFrame | tuple[pd.DataFrame, dict[str, Any]]:
     """Atomically write detail CSVs and optionally return their timing metadata."""
     started = perf_counter()
-    detail_dir_name = str(config.get("output", {}).get("summary_detail_dir", "summary_detail")).strip() or "summary_detail"
+    detail_dir_name = (
+        str(config.get("output", {}).get("summary_csv_dir", "summary")).strip()
+        or "summary"
+    )
     detail_dir = outdir / detail_dir_name
     detail_dir.mkdir(parents=True, exist_ok=True)
+    _remove_legacy_summary_detail_csvs(outdir, detail_dir)
     rows: list[dict[str, Any]] = []
     metrics: dict[str, Any] = {"enabled": True, "total_seconds": 0.0, "tables": []}
     pending: list[tuple[Path, Path]] = []
@@ -2198,10 +2200,12 @@ def write_summary_detail_csvs(
 
 def remove_summary_detail_csvs(outdir: Path, config: dict[str, Any]) -> None:
     """Remove known stale detail CSVs when summary-detail-csv is disabled."""
-    detail_dir_name = str(
-        config.get("output", {}).get("summary_detail_dir", "summary_detail")
-    ).strip() or "summary_detail"
+    detail_dir_name = (
+        str(config.get("output", {}).get("summary_csv_dir", "summary")).strip()
+        or "summary"
+    )
     detail_dir = outdir / detail_dir_name
+    _remove_legacy_summary_detail_csvs(outdir, detail_dir)
     if not detail_dir.exists():
         return
     commit_output_bundle(
@@ -2210,6 +2214,21 @@ def remove_summary_detail_csvs(outdir: Path, config: dict[str, Any]) -> None:
     )
     try:
         detail_dir.rmdir()
+    except OSError:
+        pass
+
+
+def _remove_legacy_summary_detail_csvs(outdir: Path, current_dir: Path) -> None:
+    """Remove known SQQ detail files from the retired detail directory."""
+    legacy_dir = outdir / LEGACY_SUMMARY_DETAIL_DIRECTORY
+    if legacy_dir == current_dir or not legacy_dir.exists():
+        return
+    commit_output_bundle(
+        [],
+        [legacy_dir / f"{name}.csv" for name in SUMMARY_DETAIL_TABLE_NAMES],
+    )
+    try:
+        legacy_dir.rmdir()
     except OSError:
         pass
 
@@ -2666,32 +2685,15 @@ def summary_markdown_tables(data: pd.DataFrame) -> list[tuple[str, pd.DataFrame]
 def summary_sheet_tables(data: pd.DataFrame, config: dict[str, Any]) -> dict[str, pd.DataFrame]:
     """Build lightweight main-summary tables using the configured scopes."""
     if is_cpp_mode(config.get("mode", DEFAULT_MODE)):
-        include_zero_isomers = (
-            str(config.get("output", {}).get("cage_isomer_rows", "nonzero")).lower()
-            == "all"
-        )
         tables: dict[str, pd.DataFrame] = {
             "failures": failure_summary_table(data),
             "cage": cage_summary_table(data),
-        }
-        if has_selected_guests(data):
-            tables["cage_occupancy"] = cage_occupancy_summary_table(
+            "order_parameter": order_parameter_summary_table(
                 data,
-                markdown_style=False,
-            )
-        tables.update(
-            {
-                "cage_isomer": cage_isomer_summary_table(
-                    data,
-                    include_zero_rows=include_zero_isomers,
-                ),
-                "order_parameter": order_parameter_summary_table(
-                    data,
-                    config.get("order", {}).get("parameters", ["f3", "f4"]),
-                    include_focus=bool(config.get("order", {}).get("focus_waters", [])),
-                ),
-            }
-        )
+                config.get("order", {}).get("parameters", ["f3", "f4"]),
+                include_focus=bool(config.get("order", {}).get("focus_waters", [])),
+            ),
+        }
         return {name: table for name, table in tables.items() if not table.empty}
 
     ring_sizes = configured_ring_report_sizes(config)
@@ -2738,13 +2740,15 @@ def summary_detail_tables(
     *,
     raw_rows: list[dict[str, Any]] | None = None,
 ) -> dict[str, pd.DataFrame]:
-    """Build potentially large multi-row tables for summary-detail-csv output."""
-    include_zero_isomers = str(config.get("output", {}).get("cage_isomer_rows", "nonzero")).lower() == "all"
+    """Build detailed CSV tables selected independently from the main summary."""
+    include_zero_isomers = (
+        str(config.get("output", {}).get("cage_isomer_rows", "nonzero")).lower()
+        == "all"
+    )
     tables: dict[str, pd.DataFrame] = {}
     if output_enabled(config, "summary-detail-csv"):
         tables.update(
             {
-                "failures": failure_summary_table(data),
                 "cage_occupancy": cage_occupancy_summary_table(
                     data,
                     markdown_style=False,
@@ -2753,12 +2757,13 @@ def summary_detail_tables(
                     data,
                     include_zero_rows=include_zero_isomers,
                 ),
-                "quasi_cage_isomer": quasi_cage_isomer_summary_table(
-                    data,
-                    raw_rows=raw_rows,
-                ),
             }
         )
+        if not is_cpp_mode(config.get("mode", DEFAULT_MODE)):
+            tables["quasi_cage_isomer"] = quasi_cage_isomer_summary_table(
+                data,
+                raw_rows=raw_rows,
+            )
     cluster_detail_enabled = output_enabled(config, "cluster-detail")
     if cluster_detail_enabled:
         tables["hydrate_domain"] = hydrate_domain_table(data)
@@ -2767,7 +2772,11 @@ def summary_detail_tables(
     if cluster_detail_enabled and hydrate_cluster_is_enabled(data):
         keep_empty.add("hydrate_domain")
         keep_empty.add("hydrate_cluster_detail")
-    return {name: table for name, table in tables.items() if not table.empty or name in keep_empty}
+    return {
+        name: table
+        for name, table in tables.items()
+        if not table.empty or name in keep_empty
+    }
 
 
 def hydrate_cluster_summary_table(data: pd.DataFrame) -> pd.DataFrame:

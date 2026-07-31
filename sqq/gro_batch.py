@@ -213,10 +213,9 @@ def analyze_multi_gro_batch(
         for group in grouping.groups:
             group_config = group_configs[group.group_index]
             group_outdir = group_outdirs[group.group_index]
-            bundle_gro = output_enabled(group_config, "sqq-cage-gro")
-            bundle_script = output_enabled(group_config, "sqq-render")
+            bundle_enabled = output_enabled(group_config, "sqq-render")
             cleanup_sqq_cage_bundle(group_outdir)
-            if bundle_gro or bundle_script:
+            if bundle_enabled:
                 bundle_fragment_dirs[group.group_index] = (
                     prepare_sqq_cage_fragments(group_outdir)
                 )
@@ -249,8 +248,6 @@ def analyze_multi_gro_batch(
             finalize_sqq_cage_bundle(
                 group_outdirs[group_index],
                 fragment_dir=bundle_fragment_dirs[group_index],
-                write_gro=output_enabled(group_config, "sqq-cage-gro"),
-                write_script=output_enabled(group_config, "sqq-render"),
             )
     except Exception as exc:
         for fragment_dir in bundle_fragment_dirs.values():

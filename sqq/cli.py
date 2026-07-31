@@ -211,6 +211,14 @@ def _add_analysis_arguments(
         help="Select order parameters, e.g. f3,f4,q6, all, or none.",
     )
     command_parser.add_argument(
+        "--output-type",
+        metavar="TYPE[,TYPE...]",
+        help=(
+            "Replace the output list; use default with extra types to extend "
+            "the engine defaults."
+        ),
+    )
+    command_parser.add_argument(
         "--pair",
         dest="pair",
         metavar="PAIRS.txt",

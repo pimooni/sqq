@@ -2,6 +2,64 @@
 
 This file records versioned update notes. New releases should be appended above older entries.
 
+## Version 0.3.11
+
+### Short Summary
+
+Version 0.3.11 fixes the remaining VMD cage-center/guest picking problems and simplifies output selection. `sqq-render` now owns one indivisible underscore-named render package, main and detail CSV files share `summary/`, and SQQ-Py/SQQ-CPP use explicit engine-specific summary schemas. The new combinable `default` selector extends an engine preset without repeating it. Package, configuration schema, and native-core metadata are synchronized at `0.3.11`, dated Jul 31, 2026. Scientific analysis definitions are unchanged.
+
+### Main Changes
+
+1. Cage-center selection
+   - `sqq pick center` automatically enters VMD Atom Label mode; users no longer need to select Query manually.
+   - Reads the internal pickpoint tag returned by VMD graphics metadata instead of assuming that it equals the graphics object ID.
+   - Clicking a yellow center highlights the exact cage; water-atom clicks remain ignored.
+   - Removes temporary atom labels created by VMD without enabling persistent SQQ labels.
+
+2. Guest selection and stable highlighting
+   - `sqq pick guest` automatically enters VMD Pick mode and handles `vmd_pick_atom` callbacks.
+   - Clicking any atom of a mapped guest highlights its complete molecule and every cage containing it.
+   - Uses persistent yellow DynamicBonds and orange CPK highlight layers whose atom selections are updated in place.
+   - Guests without cage membership continue to report that state without inventing a cage assignment.
+
+3. Release synchronization and validation
+   - Synchronizes Python package, configuration schema, CMake project, native core, and wheel validation at `0.3.11` with release date Jul 31, 2026.
+   - Adds regression coverage for automatic mouse modes, graphics-tag mapping, atom-label cleanup, persistent highlight layers, repeated picks, and repeated Tcl sourcing.
+
+4. Unified output selection
+   - Makes `--output-type` public and adds combinable `default`, for example `--output-type default,summary-detail-csv`.
+   - Keeps `all` and `none` exclusive and records the expanded, deduplicated effective list.
+   - Removes the public `sqq-cage-gro` and legacy `vmd` types; both now report that `sqq-render` should be used.
+   - Sets SQQ-Py defaults to `info,sqq-render,summary-xlsx` and SQQ-CPP defaults to `info,sqq-render,summary-csv,summary-detail-csv`.
+
+5. Render package and filenames
+   - Treats `sqq-render` as one indivisible package under `sqq_render/`.
+   - Renames package members to `sqq_cage.gro`, `sqq_cage.xtc`, `sqq_cage.membership.tsv`, and `sqq_cage.vmd.tcl`.
+   - Removes stale legacy hyphen-named files when a result directory is reused.
+
+6. Unified main/detail summaries
+   - Makes `summary-xlsx` and `summary-csv` use one main-table builder.
+   - Keeps SQQ-Py main tables for connection/ring/half/quasi/cage/optional cluster/order/ice; keeps the applicable SQQ-CPP subset for cage and F3/F4.
+   - Moves cage occupancy and cage isomers to `summary-detail-csv`; SQQ-Py additionally writes exact quasi-cage isomers.
+   - Writes main, detail, and optional cluster-detail CSVs into the same configured `summary/` directory with disjoint filenames.
+   - Retires `output.summary_detail_dir`; old files in the default `summary_detail/` directory are removed conservatively by known filename only.
+
+7. Per-water F3/F4 GRO output
+   - Adds explicit `f3-gro` and `f4-gro` output types for SQQ-Py and SQQ-CPP; neither is enabled by default.
+   - Writes only waters with a defined per-water value while retaining each complete water molecule in source atom order.
+   - Annotates only the oxygen record with an eight-decimal F3 or F4 value after the fixed-width velocity field.
+   - Places grouped files under `<frame>/order/` and applies the existing empty-file policy.
+   - Keeps all F3/F4 calculations and scientific results unchanged.
+
+### Compatibility and Result Impact
+
+- Graph, ring, half/quasi, cage, occupancy, hydrate phase/domain/boundary, order-parameter, and ice algorithms are unchanged.
+- The compact GRO/XTC/membership data model is unchanged; use the 0.3.11 Tcl script for the corrected interactive behavior.
+- Existing `show`, `color`, `pick`, and `clear` commands are unchanged. Output types `sqq-cage-gro` and `vmd` are removed; use `sqq-render`.
+- Cross-frame cage tracking and persistent cage IDs remain deferred.
+
+Status: these 0.3.11 changes are local and uncommitted. No commit, tag, push, wheel publication, or PyPI publication has been performed.
+
 ## Version 0.3.10
 
 ### Short Summary
@@ -32,12 +90,14 @@ Version 0.3.10 fixes LAMMPS native-time propagation, makes Analyze terminal outp
    - Writes complete guest-molecule atom groups to the sparse membership TSV.
    - `sqq pick guest` listens to `vmd_pick_event`; clicking any guest atom highlights the complete guest and every cage containing it.
    - Zero, one, and multiple cage memberships are handled explicitly; overlapping memberships are not reduced to an arbitrary first cage.
+
    - `sqq pick center` shows center markers without text by default. Text is controlled only by `sqq show label [on|off]`; the historical `lable` spelling remains a compatibility alias.
    - Internal frame redraws are silent. Only explicit `show`, `color`, `pick`, `clear`, and actual graph-mode changes print VMD status lines.
 
 5. Release synchronization and validation
    - Synchronizes Python package, configuration schema, CMake project, native core, and wheel-test metadata at `0.3.10` with release date Jul 30, 2026.
    - Adds external regression coverage for LAMMPS physical `dt`, warning visibility, terminal stream/order behavior, TSV center/guest records, center/guest callbacks, multi-membership handling, frame changes, and repeated Tcl sourcing.
+
 
 ### Compatibility and Result Impact
 
@@ -109,6 +169,7 @@ Version 0.3.9 introduces a compact public CLI, `-e` / `--engine`, singular `--pa
    - Keeps the public output-type selector `sqq-render` unchanged and removes stale root-level or legacy-named visualization files when a reused output root is finalized successfully.
    - Keeps cage, guest, phase, cluster, and domain display/color commands, labels, current-frame center/guest picking, additive show layers, deterministic cage-family ordering, and the white VMD background.
    - Cage, cluster, and domain identifiers remain frame-local in 0.3.9; this release does not assign persistent cross-frame cage IDs.
+
 
 ### Compatibility and Result Impact
 

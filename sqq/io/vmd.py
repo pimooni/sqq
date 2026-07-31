@@ -31,10 +31,14 @@ FRAGMENT_DIRECTORY = ".sqq-cage-fragments"
 FRAGMENT_DIRECTORY_GLOB = f"{FRAGMENT_DIRECTORY}-*"
 OUTPUT_LOCK_NAME = ".sqq.lock"
 SQQ_RENDER_DIRECTORY = "sqq_render"
-SQQ_CAGE_GRO_NAME = "sqq-cage.gro"
-SQQ_CAGE_XTC_NAME = "sqq-cage.xtc"
-SQQ_CAGE_MEMBERSHIP_NAME = "sqq-cage.membership.tsv"
-SQQ_RENDER_SCRIPT_NAME = "sqq-cage.vmd.tcl"
+SQQ_CAGE_GRO_NAME = "sqq_cage.gro"
+SQQ_CAGE_XTC_NAME = "sqq_cage.xtc"
+SQQ_CAGE_MEMBERSHIP_NAME = "sqq_cage.membership.tsv"
+SQQ_RENDER_SCRIPT_NAME = "sqq_cage.vmd.tcl"
+LEGACY_SQQ_CAGE_GRO_NAME = "sqq-cage.gro"
+LEGACY_SQQ_CAGE_XTC_NAME = "sqq-cage.xtc"
+LEGACY_SQQ_CAGE_MEMBERSHIP_NAME = "sqq-cage.membership.tsv"
+LEGACY_SQQ_CAGE_SCRIPT_NAME = "sqq-cage.vmd.tcl"
 LEGACY_SQQ_RENDER_SCRIPT_NAME = "sqq-render.vmd.tcl"
 ANNOTATION_PREFIX = "; SQQ1 m="
 ATOM_PREFIX_WIDTH = 44
@@ -225,6 +229,17 @@ def finalize_sqq_cage_bundle(
     xtc_path = render_dir / SQQ_CAGE_XTC_NAME
     membership_path = render_dir / SQQ_CAGE_MEMBERSHIP_NAME
     script_path = render_dir / SQQ_RENDER_SCRIPT_NAME
+    for legacy_name in (
+        LEGACY_SQQ_CAGE_GRO_NAME,
+        LEGACY_SQQ_CAGE_XTC_NAME,
+        LEGACY_SQQ_CAGE_MEMBERSHIP_NAME,
+        LEGACY_SQQ_CAGE_SCRIPT_NAME,
+        LEGACY_SQQ_RENDER_SCRIPT_NAME,
+    ):
+        _best_effort_unlink(
+            render_dir / legacy_name,
+            "legacy render output",
+        )
     manifests = _fragment_manifests(workspace, fragments)
     try:
         if not manifests:
@@ -236,7 +251,7 @@ def finalize_sqq_cage_bundle(
         _validate_fragment_records(records)
         if write_script and not write_gro:
             raise ValueError(
-                "sqq-render requires sqq-cage-gro; enable sqq-cage-gro first."
+                "sqq-render requires its topology GRO."
             )
 
         if write_script:
@@ -310,6 +325,10 @@ def _remove_legacy_root_render_outputs(root: Path) -> None:
         root / SQQ_CAGE_XTC_NAME,
         root / SQQ_CAGE_MEMBERSHIP_NAME,
         root / SQQ_RENDER_SCRIPT_NAME,
+        root / LEGACY_SQQ_CAGE_GRO_NAME,
+        root / LEGACY_SQQ_CAGE_XTC_NAME,
+        root / LEGACY_SQQ_CAGE_MEMBERSHIP_NAME,
+        root / LEGACY_SQQ_CAGE_SCRIPT_NAME,
         root / LEGACY_SQQ_RENDER_SCRIPT_NAME,
     ):
         _best_effort_unlink(path, "legacy root-level render output")
@@ -949,13 +968,13 @@ def _validate_fragment_records(records: list[dict[str, Any]]) -> None:
     for record in records:
         if int(record["atom_count"]) != int(reference["atom_count"]):
             raise ValueError(
-                "sqq-cage.gro requires a compatible atom topology across frames; "
+                "sqq_cage.gro requires a compatible atom topology across frames; "
                 f"{reference['frame_name']} has {reference['atom_count']} atoms but "
                 f"{record['frame_name']} has {record['atom_count']}."
             )
         if record["atom_signature"] != reference["atom_signature"]:
             raise ValueError(
-                "sqq-cage.gro requires identical atom identity and order across "
+                "sqq_cage.gro requires identical atom identity and order across "
                 f"frames; {record['frame_name']} does not match "
                 f"{reference['frame_name']}."
             )
@@ -1080,7 +1099,7 @@ def _write_xtc(path: Path, records: list[dict[str, Any]]) -> None:
         from MDAnalysis.coordinates.XTC import XTCWriter
     except ImportError as exc:
         raise RuntimeError(
-            "Writing sqq-cage.xtc requires MDAnalysis."
+            "Writing sqq_cage.xtc requires MDAnalysis."
         ) from exc
 
     atom_count = int(records[0]["atom_count"])
@@ -1336,10 +1355,13 @@ _VMD_SCRIPT = r'''# SQQ annotated cage and guest renderer for VMD.
 namespace eval ::SQQ {
     catch {trace remove variable ::vmd_frame write ::SQQ::frame_changed}
     catch {trace remove variable ::vmd_pick_atom write ::SQQ::pick_atom_changed}
-    catch {trace remove variable ::vmd_pick_event write ::SQQ::pick_atom_event}
+    catch {trace remove variable ::vmd_pick_atom write ::SQQ::pick_atom_event}
     catch {trace remove variable ::vmd_pick_graphics write ::SQQ::pick_graphics_changed}
     if {[info exists frame_after_id] && $frame_after_id ne ""} {
         catch {after cancel $frame_after_id}
+    }
+    if {[info exists pick_after_id] && $pick_after_id ne ""} {
+        catch {after cancel $pick_after_id}
     }
     catch {::SQQ::clear_graphics}
     catch {::SQQ::clear_representations}
@@ -1357,6 +1379,10 @@ namespace eval ::SQQ {
     variable pick_mode off
     variable selected_cages {}
     variable selected_guest ""
+    variable atom_label_count 0
+    variable pick_after_id ""
+    variable pick_cage_rep_name ""
+    variable pick_guest_rep_name ""
     variable graphics_ids {}
     variable group_keys
     variable group_atoms
@@ -2017,6 +2043,7 @@ proc ::SQQ::set_show {values args} {
 }
 
 proc ::SQQ::reset_show {{announce 0}} {
+    ::SQQ::cancel_pending_pick
     variable active_families
     variable active_targets
     variable color_overrides
@@ -2057,6 +2084,8 @@ proc ::SQQ::set_label {values} {
 }
 
 proc ::SQQ::set_pick_mode {value} {
+    ::SQQ::cancel_pending_pick
+    variable atom_label_count
     variable pick_mode
     variable selected_cages
     variable selected_guest
@@ -2067,14 +2096,22 @@ proc ::SQQ::set_pick_mode {value} {
     set pick_mode $mode
     set selected_cages {}
     set selected_guest ""
-    if {$mode ne "off"} {
-        catch {mouse mode 4 0}
-    }
     ::SQQ::render_current
     if {$mode eq "off"} {
         puts "SQQ pick: off; restored opaque objects"
     } else {
-        puts "SQQ pick: $mode; mouse query mode enabled; objects are transparent until selected"
+        if {![catch {label list Atoms} atom_labels]} {
+            set atom_label_count [llength $atom_labels]
+        } else {
+            set atom_label_count 0
+        }
+        set native_mode [expr {$mode eq "center" ? "labelatom" : "pick"}]
+        if {[catch {mouse mode $native_mode} message]} {
+            set pick_mode off
+            ::SQQ::render_current
+            error "SQQ could not enable VMD picking: $message"
+        }
+        puts "SQQ pick: $mode; VMD $native_mode mode enabled; objects are transparent until selected"
     }
 }
 
@@ -2141,6 +2178,8 @@ proc ::SQQ::adopt_initial_representations {} {
 
 proc ::SQQ::clear_representations {} {
     variable molid
+    variable pick_cage_rep_name
+    variable pick_guest_rep_name
     variable representation_names
     if {$molid < 0} { return }
     set indexes {}
@@ -2150,6 +2189,8 @@ proc ::SQQ::clear_representations {} {
     }
     foreach rep [lsort -integer -decreasing -unique $indexes] { mol delrep $rep $molid }
     set representation_names {}
+    set pick_cage_rep_name ""
+    set pick_guest_rep_name ""
 }
 
 proc ::SQQ::expanded_targets {frame family targets} {
@@ -2246,11 +2287,17 @@ proc ::SQQ::render_overlays {frame} {
             catch {graphics $molid color yellow}
             if {![catch {graphics $molid sphere $center radius 0.35 resolution 10} graphics_id]} {
                 lappend graphics_ids $graphics_id
-                set graphics_targets($graphics_id) $object_id
             }
             if {![catch {graphics $molid pickpoint $center} graphics_id]} {
                 lappend graphics_ids $graphics_id
-                set graphics_targets($graphics_id) $object_id
+                if {[catch {graphics $molid info $graphics_id} pickpoint_info] ||
+                    [llength $pickpoint_info] != 3 ||
+                    ![string equal -nocase [lindex $pickpoint_info 0] pickpoint] ||
+                    ![string is integer -strict [lindex $pickpoint_info 2]]} {
+                    error "Unexpected VMD pickpoint metadata for graphics id $graphics_id: $pickpoint_info"
+                }
+                set graphics_tag [lindex $pickpoint_info 2]
+                set graphics_targets($graphics_tag) $object_id
             }
         }
         if {$label_visible} {
@@ -2278,62 +2325,104 @@ proc ::SQQ::guest_cages_for_atom {frame atom_index} {
     return [lsort -dictionary -unique $candidates]
 }
 
+proc ::SQQ::cancel_pending_pick {} {
+    variable pick_after_id
+    if {$pick_after_id ne ""} {
+        catch {after cancel $pick_after_id}
+        set pick_after_id ""
+    }
+}
+
+proc ::SQQ::remove_new_atom_labels {} {
+    variable atom_label_count
+    if {[catch {label list Atoms} atom_labels]} { return }
+    while {[llength $atom_labels] > $atom_label_count} {
+        catch {label delete Atoms [expr {[llength $atom_labels] - 1}]}
+        if {[catch {label list Atoms} updated_labels]} { return }
+        if {[llength $updated_labels] >= [llength $atom_labels]} { return }
+        set atom_labels $updated_labels
+    }
+}
+
+proc ::SQQ::schedule_atom_label_cleanup {} {
+    foreach delay {0 100 250 500 1000} {
+        after $delay [list ::SQQ::remove_new_atom_labels]
+    }
+}
+
+proc ::SQQ::apply_pick_selection {expected_mode cages guest message} {
+    variable pick_after_id
+    variable pick_mode
+    variable selected_cages
+    variable selected_guest
+    set pick_after_id ""
+    if {$pick_mode ne $expected_mode} { return }
+    ::SQQ::remove_new_atom_labels
+    set selected_cages $cages
+    set selected_guest $guest
+    set frame [molinfo $::SQQ::molid get frame]
+    ::SQQ::render_selected $frame
+    display update
+    if {$message ne ""} { puts $message }
+}
+
+proc ::SQQ::queue_pick_selection {expected_mode cages guest message} {
+    variable pick_after_id
+    if {$pick_after_id ne ""} { catch {after cancel $pick_after_id} }
+    set pick_after_id [after 50 [list \
+        ::SQQ::apply_pick_selection $expected_mode $cages $guest $message]]
+}
+
 proc ::SQQ::pick_atom_event {name1 name2 operation} {
     variable atom_guest
     variable molid
     variable pick_mode
-    variable selected_cages
-    variable selected_guest
-    if {$pick_mode ne "guest" || $molid < 0} { return }
+    if {$pick_mode ni {center guest} || $molid < 0} { return }
     if {![info exists ::vmd_pick_atom] ||
         ![string is integer -strict $::vmd_pick_atom] || $::vmd_pick_atom < 0} {
         return
     }
-    if {[info exists ::vmd_pick_mol] && $::vmd_pick_mol != $molid} { return }
+    if {![info exists ::vmd_pick_mol] || $::vmd_pick_mol != $molid} { return }
+    if {$pick_mode eq "center"} {
+        ::SQQ::schedule_atom_label_cleanup
+        return
+    }
     set frame [molinfo $molid get frame]
     set atom_key "$frame,$::vmd_pick_atom"
     if {![info exists atom_guest($atom_key)]} { return }
     set identifier $atom_guest($atom_key)
     set cages [::SQQ::guest_cages_for_atom $frame $::vmd_pick_atom]
     if {[llength $cages] == 0} {
-        set selected_guest ""
-        set selected_cages {}
-        ::SQQ::render_current
-        puts "SQQ pick guest: $identifier has no cage membership (frame $frame)"
+        ::SQQ::queue_pick_selection guest {} "" \
+            "SQQ pick guest: $identifier has no cage membership (frame $frame)"
         return
     }
-    set selected_guest $identifier
-    set selected_cages $cages
-    ::SQQ::render_current
-    puts "SQQ selected guest: $selected_guest; cage memberships: [join $selected_cages { }] (frame $frame)"
+    ::SQQ::queue_pick_selection guest $cages $identifier \
+        "SQQ selected guest: $identifier; cage memberships: [join $cages { }] (frame $frame)"
 }
 
 proc ::SQQ::pick_graphics_changed {name1 name2 operation} {
     variable graphics_targets
     variable molid
     variable pick_mode
-    variable selected_cages
-    variable selected_guest
     if {$pick_mode ne "center" || $molid < 0 ||
         ![info exists ::vmd_pick_graphics]} {
         return
     }
     set values $::vmd_pick_graphics
     if {[llength $values] != 4} { return }
-    lassign $values picked_molid graphics_id button shift_state
+    lassign $values picked_molid graphics_tag button shift_state
     if {![string is integer -strict $picked_molid] ||
         $picked_molid != $molid ||
-        ![string is integer -strict $graphics_id] ||
-        ![info exists graphics_targets($graphics_id)]} {
+        ![string is integer -strict $graphics_tag] ||
+        ![info exists graphics_targets($graphics_tag)]} {
         return
     }
     set frame [molinfo $molid get frame]
-    set selected_cages [list $graphics_targets($graphics_id)]
-    set selected_guest ""
-    ::SQQ::render_current
-    puts "SQQ selected center: [lindex $selected_cages 0] (frame $frame)"
+    set object_id $graphics_targets($graphics_tag)
+    ::SQQ::queue_pick_selection center [list $object_id] "" \
+        "SQQ selected center: $object_id (frame $frame)"
 }
-
 proc ::SQQ::render_guest_pick_context {frame} {
     variable guest_atoms
     variable guest_keys
@@ -2358,30 +2447,71 @@ proc ::SQQ::render_guest_pick_context {frame} {
     }
 }
 
+proc ::SQQ::create_pick_highlight_representations {} {
+    variable molid
+    variable pick_cage_rep_name
+    variable pick_guest_rep_name
+    variable pick_mode
+    set pick_cage_rep_name ""
+    set pick_guest_rep_name ""
+    if {$pick_mode eq "off"} { return }
+
+    mol representation DynamicBonds 3.5 0.250 12.0
+    mol color ColorID [::SQQ::color_value yellow]
+    mol selection "none"
+    mol material Opaque
+    mol addrep $molid
+    set rep [expr {[molinfo $molid get numreps] - 1}]
+    ::SQQ::track_representation $rep
+    set pick_cage_rep_name [mol repname $molid $rep]
+
+    if {$pick_mode eq "guest"} {
+        mol representation CPK 1.0 0.3 12.0 12.0
+        mol color ColorID [::SQQ::color_value orange]
+        mol selection "none"
+        mol material Opaque
+        mol addrep $molid
+        set rep [expr {[molinfo $molid get numreps] - 1}]
+        ::SQQ::track_representation $rep
+        set pick_guest_rep_name [mol repname $molid $rep]
+    }
+}
+
+proc ::SQQ::set_pick_rep_selection {rep_name indexes} {
+    variable molid
+    if {$rep_name eq ""} { return }
+    if {[catch {mol repindex $molid $rep_name} rep] || $rep < 0} { return }
+    set selection [expr {[llength $indexes] == 0 ?
+        "none" : "index [join [lsort -integer -unique $indexes] { }]"}]
+    mol modselect $rep $molid $selection
+}
+
 proc ::SQQ::render_selected {frame} {
     variable group_atoms
     variable guest_atoms
-    variable guest_types
+    variable pick_cage_rep_name
+    variable pick_guest_rep_name
     variable pick_mode
     variable selected_cages
     variable selected_guest
     if {$pick_mode eq "off"} { return }
+
+    set cage_indexes {}
     foreach object_id $selected_cages {
         set atom_key "$frame,cage-id,$object_id"
-        if {![info exists group_atoms($atom_key)]} { continue }
-        lassign [::SQQ::effective_color $frame cage-id $object_id] color_id priority
-        set indexes [lsort -integer -unique $group_atoms($atom_key)]
-        ::SQQ::add_dynamic_bonds_representation $indexes $color_id 0.250 Opaque
-    }
-    if {$pick_mode eq "guest" && $selected_guest ne ""} {
-        set key "$frame,$selected_guest"
-        if {[info exists guest_atoms($key)] && [info exists guest_types($key)]} {
-            set color_id [::SQQ::color_id guest $guest_types($key)]
-            ::SQQ::add_guest_representation $guest_atoms($key) $color_id Opaque
+        if {[info exists group_atoms($atom_key)]} {
+            lappend cage_indexes {*}$group_atoms($atom_key)
         }
     }
-}
+    ::SQQ::set_pick_rep_selection $pick_cage_rep_name $cage_indexes
 
+    set guest_indexes {}
+    if {$pick_mode eq "guest" && $selected_guest ne ""} {
+        set key "$frame,$selected_guest"
+        if {[info exists guest_atoms($key)]} { set guest_indexes $guest_atoms($key) }
+    }
+    ::SQQ::set_pick_rep_selection $pick_guest_rep_name $guest_indexes
+}
 proc ::SQQ::announce_graph_mode {frame} {
     variable graph_mode
     variable displayed_graph_mode
@@ -2491,6 +2621,7 @@ proc ::SQQ::render_current {{announce 0}} {
     if {$pick_mode eq "guest"} {
         ::SQQ::render_guest_pick_context $frame
     }
+    ::SQQ::create_pick_highlight_representations
     ::SQQ::render_selected $frame
     ::SQQ::render_overlays $frame
     display update
@@ -2511,6 +2642,7 @@ proc ::SQQ::render_pending {} {
 }
 
 proc ::SQQ::frame_changed {name1 name2 operation} {
+    ::SQQ::cancel_pending_pick
     variable molid
     variable frame_after_id
     variable selected_cages
@@ -2563,8 +2695,9 @@ proc ::SQQ::help {} {
     puts "Interaction:"
     puts "  Labels are independent of pick mode and are off by default."
     puts "  sqq pick center shows yellow pickpoints without enabling labels."
-    puts "  Pick commands enable VMD mouse query mode; pick off does not restore the prior mouse mode."
-    puts "  Pick mode makes objects transparent; the selected cage is opaque."
+    puts "  Pick center enables VMD labelatom mode; pick guest enables VMD pick mode."
+    puts "  Do not select Mouse > Query manually; Query does not send SQQ pick callbacks."
+    puts "  Unselected objects are transparent; selected cages are yellow and guests orange."
     puts "  sqq clear restores the source-time cage-all opaque view."
     puts ""
     puts "Examples:"
@@ -2635,8 +2768,8 @@ if {$loaded_frames != $parsed_frames} {
 display projection Orthographic
 catch {trace remove variable ::vmd_frame write ::SQQ::frame_changed}
 trace add variable ::vmd_frame write ::SQQ::frame_changed
-catch {trace remove variable ::vmd_pick_event write ::SQQ::pick_atom_event}
-trace add variable ::vmd_pick_event write ::SQQ::pick_atom_event
+catch {trace remove variable ::vmd_pick_atom write ::SQQ::pick_atom_event}
+trace add variable ::vmd_pick_atom write ::SQQ::pick_atom_event
 catch {trace remove variable ::vmd_pick_graphics write ::SQQ::pick_graphics_changed}
 trace add variable ::vmd_pick_graphics write ::SQQ::pick_graphics_changed
 ::SQQ::startup_help

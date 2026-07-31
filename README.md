@@ -2,7 +2,7 @@
 
 **SQQ: Python Joint Toolkit for Water-Shell Topology Analysis.**
 
-Current release: **0.3.10**
+Current release: **0.3.11**
 
 SQQ provides the complete SQQ-Py water-shell topology workflow and the focused SQQ-CPP cage engine. Select the Python workflow with `-e py` or the C++17 graph/ring/cage/occupancy/F3/F4 workflow with `-e cpp`. Algorithms are documented in `docs/design.md` and release notes in `docs/update.md`.
 
@@ -19,18 +19,17 @@ Names are listed alphabetically by family name.
 - Bo Liao @ China University of Petroleum (East China)
 - Yingxu Lu @ Wuhan Institute of Technology
 - Fengyi Mi @ Southwest University of Science and Technology
+- Yingtao Sun @ The ***Hong Kong University of Science and Technology***
 - Zhengcai Zhang @ Laoshan Laboratory
 
-## Changed in 0.3.10
+## Changed in 0.3.11
 
-- Package and native-core versions are synchronized at `0.3.10`, released Jul 30, 2026.
-- LAMMPS dump readers now receive the native physical frame interval from `timestep × unit conversion`. This removes MDAnalysis's synthetic `1 ps` warning and keeps frame-time metadata correct for `real`, `metal`, and `nano` units.
-- Analyze prints the SQQ banner first and keeps the run header, progress, diagnostics, and final summary in a stable order. Interactive terminals use one in-place panel; redirected or captured output uses plain static progress without duplicate final bars or stderr progress noise.
-- VMD center picking now uses each cage's PBC-aware center and a real graphics pick point. `sqq pick center` responds only to yellow cage centers; clicking a water atom does nothing.
-- `sqq pick guest` now uses VMD's atom-pick event, selects the complete guest molecule, and highlights every cage containing that guest. Multiple cage memberships are retained and reported instead of silently choosing one.
-- Cage-center markers and labels are independent: center markers appear in center-pick mode, while text remains off unless `sqq show label on` is requested. Internal redraws and frame changes no longer repeat command-status lines.
-- These changes affect input timing metadata, terminal presentation, and VMD interaction only; graph, ring, cage, phase, occupancy, and order-parameter definitions are unchanged. Cross-frame cage tracking remains deferred and is not shipped in 0.3.10.
-
+- Package, configuration-schema, and native-core versions are synchronized at `0.3.11`, released Jul 31, 2026.
+- `sqq pick center` now enters the correct VMD mouse mode automatically and maps VMD's internal graphics pickpoint tag, so clicking a yellow center highlights the exact cage.
+- `sqq pick guest` now enters VMD Pick mode and uses its atom callback to highlight the complete guest molecule and every cage containing it.
+- Persistent yellow cage and orange guest highlight layers are updated in place, preventing the selected representation from disappearing during a VMD mouse callback.
+- New explicit `f3-gro` and `f4-gro` outputs write complete valid water molecules and annotate each oxygen with its per-water F3 or F4 value.
+- Scientific graph, ring, cage, phase, occupancy, and order-parameter definitions are unchanged. Cross-frame cage tracking remains deferred and is not shipped in 0.3.11.
 ## Install
 
 Install the released package from PyPI:
@@ -126,8 +125,8 @@ LAMMPS trajectories require `-t system.data` (equivalent to `--top`). A non-empt
 
 | Engine | Implementation | Main scope | Default workers | Default output types |
 | --- | --- | --- | --- | --- |
-| `py` | SQQ-Py | Complete graph, ring, open-patch, cage, cluster, order-parameter, and ice workflow | 1 worker | `info,sqq-cage-gro,sqq-render,summary-xlsx` |
-| `cpp` | SQQ-CPP | Native graph, internal 4/5/6 rings, cage/isomer/occupancy, and F3/F4 | 1 worker | `info,sqq-cage-gro,sqq-render,summary-csv` |
+| `py` | SQQ-Py | Complete graph, ring, open-patch, cage, cluster, order-parameter, and ice workflow | 1 worker | `info,sqq-render,summary-xlsx` |
+| `cpp` | SQQ-CPP | Native graph, internal 4/5/6 rings, cage/isomer/occupancy, and F3/F4 | 1 worker | `info,sqq-render,summary-csv,summary-detail-csv` |
 
 ```bash
 sqq analyze -i ./gro -e py -o ./result_py
@@ -149,25 +148,26 @@ The current release uses the same compact three-row stage model for serial and p
 Engine `cpp` selects the focused native workflow. Python owns input normalization, molecule selection, scheduling, compact VMD output, Markdown, summary CSV, and optional XLSX; C++17 performs graph construction, internal chordless 4/5/6 rings, cage topology/isomers, occupancy, and F3/F4 while releasing the GIL.
 
 
-It accepts orthorhombic GROMACS/LAMMPS inputs, compatible graph/pair settings, `-s` within 4/5/6, cage report/validation settings, `f3`/`f4`, process or serial scheduling, and `info`, `gro`, `cage-gro`, `sqq-cage-gro`, `sqq-render`, `summary-csv`, or `summary-xlsx`. `sqq-render` implies `sqq-cage-gro`. `gro` enables the supported classified cage GRO output, but `cpp` does not select it by default.
+It accepts orthorhombic GROMACS/LAMMPS inputs, compatible graph/pair settings, `-s` within 4/5/6, cage report/validation settings, `f3`/`f4`, process or serial scheduling, and `info`, `gro`, `cage-gro`, `sqq-render`, `summary-csv`, `summary-xlsx`, or `summary-detail-csv`. `sqq-render` owns the complete visualization package. `gro` enables the supported classified cage GRO output, but `cpp` does not select it by default.
 
-Unsupported requests fail before analysis: public ring output, size 7, shortest-path rings, half/quasi cages, cluster, ice, Q_l/MCG/DHOP, membership/order TSV, legacy per-frame `vmd`, detail CSV, Python fast closure, thread scheduling, and triclinic boxes. A failed native extension never falls back to Python.
+Unsupported requests fail before analysis: public ring output, size 7, shortest-path rings, half/quasi cages, cluster, ice, Q_l/MCG/DHOP, membership/order TSV, legacy per-frame VMD, Python fast closure, thread scheduling, and triclinic boxes. A failed native extension never falls back to Python.
 
 The `cpp` default layout is:
 
 ```text
 result/
   sqq_render/
-    sqq-cage.gro
-    sqq-cage.xtc
-    sqq-cage.membership.tsv
-    sqq-cage.vmd.tcl
+    sqq_cage.gro
+    sqq_cage.xtc
+    sqq_cage.membership.tsv
+    sqq_cage.vmd.tcl
   summary/
     summary.csv
     cage.csv
     cage_occupancy.csv
     cage_isomer.csv
     order_parameter.csv
+    detail_index.csv
   sqq_config_resolved.yaml
   frame_name/
     frame_name_info.md
@@ -222,7 +222,7 @@ Integer worker text is an explicit count. Decimal text and percentages are physi
 The generated file uses YAML `#` comments and canonical singular keys. The main settings are:
 
 ```yaml
-schema_version: "0.3.10"
+schema_version: "0.3.11"
 engine: py  # choices: py, cpp
 
 run:
@@ -329,9 +329,8 @@ parallel:
   math_thread: 1
 
 output:
-  type: [info, sqq-cage-gro, sqq-render, summary-xlsx]
+  type: [info, sqq-render, summary-xlsx]
   summary_csv_dir: summary
-  summary_detail_dir: summary_detail
   cage_isomer_row: nonzero  # choices: nonzero, all
   write_empty_file: false
   structure_layout: grouped  # choices: grouped, flat
@@ -447,7 +446,7 @@ Cage IDs are mutually exclusive across sI, sII, sH, and boundary, but adjacent c
 | isolated           | isolated     | 5        |
 ```
 
-The compact table does not include exact IDs, seeds, confidence values, water/guest membership, or domain adjacency. Add `cluster-detail` to YAML `output.type` for `summary_detail/hydrate_domain.csv` and one-row-per-cluster `summary_detail/hydrate_cluster_detail.csv`. Explicit `cluster-detail` or `cluster-gro` selection requires cluster search. Turning search off writes neither `cluster-detail` nor `cluster-gro` and removes stale generated cluster GRO files. Public motif output is not generated.
+The compact table does not include exact IDs, seeds, confidence values, water/guest membership, or domain adjacency. Add `cluster-detail` to YAML `output.type` for `summary/hydrate_domain.csv` and one-row-per-cluster `summary/hydrate_cluster_detail.csv`. Explicit `cluster-detail` or `cluster-gro` selection requires cluster search. Turning search off writes neither `cluster-detail` nor `cluster-gro` and removes stale generated cluster GRO files. Public motif output is not generated.
 
 ## Hydrate Nucleation Order Parameters
 
@@ -539,16 +538,20 @@ sqq analyze -i md.gro -b pairs --pair pairs.txt
 
 ### Output Selection
 
-Output selection is configured in YAML rather than as a public CLI option. Engine `py` defaults to:
+Output selection can be set with `--output-type` or YAML `output.type`. Engine `py` defaults to:
 
 ```yaml
 output:
-  type: [info, sqq-cage-gro, sqq-render, summary-xlsx]
+  type: [info, sqq-render, summary-xlsx]
 ```
 
-SQQ-Py accepts the established info/TSV/per-frame GRO/summary/detail types plus `sqq-cage-gro` and `sqq-render`. `gro` expands to ordinary ring/half/quasi/cage/ice GRO categories. Selected alone, `sqq-cage-gro` writes only the one-frame topology GRO under `sqq_render/`; `sqq-render` implies it and writes the complete four-file visualization bundle.
+SQQ-Py accepts `info`, `membership-tsv`, `order-tsv`, `f3-gro`, `f4-gro`, `sqq-render`, `gro`, `ring-gro`, `half-gro`, `quasi-gro`, `cage-gro`, `ice-gro`, `cluster-gro`, `summary-xlsx`, `summary-csv`, `summary-detail-csv`, and `cluster-detail`, plus `default`, `all`, and `none`. `gro` expands to ordinary ring/half/quasi/cage/ice GRO categories. `sqq-render` writes the complete four-file visualization package; its files cannot be selected independently.
 
-SQQ-CPP accepts `info`, `gro`, `cage-gro`, `sqq-cage-gro`, `sqq-render`, `summary-csv`, and `summary-xlsx`, plus `all`/`none`. The `cpp` preset does not select `gro` or `cage-gro` by default. Cluster-specific output requires SQQ-Py with resolved cluster search on. `sqq_config_resolved.yaml` is always written regardless of `output.type`.
+SQQ-CPP accepts `info`, `gro`, `cage-gro`, `f3-gro`, `f4-gro`, `sqq-render`, `summary-csv`, `summary-xlsx`, and `summary-detail-csv`, plus `default`, `all`, and `none`. `default` may be combined with extra types, for example `--output-type default,summary-detail-csv`; duplicate types are removed. `all` and `none` remain exclusive. Removed types `sqq-cage-gro` and `vmd` are rejected with a message to use `sqq-render`. The `cpp` preset does not select `gro` or `cage-gro` by default. Cluster-specific output requires SQQ-Py with resolved cluster search on. `sqq_config_resolved.yaml` is always written regardless of `output.type`.
+
+### Per-water F3/F4 GRO
+
+`--output-type f3-gro` and `--output-type f4-gro` are explicit, non-default outputs supported by both engines. The matching parameter must also be selected, for example `--order-parameter f3,f4 --output-type f3-gro,f4-gro`. Each file contains only waters with a defined per-water value, but retains every atom of each selected water in source order. Only the oxygen record is annotated (`; SQQ F3=<value>` or `; SQQ F4=<value>`); hydrogen and virtual-site records are unannotated. GRO coordinate columns and available velocity columns remain fixed-width, and the annotation begins after the velocity field. Grouped output is written below `<frame>/order/`; in separated multi-GRO output it is below `gro/<frame>/order/`. Empty files follow `output.write_empty_file`. These files expose existing per-water values and do not change their calculation.
 
 ## Output Structure
 
@@ -558,21 +561,24 @@ A single GRO file and trajectory inputs retain their established per-frame layou
 result/
   sqq_config_resolved.yaml
   summary.xlsx                 # when summary-xlsx is selected
-  summary/                     # when summary-csv is selected
+  summary/                     # summary-csv/detail/cluster-detail CSVs
     summary.csv
     cage.csv
     ...
   info/
     frame_001_info.md
     frame_002_info.md
-  gro/                         # only when ordinary GRO output is selected
+  gro/                         # when any per-frame GRO output is selected
     frame_001/
+      order/                   # explicit f3-gro/f4-gro
+        frame_001_f3.gro
+        frame_001_f4.gro
     frame_002/
   sqq_render/
-    sqq-cage.gro              # one-frame topology; with sqq-cage-gro or sqq-render
-    sqq-cage.xtc              # every selected render frame; with sqq-render
-    sqq-cage.membership.tsv   # typed frame/center/guest/membership metadata
-    sqq-cage.vmd.tcl          # with sqq-render
+    sqq_cage.gro              # stable topology and first selected frame
+    sqq_cage.xtc              # every selected render frame
+    sqq_cage.membership.tsv   # typed frame/center/guest/membership metadata
+    sqq_cage.vmd.tcl          # VMD loader and commands
 
 ```
 
@@ -587,34 +593,34 @@ result/
     info/
     gro/                       # when selected
     sqq_render/                # when selected
-      sqq-cage.gro
-      sqq-cage.xtc
-      sqq-cage.membership.tsv
-      sqq-cage.vmd.tcl
+      sqq_cage.gro
+      sqq_cage.xtc
+      sqq_cage.membership.tsv
+      sqq_cage.vmd.tcl
   result_B/
     sqq_config_resolved.yaml
     summary.xlsx               # and/or summary/
     info/
     gro/                       # when selected
     sqq_render/                # when selected
-      sqq-cage.gro
-      sqq-cage.xtc
-      sqq-cage.membership.tsv
-      sqq-cage.vmd.tcl
+      sqq_cage.gro
+      sqq_cage.xtc
+      sqq_cage.membership.tsv
+      sqq_cage.vmd.tcl
 ```
 
 If more than 26 topologies are found, SQQ warns and switches the whole multi-GRO run to information-only output. It still analyzes every readable GRO, but writes only the root `sqq_config_resolved.yaml` and `result/info/*_info.md`; summary XLSX/CSV/detail files, ordinary GRO files, and the complete `sqq_render/` bundle are suppressed. This safety override has precedence over engine defaults and configured output requests.
 
 For normal multiple-GRO groups, Markdown, membership/order TSV, and legacy per-frame VMD reports are placed under `info/`; ordinary structure files are placed under `gro/<frame>/`.
 
-The four files in `sqq_render/` form one visualization package. `sqq-cage.gro` contains the stable atom topology and first selected frame only. `sqq-cage.xtc` contains the coordinates and box for every selected render frame, with the original physical frame times when available. `sqq-cage.membership.tsv` uses four record types: `F` maps render frames to source frames, time, and effective graph mode; `C` stores every frame-local cage center after orthorhombic PBC wrapping in explicit angstrom coordinates; `G` stores every complete guest-molecule atom group, including guests outside cages; and `M` stores cage/guest membership atoms with cage type and optional phase, domain, and cluster identifiers. “Sparse” applies only to the membership metadata: the XTC still contains every selected atom coordinate in every selected frame. Shared waters and guests assigned to several cages retain all memberships.
+The four files in `sqq_render/` form one visualization package. `sqq_cage.gro` contains the stable atom topology and first selected frame only. `sqq_cage.xtc` contains the coordinates and box for every selected render frame, with the original physical frame times when available. `sqq_cage.membership.tsv` uses four record types: `F` maps render frames to source frames, time, and effective graph mode; `C` stores every frame-local cage center after orthorhombic PBC wrapping in explicit angstrom coordinates; `G` stores every complete guest-molecule atom group, including guests outside cages; and `M` stores cage/guest membership atoms with cage type and optional phase, domain, and cluster identifiers. “Sparse” applies only to the membership metadata: the XTC still contains every selected atom coordinate in every selected frame. Shared waters and guests assigned to several cages retain all memberships.
 
 SQQ permits only one active Analyze run per output root. A concurrent run stops before modifying results and asks for another `--output` directory. Worker fragments use a private run workspace; final render files are replaced atomically. Temporary-directory removal retries transient Linux/shared-filesystem `ENOTEMPTY`, `EBUSY`, and permission delays. If cleanup still fails, SQQ prints the retained temporary path but does not turn an otherwise completed analysis into a failure.
 
 Keep all four files together in `sqq_render/`, then source only the script from the VMD Tk Console:
 
 ```tcl
-source {path/to/result/sqq_render/sqq-cage.vmd.tcl}
+source {path/to/result/sqq_render/sqq_cage.vmd.tcl}
 ```
 
 Sourcing sets the VMD display background to white, prints a compact welcome, reports `SQQ graph: <effective-mode>` once, and starts from the default opaque `sqq show cage all` view. The graph line is printed again only if the effective mode changes. Use any of these equivalent commands for the full guide:
@@ -668,7 +674,7 @@ sqq pick center
 sqq pick off
 ```
 
-The startup `sqq show cage all` view is a replaceable default. The first `sqq show ...` command after sourcing the script or after `sqq clear` replaces that default; later `show` commands add independent layers without removing earlier selections. One `show` may contain several family/target groups, and an exact repeated family/target selection is ignored rather than creating another VMD representation. `sqq show label` toggles labels; optional `on` or `off` sets an explicit state, and the historical misspelling `lable` is accepted. Labels are off by default and remain independent of picking. `sqq pick center` makes active objects transparent and creates yellow cage-center spheres/pick points; click a yellow center in VMD Query mode to make exactly that cage opaque. Water-atom clicks are ignored in center mode. `sqq pick guest` instead accepts a click on any guest atom, makes the complete guest and every cage containing it opaque, and reports guests with no cage membership without highlighting them. Center and guest modes are mutually exclusive. A frame change clears the transient selection and rebuilds the current-frame targets without disabling the chosen mode. `sqq pick off` exits pick mode but does not restore a previous VMD mouse mode; `sqq clear` removes custom show/color/label/pick state and restores the initial opaque cage-all view.
+The startup `sqq show cage all` view is a replaceable default. The first `sqq show ...` command after sourcing the script or after `sqq clear` replaces that default; later `show` commands add independent layers without removing earlier selections. One `show` may contain several family/target groups, and an exact repeated family/target selection is ignored rather than creating another VMD representation. `sqq show label` toggles labels; optional `on` or `off` sets an explicit state, and the historical misspelling `lable` is accepted. Labels are off by default and remain independent of picking. `sqq pick center` makes active objects transparent and creates yellow cage-center spheres/pick points; VMD automatically enters Atom Label mode for graphics picking; click a yellow center to make exactly that cage opaque. Do not manually select Query mode: Query only prints VMD information and does not send the callbacks SQQ needs. Water-atom clicks are ignored in center mode. `sqq pick guest` automatically enters VMD Pick mode, accepts a click on any guest atom, and highlights the complete guest plus every cage containing it. Cage highlights are yellow and guest highlights are orange. Both pick paths update persistent highlight representations instead of deleting the representation being clicked. Guests with no cage membership are reported without highlighting. Center and guest modes are mutually exclusive. A frame change clears the transient selection and rebuilds the current-frame targets without disabling the chosen mode. `sqq pick off` exits pick mode but does not restore a previous VMD mouse mode; `sqq clear` removes custom show/color/label/pick state and restores the initial opaque cage-all view.
 
 Each family token in `show` starts a new group and consumes the following targets until the next family token. For `cage`, a target is `all`, a registered cage type, or an exact frame-local cage ID such as `51262_00053`; generic types such as `4^1-5^10-6^2` also accept `4151062`. For `guest`, the same target identifies guests assigned to all cages, to a cage type, or to one frame-local cage ID. Phase targets are `all`, `sI`, `sII`, `sH`, `boundary`, `ambiguous`, `unclassified`, or `isolated`; cluster/domain targets are `all` or exact frame-local IDs. Multiple targets are accepted within each family group. The former inferred forms such as `sqq show 512` and `sqq color 512 blue` are not accepted.
 
@@ -676,7 +682,7 @@ Unlike `show`, `sqq color` accepts exactly one family per command. Colors accept
 
 The renderer manages representations by VMD's stable representation names, so `show`, `color`, and frame changes remove only SQQ-created representations and preserve representations added by the user. Rapid frame notifications are coalesced into one pending redraw. Fully unknown cage, cage-ID, guest-selection, cluster-ID, and domain-ID targets are rejected against the complete loaded trajectory; recognized phase names remain valid even when the current frame has no matching membership. Re-sourcing a generated script resets its selection/color state.
 
-Cage, cluster, and domain identifiers are frame-local classifications in 0.3.10; the renderer does not claim cross-frame cage identity. Category selections (`phase`, `cluster`, or `domain`) and recognized phase labels simply report no membership when cluster analysis was not run; an explicit cage/type/cluster/domain target that never occurs anywhere in the loaded trajectory is rejected.
+Cage, cluster, and domain identifiers are frame-local classifications in 0.3.11; the renderer does not claim cross-frame cage identity. Category selections (`phase`, `cluster`, or `domain`) and recognized phase labels simply report no membership when cluster analysis was not run; an explicit cage/type/cluster/domain target that never occurs anywhere in the loaded trajectory is rejected.
 
 When cage or guest objects are shown, the generated VMD script uses the following stable cage-type colors; guest defaults follow the cage type that selected them. The visible shades follow the active VMD ColorID palette.
 
@@ -692,7 +698,7 @@ When cage or guest objects are shown, the generated VMD script uses the followin
 
 Ordinary per-frame GRO files are opt-in through YAML `output.type`. `cluster-gro` is separately opt-in and requires cluster search; no documented engine preset includes either category by default. With `output.type: [none]`, only `sqq_config_resolved.yaml` remains.
 
-With YAML `run.strict: false`, standalone serial/process/thread read failures become failed summary rows and analysis continues where the reader remains usable. Failed inputs appear in `summary.xlsx/failures`, `<summary_csv_dir>/failures.csv`, and `<summary_detail_dir>/failures.csv` when their respective output types are enabled, and always in the mandatory `sqq_config_resolved.yaml` `run.failures` list. With `run.strict: true`, SQQ re-raises the error after updating `sqq_config_resolved.yaml` to `status: failed`.
+With YAML `run.strict: false`, standalone serial/process/thread read failures become failed summary rows and analysis continues where the reader remains usable. Failed inputs appear in `summary.xlsx/failures` and `<summary_csv_dir>/failures.csv` when their respective main-summary output types are enabled, and always in the mandatory `sqq_config_resolved.yaml` `run.failures` list. With `run.strict: true`, SQQ re-raises the error after updating `sqq_config_resolved.yaml` to `status: failed`.
 
 GRO structure folders, filenames, and title lines use portable ASCII structure labels since version 0.2.4, for example `5^126^2` and `qc_5r_5^36^2_56566`. Markdown and main-summary scientific labels retain their readable superscript notation. This avoids Windows GBK/legacy-reader failures caused by Unicode superscript or subscript characters in generated GRO paths and titles.
 
@@ -705,7 +711,7 @@ When quasi-cage or cage isomers are present, the same report adds description ta
 
 `Cage Occupancy` remains a separate table because it describes guest assignment rather than cage topology. It expands exact guest compositions across dynamic columns in source guest order.
 
-`summary-xlsx` writes the plotting-oriented `summary.xlsx` workbook. `summary-csv` uses the same applicable main-table mapping and writes one UTF-8-SIG file per sheet under `summary_csv_dir` (default `summary/`), preserving table names, columns, row order, and values without Excel formatting or tabs. The first `summary` table is a dashboard: Configuration includes `SQQ version`, requested/effective `Graph mode` such as `auto -> hbond`, normalized `Order parameters`, `Find cluster`, and normalized `Output types`; `Analysis Results (min / mean / max)` reports per-frame min/mean/max values while `Frames total / ok / failed` stays a run-level count. Analysis tables such as connection diagnostics, `ring`, `half_cage`, compact composition-level `quasi_cage`, `cage`, optional `hydrate_cluster`, `order_parameter`, and `ice` keep one input file or trajectory frame per row. The other tables have metadata-specific row units: `summary` is a dashboard, `failures` has one failed input/frame per row, and `detail_index` has one generated detail file per row. Detailed configuration tables are not written; the dashboard retains only its compact Configuration block. Ordinary multi-row and isomer tables are written separately under `summary_detail_dir` only when `summary-detail-csv` is selected: optional `failures.csv`, `cage_occupancy.csv`, `cage_isomer.csv`, and `quasi_cage_isomer.csv`. The separate `cluster-detail` type writes `hydrate_domain.csv` and `hydrate_cluster_detail.csv`. The compact `quasi_cage` table aggregates exact quasi-cage isomers into composition-level columns such as `5r_5²6³`, while the detail `quasi_cage_isomer.csv` keeps nonzero exact isomer rows with `quasi_cage_type`, `isomer`, and `count`. `cage_isomer.csv` defaults to observed nonzero isomer rows plus per-frame totals; set YAML `output.cage_isomer_row: all` to restore the full zero-filled matrix. The `order_parameter` table contains only the selected F3, F4, Q_l, MCG, and DHOP columns; `--order-parameter none` omits it. Focus mean/count columns are written only when `order_parameter.focus_water` is non-empty. Output type `order-tsv` writes only selected per-water F3/F4/Q_l values because MCG/DHOP are frame-level descriptors.
+`summary-xlsx` and `summary-csv` use one shared main-table builder. SQQ-Py main output contains `summary`, optional `failures`, the effective connection table, `ring`, `half_cage`, compact composition-level `quasi_cage`, `cage`, optional `hydrate_cluster`, `order_parameter`, `ice`, and `detail_index` when detail files exist. SQQ-CPP emits the applicable subset: `summary`, optional `failures`, `cage`, `order_parameter`, and optional `detail_index`. XLSX stores these as sheets; CSV stores one UTF-8-SIG file per table under `output.summary_csv_dir` (default `summary/`). `summary-detail-csv` writes `cage_occupancy.csv` and `cage_isomer.csv` for both engines, plus `quasi_cage_isomer.csv` for SQQ-Py. `cluster-detail` adds `hydrate_domain.csv` and `hydrate_cluster_detail.csv`. Main, detail, and cluster-detail CSV files share the same `summary/` directory; they have disjoint filenames and can be selected together. The first `summary` table is the compact dashboard, `failures` has one failed input/frame per row, and `detail_index` lists generated detail files. `cage_isomer.csv` defaults to observed nonzero isomer rows plus per-frame totals; YAML `output.cage_isomer_row: all` restores the zero-filled matrix. `order_parameter` contains only the selected F3, F4, Q_l, MCG, and DHOP columns; `--order-parameter none` omits it.
 
 Summary construction records rows, columns, cells, bytes, CSV/XLSX write time, formatting time, and final-save time in `sqq_config_resolved.yaml -> run.summary_write`; the terminal prints its total seconds. The mandatory output-root `sqq_config_resolved.yaml` records final SQQ version, requested engine, effective SQQ engine, requested and effective graph modes, requested and resolved workers, normalized output types, input metadata, status/failures, and summary timing. Main CSV, XLSX, detail CSV, and `sqq_config_resolved.yaml` are written to same-directory temporary files and atomically replaced on success or failure. XLSX sheets above 200,000 cells or 128 columns keep header styling, filter, freeze pane, and fixed column widths but skip costly body-cell formatting; scientific values and table schemas are unchanged.
 

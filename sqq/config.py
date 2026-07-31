@@ -47,24 +47,26 @@ else:  # pragma: no cover - used only by the JSON source-tree fallback.
 
 
 DEFAULT_MODE = "py"
-CONFIG_SCHEMA_VERSION = "0.3.10"
+CONFIG_SCHEMA_VERSION = "0.3.11"
 DEFAULT_ORDER_PARAMETERS = ("f3", "f4")
 CPP_MODE = "cpp"
 CPP_MODES = frozenset({"99", CPP_MODE})
 CPP_DEFAULT_OUTPUT_TYPES = (
     "info",
-    "sqq-cage-gro",
     "sqq-render",
     "summary-csv",
+    "summary-detail-csv",
 )
 CPP_ALL_OUTPUT_TYPES = (
     "info",
     "gro",
     "cage-gro",
-    "sqq-cage-gro",
+    "f3-gro",
+    "f4-gro",
     "sqq-render",
     "summary-csv",
     "summary-xlsx",
+    "summary-detail-csv",
 )
 CPP_OUTPUT_TYPES = frozenset(CPP_ALL_OUTPUT_TYPES)
 ALL_ORDER_PARAMETERS = (
@@ -89,7 +91,6 @@ ORDER_PARAMETER_ALIASES = {
 }
 DEFAULT_OUTPUT_TYPES = (
     "info",
-    "sqq-cage-gro",
     "sqq-render",
     "summary-xlsx",
 )
@@ -97,9 +98,9 @@ ALL_OUTPUT_TYPES = (
     "info",
     "membership-tsv",
     "order-tsv",
-    "vmd",
+    "f3-gro",
+    "f4-gro",
     "gro",
-    "sqq-cage-gro",
     "sqq-render",
     "summary-xlsx",
     "summary-csv",
@@ -111,9 +112,9 @@ OUTPUT_TYPE_ORDER = (
     "info",
     "membership-tsv",
     "order-tsv",
-    "vmd",
+    "f3-gro",
+    "f4-gro",
     "gro",
-    "sqq-cage-gro",
     "sqq-render",
     "ring-gro",
     "half-gro",
@@ -217,7 +218,6 @@ MODE_PRESETS: dict[str, dict[str, Any]] = {
         "find_cluster": True,
         "output_types": [
             "info",
-            "sqq-cage-gro",
             "sqq-render",
             "summary-xlsx",
         ],
@@ -238,9 +238,9 @@ MODE_PRESETS: dict[str, dict[str, Any]] = {
         "find_cluster": False,
         "output_types": [
             "info",
-            "sqq-cage-gro",
             "sqq-render",
             "summary-csv",
+            "summary-detail-csv",
         ],
     },
     CPP_MODE: {
@@ -378,7 +378,6 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "output": {
         "types": list(DEFAULT_OUTPUT_TYPES),
         "summary_csv_dir": "summary",
-        "summary_detail_dir": "summary_detail",
         "cage_isomer_rows": "nonzero",
         "write_empty_files": False,
         "structure_layout": "grouped",
@@ -554,7 +553,7 @@ def order_parameter_display(value: Any) -> str:
 
 
 def normalize_output_types(value: Any = None) -> tuple[str, ...]:
-    """Normalize the positive output allowlist."""
+    """Normalize the positive SQQ-Py output allowlist."""
     if value is None:
         raw_items: list[Any] = list(DEFAULT_OUTPUT_TYPES)
     elif isinstance(value, str):
@@ -570,26 +569,35 @@ def normalize_output_types(value: Any = None) -> tuple[str, ...]:
         return ()
 
     cleaned = [str(item).strip().lower() for item in raw_items]
-    keywords = set(cleaned) & {"all", "none"}
-    if keywords:
+    exclusive = set(cleaned) & {"all", "none"}
+    if exclusive:
         if len(cleaned) != 1:
             raise ValueError("Use 'all' or 'none' alone in output.types / --output-type.")
         return ALL_OUTPUT_TYPES if cleaned[0] == "all" else ()
+    if "default" in cleaned:
+        cleaned = [
+            *DEFAULT_OUTPUT_TYPES,
+            *(item for item in cleaned if item != "default"),
+        ]
 
     supported = set(OUTPUT_TYPE_ORDER)
     unknown = sorted(set(cleaned) - supported)
+    removed = {"sqq-cage-gro", "vmd"}.intersection(unknown)
+    if removed:
+        names = ", ".join(sorted(removed))
+        raise ValueError(
+            f"Output type(s) {names} were removed; use sqq-render instead."
+        )
     if unknown:
         raise ValueError(
-            f"Unsupported output type(s) {unknown}. Use info, membership-tsv, "
-            "order-tsv, vmd, sqq-cage-gro, sqq-render, gro, ring-gro, half-gro, "
-            "quasi-gro, cage-gro, ice-gro, cluster-gro, summary-xlsx, summary-csv, "
-            "summary-detail-csv, cluster-detail, all, or none."
+            f"Unsupported output type(s) {unknown}. Use default, info, membership-tsv, "
+            "order-tsv, f3-gro, f4-gro, sqq-render, gro, ring-gro, half-gro, quasi-gro, cage-gro, "
+            "ice-gro, cluster-gro, summary-xlsx, summary-csv, summary-detail-csv, "
+            "cluster-detail, all, or none."
         )
     normalized = set(cleaned)
     if "gro" in normalized:
         normalized.difference_update(GRO_OUTPUT_TYPES)
-    if "sqq-render" in normalized:
-        normalized.add("sqq-cage-gro")
     return tuple(name for name in OUTPUT_TYPE_ORDER if name in normalized)
 
 
@@ -1127,7 +1135,7 @@ _DEFAULT_CONFIG_INLINE_COMMENTS: dict[tuple[str, ...], str] = {
     ("hydrate_cluster", "enabled"): "choices: true, false",
     ("order_parameter", "enabled"): "choices: f3, f4, qN, mcg1, mcg3, dhop35, dhop30, all, none",
     ("order_parameter", "q_neighbor_mode"): "choices: graph, cutoff, nearest, lammps",
-    ("output", "type"): "documented output names; all or none are accepted",
+    ("output", "type"): "default may be combined; all/none are exclusive",
     ("output", "structure_layout"): "choices: grouped, flat",
     ("parallel", "backend"): "choices: process, thread, serial",
     ("parallel", "worker"): "auto, integer count, fraction, or percentage",
@@ -1199,22 +1207,31 @@ def normalize_cpp_output_types(value: Any = None) -> tuple[str, ...]:
     if not raw_items:
         return ()
     cleaned = [str(item).strip().lower() for item in raw_items]
-    keywords = set(cleaned) & {"all", "none"}
-    if keywords:
+    exclusive = set(cleaned) & {"all", "none"}
+    if exclusive:
         if len(cleaned) != 1:
             raise ValueError("Use 'all' or 'none' alone in engine cpp.")
         return CPP_ALL_OUTPUT_TYPES if cleaned[0] == "all" else ()
+    if "default" in cleaned:
+        cleaned = [
+            *CPP_DEFAULT_OUTPUT_TYPES,
+            *(item for item in cleaned if item != "default"),
+        ]
     unsupported = sorted(set(cleaned) - CPP_OUTPUT_TYPES)
+    removed = {"sqq-cage-gro", "vmd"}.intersection(unsupported)
+    if removed:
+        names = ", ".join(sorted(removed))
+        raise ValueError(
+            f"Output type(s) {names} were removed; use sqq-render instead."
+        )
     if unsupported:
         names = ", ".join(unsupported)
         raise ValueError(
             f"output type(s) {names} are not supported by SQQ-CPP; "
-            "use info, gro, cage-gro, sqq-cage-gro, sqq-render, summary-csv, "
-            "summary-xlsx, all, or none."
+            "use default, info, gro, cage-gro, f3-gro, f4-gro, sqq-render, summary-csv, "
+            "summary-xlsx, summary-detail-csv, all, or none."
         )
     normalized = set(cleaned)
-    if "sqq-render" in normalized:
-        normalized.add("sqq-cage-gro")
     return tuple(name for name in CPP_ALL_OUTPUT_TYPES if name in normalized)
 
 
@@ -1353,9 +1370,6 @@ def validate_cpp_cli(args: Any, config: dict[str, Any]) -> None:
         output["types"] = list(normalize_cpp_output_types(output_source))
     except ValueError as exc:
         errors.append(str(exc))
-    default_detail_dir = DEFAULT_CONFIG["output"]["summary_detail_dir"]
-    if output.get("summary_detail_dir", default_detail_dir) != default_detail_dir:
-        errors.append("output.summary_detail_dir is not supported in engine cpp")
 
     parallel_backend = str(config.get("parallel", {}).get("backend", "process"))
     if parallel_backend.strip().lower() == "thread":

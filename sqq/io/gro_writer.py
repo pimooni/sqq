@@ -322,6 +322,80 @@ def aggregate_water_atoms(frame: Frame, waters: list[Water], oxygens: tuple[int,
     return [atom_indices[idx] for idx in sorted(atom_indices)]
 
 
+def write_water_order_gro_file(
+    result: FrameResult,
+    frame_dir: Path,
+    parameter: str,
+    write_empty: bool = False,
+    layout: str = "grouped",
+) -> None:
+    """Write complete valid waters with the oxygen order value annotated."""
+    name = str(parameter).strip().lower()
+    if name not in {"f3", "f4"}:
+        raise ValueError("Water-order GRO output supports only F3 and F4.")
+    per_water = result.f3f4.per_water if result.f3f4 is not None else ()
+    values = {
+        item.oxygen: float(value)
+        for item in per_water
+        if (value := getattr(item, name)) is not None
+    }
+    if result.f3f4 is not None:
+        expected = int(getattr(result.f3f4, f"{name}_valid"))
+        if len(values) != expected:
+            raise ValueError(
+                f"{name.upper()} GRO water count {len(values)} does not match "
+                f"the frame {name.upper()}_count {expected}."
+            )
+    if not values and not write_empty:
+        return
+    atoms = aggregate_water_atoms(result.frame, result.waters, tuple(values))
+    path = structure_path(
+        frame_dir,
+        "order",
+        f"{result.frame.name}_{name}.gro",
+        f"{result.frame.name}_{name}.gro",
+        layout,
+    )
+    time_ps = result.frame.time_ps if result.frame.time_ps is not None else "N/A"
+    title = (
+        f"SQQ {name.upper()} valid waters frame={result.frame.name} "
+        f"time_ps={time_ps} water_count={len(values)}"
+    )
+    write_annotated_order_gro(path, title, atoms, result.frame.box, values, name.upper())
+
+
+def write_annotated_order_gro(
+    path: Path,
+    title: str,
+    atoms: list[Atom],
+    box: np.ndarray | None,
+    oxygen_values: dict[int, float],
+    parameter: str,
+) -> None:
+    """Write fixed-width GRO records and annotate only selected oxygen atoms."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8", newline="\n") as handle:
+        handle.write(f"{ascii_gro_text(title)}\n")
+        handle.write(f"{len(atoms):5d}\n")
+        for serial, atom in enumerate(atoms, start=1):
+            prefix = (
+                f"{atom.resid % 100000:5d}{atom.resname[:5]:>5}"
+                f"{atom.atomname[:5]:>5}{serial % 100000:5d}"
+                f"{atom.xyz[0]:8.3f}{atom.xyz[1]:8.3f}{atom.xyz[2]:8.3f}"
+            )
+            if atom.velocity is None:
+                velocity = " " * 24
+            else:
+                velocity = "".join(f"{float(value):8.4f}" for value in atom.velocity[:3])
+            annotation = ""
+            if atom.index in oxygen_values:
+                annotation = f"; SQQ {parameter}={oxygen_values[atom.index]:.8f}"
+            handle.write(f"{prefix}{velocity}{annotation}\n")
+        if box is not None and len(box) >= 3:
+            handle.write(f"{box[0]:10.5f}{box[1]:10.5f}{box[2]:10.5f}\n")
+        else:
+            handle.write("   0.00000   0.00000   0.00000\n")
+
 def write_gro(path: Path, title: str, atoms: list[Atom], box: np.ndarray | None) -> None:
     """Write a minimal GRO file whose title is safe for ASCII-oriented readers."""
     path.parent.mkdir(parents=True, exist_ok=True)
