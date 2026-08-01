@@ -41,5 +41,5 @@ def banner_for_engine(engine: str | None = None) -> str:
 
 HELP_BANNER = f"""
 {SQQ_BANNER}
-SQQ (Shell Qualification Quantifier): Python Joint Toolkit for Water-Shell Topology Analysis.
+SQQ (Shell Quant Qualifier): Python Joint Toolkit for Water-Shell Topology Analysis.
 """.strip()

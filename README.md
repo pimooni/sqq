@@ -1,8 +1,8 @@
 # SQQ
 
-**SQQ: Python Joint Toolkit for Water-Shell Topology Analysis.**
+**SQQ (Shell Quant Qualifier): Python Joint Toolkit for Water-Shell Topology Analysis.**
 
-Current release: **0.4.1**
+Current release: **0.4.2**
 
 SQQ provides the complete SQQ-Py water-shell topology workflow and the focused SQQ-CPP cage engine. Select the Python workflow with `-e py` or the C++17 graph/ring/cage/occupancy/F3/F4 workflow with `-e cpp`. Algorithms are documented in `docs/design.md` and release notes in `docs/update.md`.
 
@@ -22,16 +22,9 @@ Names are listed alphabetically by family name.
 - Yingtao Sun @ The Hong Kong University of Science and Technology
 - Zhengcai Zhang @ Laoshan Laboratory
 
-## Changed in 0.4.1
+## Changed in 0.4.2
 
-- Package, configuration-schema, and native-core versions are synchronized at `0.4.1`, released Aug 1, 2026.
-- SQQ-Py and SQQ-CPP now use the same exact sparse GROW contract: ring-edge incidence is stored sparsely, each search branch keeps only local edge counts and its open frontier, and all topologically eligible branches are examined without candidate truncation.
-- Cage state limits default to `0` (unlimited). A positive diagnostic limit stops the frame with an error instead of returning a partial cage set. The legacy fast-closure fallback is disabled.
-- Deterministic final cage ordering makes frame-local cage IDs consistent between the Python and C++ engines without changing cage topology, type, isomer, occupancy, or order-parameter definitions.
-- SQQ-CPP validation includes large systems containing up to approximately 10⁶ water molecules.
-- Multi-frame reports are collected directly under `info/`; selected structures use `gro/<frame>/`. Per-frame and summary publication is transactional, reused output roots clean only known SQQ artifacts, and `f3-gro`/`f4-gro` contain complete water molecules with the per-water value on each oxygen.
-- Automatic graph selection is resolved before run metadata is shown: the terminal, per-frame reports, summaries, and resolved YAML display only `auto -> hbond` or `auto -> oo`.
-- After frame analysis reaches 100%, the terminal displays `Writing output files; please wait and do not close SQQ...` while render, Excel/CSV, and final configuration files are published.
+- Small bugs fixed.
 
 ## Install
 
@@ -140,7 +133,7 @@ For SQQ-Py, `--find-cluster` overrides `hydrate_cluster.enabled` in YAML. Search
 
 Both documented engines default to one worker. `-w` / `--worker` overrides the preset: integer text is a worker count, while `0.5`, `1.0`, `50%`, and `100%` are physical-core fractions. Process parallelism supports independent GRO/XYZ files and indexed XTC/TRR/LAMMPS trajectories. At most `3 * workers` tasks are submitted at once.
 
-The default `chordless`/`bounded` path preserves the established scientific definitions while accelerating neighbor generation, incremental chord pruning, L1 forward checking, cached layer growth, integer-mask subset ownership, and cage target/edge state pruning. Cage DFS also applies exact remaining-edge incidence and parity conditions before expansion. MDAnalysis supplies orthorhombic cutoff candidates when available, but SQQ still rechecks every distance and hydrogen-bond angle with its established float64 logic. F3 and graph-mode Q_l share one graph-vector cache; all Q_l degrees share candidate lists and spherical-angle work. Optional `ring.definition: shortest_path` applies the Franzblau shortest-path criterion and reuses bounded-BFS distance maps. Optional `quasi_cage.search_policy: exact` preserves distinct frontiers and enumerates connected L2/L3 subsets; these opt-in modes can change or add results. Quasi-cage candidate and layer-state truncation is reported through frame warnings; the 0.4.1 cage GROW search itself does not truncate candidates or return partial results.
+The default `chordless`/`bounded` path preserves the established scientific definitions while accelerating neighbor generation, incremental chord pruning, L1 forward checking, cached layer growth, integer-mask subset ownership, and cage target/edge state pruning. Cage DFS also applies exact remaining-edge incidence and parity conditions before expansion. MDAnalysis supplies orthorhombic cutoff candidates when available, but SQQ still rechecks every distance and hydrogen-bond angle with its established float64 logic. F3 and graph-mode Q_l share one graph-vector cache; all Q_l degrees share candidate lists and spherical-angle work. Optional `ring.definition: shortest_path` applies the Franzblau shortest-path criterion and reuses bounded-BFS distance maps. Optional `quasi_cage.search_policy: exact` preserves distinct frontiers and enumerates connected L2/L3 subsets; these opt-in modes can change or add results. Quasi-cage candidate and layer-state truncation is reported through frame warnings; the 0.4.2 cage GROW search itself does not truncate candidates or return partial results.
 
 Every cage now passes the same mandatory topology validation in SQQ-Py and SQQ-CPP: each edge belongs to exactly two faces, `V - E + F = 2`, the face shell is connected, every vertex link is one cycle, and every shell vertex is trivalent. Optional scientific cage validation adds PBC-aware face-planarity and edge-variation limits, nonzero projected area, positive-volume validation, and volume-centroid cage centers. It remains disabled by default, but disabling it no longer bypasses topology validation. SQQ uses an orthorhombic box representation and rejects non-orthogonal/triclinic input explicitly.
 
@@ -225,7 +218,7 @@ Integer worker text is an explicit count. Decimal text and percentages are physi
 The generated file uses YAML `#` comments and canonical singular keys. The main settings are:
 
 ```yaml
-schema_version: "0.4.1"
+schema_version: "0.4.2"
 engine: py  # choices: py, cpp
 
 run:
@@ -529,7 +522,7 @@ Former advanced CLI settings now belong only in YAML:
 | `--pair-id`, `--parallel-backend` | `graph.pair_id`, `parallel.backend` |
 | `--output-type`, `--output-layout`, `--cage-isomer-rows` | `output.type`, `output.structure_layout`, `output.cage_isomer_row` |
 
-The former `--cage-fast-closure` option is removed. Legacy YAML fast-closure keys remain readable but are normalized to the exact 0.4.1 search with `fast_closure: false`.
+The former `--cage-fast-closure` option is removed. Legacy YAML fast-closure keys remain readable but are normalized to the exact 0.4.2 search with `fast_closure: false`.
 
 The legacy compatibility names `--workers`, `--no-q`, `-q`, `--q-degree`, `--mcg3`, `--dhop30`, and `--topology` are removed. Use `-w` / `--worker`, `--order-parameter`, and `-t` / `--top` as applicable.
 
@@ -696,7 +689,7 @@ Unlike `show`, `sqq color` accepts exactly one family per command. Colors accept
 
 The renderer manages representations by VMD's stable representation names, so `show`, `color`, and frame changes remove only SQQ-created representations and preserve representations added by the user. Rapid frame notifications are coalesced into one pending redraw. Fully unknown cage, cage-ID, guest-selection, cluster-ID, and domain-ID targets are rejected against the complete loaded trajectory; recognized phase names remain valid even when the current frame has no matching membership. Re-sourcing a generated script resets its selection/color state.
 
-Cage, cluster, and domain identifiers are deterministic frame-local classifications in 0.4.1; the renderer does not claim cross-frame cage identity. Category selections (`phase`, `cluster`, or `domain`) and recognized phase labels simply report no membership when cluster analysis was not run; an explicit cage/type/cluster/domain target that never occurs anywhere in the loaded trajectory is rejected.
+Cage, cluster, and domain identifiers are deterministic frame-local classifications in 0.4.2; the renderer does not claim cross-frame cage identity. Category selections (`phase`, `cluster`, or `domain`) and recognized phase labels simply report no membership when cluster analysis was not run; an explicit cage/type/cluster/domain target that never occurs anywhere in the loaded trajectory is rejected.
 
 When cage or guest objects are shown, the generated VMD script uses the following stable cage-type colors; guest defaults follow the cage type that selected them. The visible shades follow the active VMD ColorID palette.
 

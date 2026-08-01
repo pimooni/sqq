@@ -2,6 +2,30 @@
 
 This file records versioned update notes. New releases should be appended above older entries.
 
+## Version 0.4.2
+
+### Short Summary
+
+Version 0.4.2 corrects the expanded product name to **Shell Quant Qualifier** across the command-line help and documentation, refreshes the terminal banner, and synchronizes the Python package, configuration schema, native core, CMake project, and wheel validation metadata at `0.4.2`, dated Aug 1, 2026. Scientific analysis definitions and result values are unchanged.
+
+### Main Changes
+
+1. Product identity
+   - Corrects the root-help product sentence to `Shell Quant Qualifier`.
+   - Keeps the banner title, Python package description, README, and design documentation consistent with the canonical full name.
+   - Refreshes the four-line terminal banner without changing analysis behavior.
+
+2. Release metadata
+   - Synchronizes `pyproject.toml`, Python package metadata, YAML schema, CMake project, native-core version, and wheel validation at `0.4.2`.
+   - Retains the release date Aug 1, 2026.
+
+### Compatibility and Result Impact
+
+- Command syntax, configuration semantics, graph/ring/cage algorithms, order parameters, phase assignment, and generated scientific data are unchanged.
+- The visible differences are limited to corrected product text, banner presentation, and version metadata.
+
+Status: these 0.4.2 changes are local and uncommitted. No commit, tag, push, wheel publication, or PyPI publication has been performed.
+
 ## Version 0.4.1
 
 ### Short Summary
@@ -1348,7 +1372,7 @@ Version 0.1.4 improves CLI help, live per-worker progress, and per-frame Markdow
 ### Main Changes
 
 1. Clearer command-line help hierarchy
-   - Updated the help description to `SQQ (Shell Qualification Quantifier): Python Joint Toolkit for Water-Shell Topology Analysis.`
+   - Updated the help description to `SQQ (Shell Quant Qualifier): Python Joint Toolkit for Water-Shell Topology Analysis.`
    - Reduced `sqq` and `sqq -h` to a concise top-level overview with subcommands and quick-start examples.
    - Moved analysis examples, mode descriptions, and output-layout guidance to `sqq analyze -h`.
    - Removed the duplicated manually listed analysis options from the top-level help; argparse remains the authoritative detailed option reference.
