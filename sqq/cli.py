@@ -9,6 +9,7 @@ from pathlib import Path
 from . import __release_date__, __version__
 from .banner import HELP_BANNER
 from .config import write_default_config
+from .vmd_command import VMD_COMMAND_HELP, run_vmd_command
 from .pipeline import analyze
 
 
@@ -17,8 +18,9 @@ Quick start:
   sqq init
   sqq analyze -i test.gro -o ./result_sqq
   sqq analyze -i traj.xtc -t topol.gro -c sqq_config.yaml -o ./result_sqq
+  sqq vmd ./result_sqq
 
-Use `sqq analyze -h` for analysis options and examples.
+Use `sqq analyze -h` for analysis options and `sqq vmd -h` for VMD commands.
 """.strip()
 
 
@@ -258,6 +260,20 @@ def build_parser() -> argparse.ArgumentParser:
     )
     _add_analysis_arguments(analyze_parser, input_required=True)
 
+    vmd_parser = subparsers.add_parser(
+        "vmd",
+        help="Locate and validate SQQ VMD render packages.",
+        epilog=VMD_COMMAND_HELP,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    vmd_parser.add_argument(
+        "path",
+        nargs="?",
+        default=".",
+        metavar="PATH",
+        help="Result directory, render directory, or SQQ .vmd.tcl file.",
+    )
+
     return parser
 
 
@@ -281,4 +297,6 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "analyze":
         analyze(args)
         return 0
+    if args.command == "vmd":
+        return run_vmd_command(args.path)
     raise AssertionError(f"Unhandled command: {args.command}")

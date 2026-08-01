@@ -22,6 +22,11 @@ import numpy as np
 
 from ..display import graph_mode_display
 from ..models import Atom, Frame, FrameResult
+from ..vmd_command import (
+    RenderFileReference,
+    render_manifest_block,
+    tcl_help_body,
+)
 from .gro_grouping import gro_topology_fingerprint
 from .gro_writer import ascii_gro_text
 from .occupancy import guest_id
@@ -704,6 +709,7 @@ def vmd_script_text(
     xtc_filename: str = SQQ_CAGE_XTC_NAME,
     membership_filename: str = SQQ_CAGE_MEMBERSHIP_NAME,
     molecule_name: str = "SQQ cages",
+    render_kind: str = "analyze",
 ) -> str:
     """Return the shared, parameterized ASCII Tcl renderer."""
     replacements = {
@@ -715,7 +721,17 @@ def vmd_script_text(
         ),
         "__SQQ_MOLECULE_NAME__": (molecule_name, "VMD molecule name"),
     }
-    script = _VMD_SCRIPT
+    script = _VMD_SCRIPT.replace(
+        "__SQQ_RENDER_MANIFEST__",
+        render_manifest_block(
+            kind=render_kind,
+            files=(
+                RenderFileReference("topology", str(gro_filename)),
+                RenderFileReference("trajectory", str(xtc_filename)),
+                RenderFileReference("membership", str(membership_filename)),
+            ),
+        ),
+    ).replace("__SQQ_HELP_BODY__", tcl_help_body())
     for placeholder, (filename, label) in replacements.items():
         value = str(filename)
         if value in {".", ".."} or "/" in value or "\\" in value:
@@ -1352,6 +1368,7 @@ def _atomic_write_text(path: Path, text: str, *, encoding: str) -> None:
 
 
 _VMD_SCRIPT = r'''# SQQ annotated cage and guest renderer for VMD.
+__SQQ_RENDER_MANIFEST__
 namespace eval ::SQQ {
     catch {trace remove variable ::vmd_frame write ::SQQ::frame_changed}
     catch {trace remove variable ::vmd_pick_atom write ::SQQ::pick_atom_changed}
@@ -2675,39 +2692,7 @@ proc ::SQQ::startup_help {} {
 }
 
 proc ::SQQ::help {} {
-    puts "SQQ VMD commands"
-    puts ""
-    puts "Usage:"
-    puts "  sqq show <family> <target...> ?<family> <target...> ...?"
-    puts "  sqq show label ?on|off?       (lable is accepted)"
-    puts "  sqq color <family> <target...> <VMD-color|ColorID|default>"
-    puts "  sqq pick center|guest|off"
-    puts "  sqq clear"
-    puts "  sqq help | sqq -h | sqq --help"
-    puts ""
-    puts "Families:"
-    puts "  cage      Cage topology or exact cage ID"
-    puts "  guest     Guests assigned to a cage topology or exact cage ID"
-    puts "  phase     sI, sII, sH, boundary, ambiguous, unclassified, isolated"
-    puts "  cluster   Exact cluster ID"
-    puts "  domain    Exact domain ID"
-    puts ""
-    puts "Interaction:"
-    puts "  Labels are independent of pick mode and are off by default."
-    puts "  sqq pick center shows yellow pickpoints without enabling labels."
-    puts "  Pick center enables VMD labelatom mode; pick guest enables VMD pick mode."
-    puts "  Do not select Mouse > Query manually; Query does not send SQQ pick callbacks."
-    puts "  Unselected objects are transparent; selected cages are yellow and guests orange."
-    puts "  sqq clear restores the source-time cage-all opaque view."
-    puts ""
-    puts "Examples:"
-    puts "  sqq show cage all"
-    puts "  sqq show cage 512 51264"
-    puts "  sqq show cage 512 guest 512"
-    puts "  sqq show label"
-    puts "  sqq pick center"
-    puts "  sqq color cage 512 green"
-    puts "  sqq clear"
+__SQQ_HELP_BODY__
 }
 
 proc sqq {{command help} args} {

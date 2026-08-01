@@ -2,6 +2,39 @@
 
 This file records versioned update notes. New releases should be appended above older entries.
 
+## Version 0.4.3
+
+### Short Summary
+
+Version 0.4.3 adds the `sqq vmd` terminal command and an embedded render-package manifest. The command locates Analyze render scripts, validates the files actually declared by each Tcl script, and prints absolute-path commands for the VMD Tcl Console and terminal. The visualization package remains four files; scientific analysis and render data are unchanged.
+
+### Main Changes
+
+1. VMD command-line helper
+   - Adds `vmd` to root `sqq -h` and provides `sqq vmd [PATH]` plus `sqq vmd -h`.
+   - Accepts the current directory, a result/render directory, or one SQQ `.vmd.tcl` file.
+   - Lists multiple recognized scripts in stable absolute-path order without launching VMD.
+   - Prints adjacent `source {...}` and `vmd -e "..."` commands for every package.
+
+2. Embedded render manifest
+   - Embeds a non-executable, machine-readable JSON manifest inside each newly generated Analyze Tcl script.
+   - Records the actual topology GRO, coordinate XTC, and membership TSV names, roles, and required status.
+   - Keeps the existing four-file `sqq_render/` layout; no separate manifest file is added.
+   - Uses a general file list and package kind so future Track render packages can reuse the format without fixed filenames.
+
+3. Validation and compatibility
+   - Checks required paths for existence, regular-file type, nonzero size, unsafe paths, and unresolved SQQ placeholders without reading the full XTC or executing Tcl.
+   - Falls back to static parsing of declared SQQ paths in older Tcl scripts that do not contain a manifest.
+   - Returns status `0` for complete packages, `1` for recognized but incomplete packages, and `2` for an invalid path or no recognized SQQ script.
+   - Generates terminal `sqq vmd -h` and VMD `sqq -h` command text from one shared definition.
+
+### Compatibility and Result Impact
+
+- Existing `sqq analyze` commands, YAML files, graph/ring/cage definitions, phase assignments, order parameters, and result values are unchanged.
+- GRO, XTC, and membership TSV contents are unchanged. Only the generated Tcl gains comment-only manifest metadata.
+- Existing Tcl render packages remain supported through safe legacy path parsing.
+
+
 ## Version 0.4.2
 
 ### Short Summary
