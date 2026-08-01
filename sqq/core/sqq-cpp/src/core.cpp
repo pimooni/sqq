@@ -68,9 +68,6 @@ Vec3 minimum_image(Vec3 delta, const std::optional<Box>& box) {
     return delta;
 }
 
-double pbc_distance(const Vec3& left, const Vec3& right, const std::optional<Box>& box) {
-    return norm(minimum_image(left - right, box));
-}
 
 Vec3 arithmetic_mean(const std::vector<Vec3>& values) {
     if (values.empty()) {
@@ -469,16 +466,6 @@ std::map<int, Vec3> unwrap_connected_nodes(
     return unwrapped;
 }
 
-Vec3 ring_center(const FrameInput& frame, const RingRecord& ring) {
-    const auto unwrapped = unwrap_connected_nodes(frame, ring.nodes, ring.edges);
-    std::vector<Vec3> values;
-    values.reserve(ring.nodes.size());
-    for (const int node : ring.nodes) {
-        values.push_back(unwrapped.at(node));
-    }
-    return arithmetic_mean(values);
-}
-
 struct FaceQuality {
     double planarity_rms = 0.0;
     double edge_cv = 0.0;
@@ -592,81 +579,6 @@ std::pair<FaceQuality, Vec3> measure_face_quality(
         std::numeric_limits<double>::infinity();
     quality.projected_area = 0.5 * std::abs(dot(area_vector, normal));
     return {quality, normal};
-}
-
-struct DynamicBits {
-    std::vector<std::uint64_t> words;
-
-    DynamicBits() = default;
-    explicit DynamicBits(std::size_t size) : words((size + 63U) / 64U, 0U) {}
-
-    void set(std::size_t index) { words[index / 64U] |= std::uint64_t{1} << (index % 64U); }
-    bool test(std::size_t index) const {
-        return (words[index / 64U] & (std::uint64_t{1} << (index % 64U))) != 0U;
-    }
-    bool empty() const {
-        return std::all_of(words.begin(), words.end(), [](std::uint64_t word) { return word == 0U; });
-    }
-    std::size_t count() const {
-        std::size_t value = 0;
-        for (std::uint64_t word : words) {
-            while (word != 0U) {
-                word &= word - 1U;
-                ++value;
-            }
-        }
-        return value;
-    }
-    bool intersects(const DynamicBits& other) const {
-        for (std::size_t index = 0; index < words.size(); ++index) {
-            if ((words[index] & other.words[index]) != 0U) {
-                return true;
-            }
-        }
-        return false;
-    }
-    bool operator==(const DynamicBits& other) const { return words == other.words; }
-};
-
-struct DynamicBitsHash {
-    std::size_t operator()(const DynamicBits& bits) const noexcept {
-        std::size_t seed = 0xcbf29ce484222325ULL;
-        for (const auto word : bits.words) {
-            seed ^= std::hash<std::uint64_t>{}(word) + 0x9e3779b97f4a7c15ULL + (seed << 6U) + (seed >> 2U);
-        }
-        return seed;
-    }
-};
-
-DynamicBits bitwise_transition_once(
-    const DynamicBits& once,
-    const DynamicBits& twice,
-    const DynamicBits& ring,
-    DynamicBits& next_twice
-) {
-    DynamicBits next_once = once;
-    next_twice = twice;
-    for (std::size_t index = 0; index < once.words.size(); ++index) {
-        const std::uint64_t promoted = ring.words[index] & once.words[index];
-        next_twice.words[index] |= promoted;
-        next_once.words[index] = (once.words[index] ^ ring.words[index]) & ~next_twice.words[index];
-    }
-    return next_once;
-}
-
-template <typename Callback>
-void for_each_set_bit(const DynamicBits& bits, Callback callback) {
-    for (std::size_t word_index = 0; word_index < bits.words.size(); ++word_index) {
-        std::uint64_t word = bits.words[word_index];
-        std::size_t offset = 0;
-        while (word != 0U) {
-            if ((word & 1U) != 0U) {
-                callback(word_index * 64U + offset);
-            }
-            word >>= 1U;
-            ++offset;
-        }
-    }
 }
 
 struct CageTarget {
@@ -1220,20 +1132,55 @@ std::string cage_isomer(
     return hex_adjacency_label(adjacency);
 }
 
+struct SparseIndex {
+    std::vector<std::size_t> offsets;
+    std::vector<int> values;
+};
+
 struct CageState {
-    DynamicBits face_bits;
     std::vector<int> faces;
-    DynamicBits once;
-    DynamicBits twice;
+    std::vector<std::pair<int, std::uint8_t>> edge_counts;
+    std::vector<int> open_edges;
     std::array<int, 3> counts{0, 0, 0};
     int used_incidence = 0;
     std::vector<int> compatible_targets;
 };
 
+struct IntVectorHash {
+    std::size_t operator()(const std::vector<int>& values) const noexcept {
+        std::size_t result = 1469598103934665603ULL;
+        for (const int value : values) {
+            result ^= static_cast<std::size_t>(static_cast<std::uint32_t>(value));
+            result *= 1099511628211ULL;
+        }
+        return result;
+    }
+};
+
+int local_edge_count(const CageState& state, int edge) {
+    const auto iterator = std::lower_bound(
+        state.edge_counts.begin(), state.edge_counts.end(), edge,
+        [](const auto& item, int value) { return item.first < value; }
+    );
+    return iterator != state.edge_counts.end() && iterator->first == edge
+        ? static_cast<int>(iterator->second)
+        : 0;
+}
+
+void insert_sorted_unique(std::vector<int>& values, int value) {
+    const auto iterator = std::lower_bound(values.begin(), values.end(), value);
+    if (iterator == values.end() || *iterator != value) values.insert(iterator, value);
+}
+
+void erase_sorted_value(std::vector<int>& values, int value) {
+    const auto iterator = std::lower_bound(values.begin(), values.end(), value);
+    if (iterator != values.end() && *iterator == value) values.erase(iterator);
+}
+
 std::vector<int> compatible_targets_for_state(
     const std::array<int, 3>& counts,
     int used_incidence,
-    const DynamicBits& once,
+    int open_edge_count,
     const std::vector<CageTarget>& targets,
     const std::vector<int>* source = nullptr
 ) {
@@ -1243,10 +1190,10 @@ std::vector<int> compatible_targets_for_state(
         for (int item = 0; item < 3; ++item) {
             if (counts[item] > target.counts[item]) return false;
         }
-        const int target_incidence = 4 * target.counts[0] + 5 * target.counts[1] + 6 * target.counts[2];
+        const int target_incidence =
+            4 * target.counts[0] + 5 * target.counts[1] + 6 * target.counts[2];
         const int remaining = target_incidence - used_incidence;
-        const int open_edges = static_cast<int>(once.count());
-        return remaining >= open_edges && (remaining - open_edges) % 2 == 0;
+        return remaining >= open_edge_count && (remaining - open_edge_count) % 2 == 0;
     };
     if (source) {
         for (const int index : *source) if (keep(index)) result.push_back(index);
@@ -1258,89 +1205,136 @@ std::vector<int> compatible_targets_for_state(
     return result;
 }
 
-double candidate_distance_to_patch(
-    int candidate,
-    const std::vector<int>& faces,
-    const std::vector<Vec3>& centers,
-    const std::optional<Box>& box
+bool ring_touches_closed_edge(
+    const CageState& state,
+    int ring,
+    const SparseIndex& ring_to_edges
 ) {
-    double best = std::numeric_limits<double>::infinity();
-    for (const int face : faces) {
-        best = std::min(best, pbc_distance(centers[candidate], centers[face], box));
+    for (std::size_t position = ring_to_edges.offsets[ring];
+         position < ring_to_edges.offsets[ring + 1]; ++position) {
+        if (local_edge_count(state, ring_to_edges.values[position]) >= 2) return true;
     }
-    return best;
+    return false;
 }
 
-std::vector<int> boundary_candidates(
+std::vector<int> boundary_candidates_sparse(
     const CageState& state,
     int seed_rank,
-    const std::vector<std::vector<int>>& edge_to_rings,
-    const std::vector<DynamicBits>& ring_edge_masks,
-    const std::vector<RingRecord>& active_rings,
-    const std::vector<Vec3>& centers,
-    const std::vector<CageTarget>& targets,
-    const AnalyzeOptions& options,
-    const std::optional<Box>& box,
-    bool& hit_limit
+    const SparseIndex& edge_to_rings,
+    const SparseIndex& ring_to_edges,
+    const std::vector<int>& local_to_global,
+    const std::vector<RingRecord>& rings,
+    const std::vector<CageTarget>& targets
 ) {
     std::vector<int> best;
     bool initialized = false;
-    for_each_set_bit(state.once, [&](std::size_t edge_index) {
-        if (edge_index >= edge_to_rings.size()) return;
+    for (const int edge : state.open_edges) {
         std::vector<int> candidates;
-        for (const int candidate : edge_to_rings[edge_index]) {
-            if (candidate < seed_rank || state.face_bits.test(candidate) ||
-                ring_edge_masks[candidate].intersects(state.twice)) {
+        for (std::size_t position = edge_to_rings.offsets[edge];
+             position < edge_to_rings.offsets[edge + 1]; ++position) {
+            const int candidate = edge_to_rings.values[position];
+            if (candidate < seed_rank ||
+                std::binary_search(state.faces.begin(), state.faces.end(), candidate) ||
+                ring_touches_closed_edge(state, candidate, ring_to_edges)) {
                 continue;
             }
-            const int size_index = face_size_index(active_rings[candidate].size);
+            const int size_index = face_size_index(rings[local_to_global[candidate]].size);
             const int next_count = state.counts[size_index] + 1;
             const bool fits = std::any_of(
-                state.compatible_targets.begin(), state.compatible_targets.end(), [&](int target) {
-                    return next_count <= targets[target].counts[size_index];
-                }
+                state.compatible_targets.begin(), state.compatible_targets.end(),
+                [&](int target) { return next_count <= targets[target].counts[size_index]; }
             );
             if (fits) candidates.push_back(candidate);
         }
-        if (candidates.empty()) {
-            best.clear();
-            initialized = true;
-            return;
-        }
+        if (candidates.empty()) return {};
         if (!initialized || candidates.size() < best.size()) {
             best = std::move(candidates);
             initialized = true;
         }
-    });
-    if (!initialized || best.empty()) return {};
-    if (options.max_boundary_candidates > 0 &&
-        static_cast<int>(best.size()) > options.max_boundary_candidates) {
-        hit_limit = true;
-        std::sort(best.begin(), best.end(), [&](int left, int right) {
-            const double left_distance = candidate_distance_to_patch(left, state.faces, centers, box);
-            const double right_distance = candidate_distance_to_patch(right, state.faces, centers, box);
-            return left_distance != right_distance ? left_distance < right_distance : left < right;
-        });
-        best.resize(options.max_boundary_candidates);
-    } else {
-        std::sort(best.begin(), best.end());
     }
-    return best;
+    return initialized ? best : std::vector<int>{};
 }
 
+struct EdgeUndo {
+    int edge = -1;
+    std::uint8_t previous = 0;
+};
+
+void apply_ring_edges(
+    CageState& state,
+    int ring,
+    const SparseIndex& ring_to_edges,
+    std::vector<EdgeUndo>& undo
+) {
+    undo.clear();
+    const std::size_t begin = ring_to_edges.offsets[ring];
+    const std::size_t end = ring_to_edges.offsets[ring + 1];
+    undo.reserve(end - begin);
+    for (std::size_t position = begin; position < end; ++position) {
+        const int edge = ring_to_edges.values[position];
+        auto iterator = std::lower_bound(
+            state.edge_counts.begin(), state.edge_counts.end(), edge,
+            [](const auto& item, int value) { return item.first < value; }
+        );
+        const std::uint8_t previous =
+            iterator != state.edge_counts.end() && iterator->first == edge
+            ? iterator->second
+            : std::uint8_t{0};
+        if (previous >= 2) throw std::logic_error("candidate overuses a cage edge");
+        undo.push_back({edge, previous});
+        if (previous == 0) {
+            state.edge_counts.insert(iterator, {edge, 1});
+            insert_sorted_unique(state.open_edges, edge);
+        } else {
+            iterator->second = 2;
+            erase_sorted_value(state.open_edges, edge);
+        }
+    }
+}
+
+void undo_ring_edges(CageState& state, const std::vector<EdgeUndo>& undo) {
+    for (auto item = undo.rbegin(); item != undo.rend(); ++item) {
+        auto iterator = std::lower_bound(
+            state.edge_counts.begin(), state.edge_counts.end(), item->edge,
+            [](const auto& pair, int value) { return pair.first < value; }
+        );
+        if (item->previous == 0) {
+            if (iterator == state.edge_counts.end() || iterator->first != item->edge) {
+                throw std::logic_error("missing cage edge during undo");
+            }
+            state.edge_counts.erase(iterator);
+            erase_sorted_value(state.open_edges, item->edge);
+        } else {
+            if (iterator == state.edge_counts.end() || iterator->first != item->edge) {
+                throw std::logic_error("missing promoted cage edge during undo");
+            }
+            iterator->second = 1;
+            insert_sorted_unique(state.open_edges, item->edge);
+        }
+    }
+}
+
+std::uint64_t packed_edge_key(const Edge& edge) {
+    return (static_cast<std::uint64_t>(static_cast<std::uint32_t>(edge.first)) << 32U) |
+        static_cast<std::uint32_t>(edge.second);
+}
 
 std::vector<CageRecord> find_cages(
     const FrameInput& frame,
     const AnalyzeOptions& options,
+    const std::vector<Edge>& graph_edges,
     const std::vector<RingRecord>& rings,
     std::vector<std::string>& warnings
 ) {
+    (void)warnings;
     if (!options.cage_enabled) return {};
     std::set<int> allowed_sizes;
     for (const int size : options.ring_sizes) {
         if (size >= 4 && size <= 6) allowed_sizes.insert(size);
     }
-    const auto targets = build_cage_targets(allowed_sizes, options.max_faces, options.cage_target_types);
+    const auto targets = build_cage_targets(
+        allowed_sizes, options.max_faces, options.cage_target_types
+    );
     if (targets.empty()) return {};
 
     std::set<int> active_sizes;
@@ -1350,48 +1344,68 @@ std::vector<CageRecord> find_cages(
         }
     }
     std::vector<int> local_to_global;
-    std::vector<RingRecord> active_rings;
+    local_to_global.reserve(rings.size());
     for (int index = 0; index < static_cast<int>(rings.size()); ++index) {
-        if (active_sizes.count(rings[index].size)) {
-            local_to_global.push_back(index);
-            active_rings.push_back(rings[index]);
-        }
+        if (active_sizes.count(rings[index].size)) local_to_global.push_back(index);
     }
-    if (active_rings.empty()) return {};
+    if (local_to_global.empty()) return {};
 
-    std::map<Edge, int> edge_rank;
-    for (const auto& ring : active_rings) {
-        for (const auto& edge : ring.edges) edge_rank.emplace(edge, 0);
+    std::unordered_map<std::uint64_t, int> edge_ids;
+    edge_ids.reserve(graph_edges.size() * 2U + 1U);
+    for (int index = 0; index < static_cast<int>(graph_edges.size()); ++index) {
+        edge_ids.emplace(packed_edge_key(graph_edges[index]), index);
     }
-    int edge_count = 0;
-    for (auto& entry : edge_rank) entry.second = edge_count++;
-    std::vector<std::vector<int>> edge_to_rings(edge_rank.size());
-    std::vector<DynamicBits> ring_edge_masks;
-    ring_edge_masks.reserve(active_rings.size());
-    for (int ring_index = 0; ring_index < static_cast<int>(active_rings.size()); ++ring_index) {
-        DynamicBits mask(edge_rank.size());
-        for (const auto& edge : active_rings[ring_index].edges) {
-            const int edge_index = edge_rank.at(edge);
-            mask.set(edge_index);
-            edge_to_rings[edge_index].push_back(ring_index);
+
+    SparseIndex ring_to_edges;
+    ring_to_edges.offsets.reserve(local_to_global.size() + 1U);
+    ring_to_edges.offsets.push_back(0);
+    ring_to_edges.values.reserve(local_to_global.size() * 6U);
+    std::vector<std::size_t> edge_counts(graph_edges.size(), 0U);
+    for (const int global_ring : local_to_global) {
+        for (const auto& edge : rings[global_ring].edges) {
+            const auto found = edge_ids.find(packed_edge_key(edge));
+            if (found == edge_ids.end()) {
+                throw std::logic_error("ring edge is absent from the water graph");
+            }
+            ring_to_edges.values.push_back(found->second);
+            ++edge_counts[found->second];
         }
-        ring_edge_masks.push_back(std::move(mask));
+        std::sort(
+            ring_to_edges.values.begin() + static_cast<std::ptrdiff_t>(ring_to_edges.offsets.back()),
+            ring_to_edges.values.end()
+        );
+        ring_to_edges.offsets.push_back(ring_to_edges.values.size());
     }
-    std::vector<Vec3> centers;
-    centers.reserve(active_rings.size());
-    for (const auto& ring : active_rings) centers.push_back(ring_center(frame, ring));
+    edge_ids.clear();
+    edge_ids.rehash(0);
+
+    SparseIndex edge_to_rings;
+    edge_to_rings.offsets.resize(graph_edges.size() + 1U, 0U);
+    for (std::size_t edge = 0; edge < edge_counts.size(); ++edge) {
+        edge_to_rings.offsets[edge + 1U] = edge_to_rings.offsets[edge] + edge_counts[edge];
+    }
+    edge_to_rings.values.resize(ring_to_edges.values.size());
+    std::vector<std::size_t> cursor = edge_to_rings.offsets;
+    for (int ring = 0; ring < static_cast<int>(local_to_global.size()); ++ring) {
+        for (std::size_t position = ring_to_edges.offsets[ring];
+             position < ring_to_edges.offsets[ring + 1]; ++position) {
+            const int edge = ring_to_edges.values[position];
+            edge_to_rings.values[cursor[edge]++] = ring;
+        }
+    }
+    cursor.clear();
+    cursor.shrink_to_fit();
+    edge_counts.clear();
+    edge_counts.shrink_to_fit();
+
     std::vector<Vec3> guest_centers;
     guest_centers.reserve(frame.guests.size());
     for (const auto& guest : frame.guests) guest_centers.push_back(guest_center(frame, guest));
 
-    std::unordered_set<DynamicBits, DynamicBitsHash> seen_states;
     std::set<std::string> seen_water_keys;
     std::map<std::string, int> type_counts;
     std::vector<CageRecord> cages;
-    int total_states = 0;
-    bool hit_seed_limit = false;
-    bool hit_total_limit = false;
-    bool hit_boundary_limit = false;
+    std::int64_t total_states = 0;
 
     auto add_candidate = [&](const CageState& state, const std::string& cage_type) {
         std::vector<int> global_faces;
@@ -1426,92 +1440,117 @@ std::vector<CageRecord> find_cages(
         cages.push_back(std::move(cage));
     };
 
-    for (int seed = 0; seed < static_cast<int>(active_rings.size()); ++seed) {
-        if (total_states >= options.max_total_states) {
-            hit_total_limit = true;
-            break;
+    for (int seed = 0; seed < static_cast<int>(local_to_global.size()); ++seed) {
+        CageState state;
+        state.faces.reserve(static_cast<std::size_t>(options.max_faces));
+        state.edge_counts.reserve(static_cast<std::size_t>(options.max_faces) * 3U);
+        state.open_edges.reserve(static_cast<std::size_t>(options.max_faces) * 3U);
+        state.faces.push_back(seed);
+        for (std::size_t position = ring_to_edges.offsets[seed];
+             position < ring_to_edges.offsets[seed + 1]; ++position) {
+            const int edge = ring_to_edges.values[position];
+            state.edge_counts.push_back({edge, 1});
+            state.open_edges.push_back(edge);
         }
-        CageState initial;
-        initial.face_bits = DynamicBits(active_rings.size());
-        initial.face_bits.set(seed);
-        initial.faces = {seed};
-        initial.once = ring_edge_masks[seed];
-        initial.twice = DynamicBits(edge_rank.size());
-        initial.counts[face_size_index(active_rings[seed].size)] = 1;
-        initial.used_incidence = active_rings[seed].size;
-        initial.compatible_targets = compatible_targets_for_state(
-            initial.counts, initial.used_incidence, initial.once, targets
+        std::sort(state.edge_counts.begin(), state.edge_counts.end());
+        std::sort(state.open_edges.begin(), state.open_edges.end());
+        const int seed_size = rings[local_to_global[seed]].size;
+        state.counts[face_size_index(seed_size)] = 1;
+        state.used_incidence = seed_size;
+        state.compatible_targets = compatible_targets_for_state(
+            state.counts,
+            state.used_incidence,
+            static_cast<int>(state.open_edges.size()),
+            targets
         );
-        if (initial.compatible_targets.empty()) continue;
-        std::vector<CageState> stack;
-        stack.push_back(std::move(initial));
-        int local_states = 0;
-        while (!stack.empty() && local_states < options.max_states_per_seed &&
-               total_states < options.max_total_states) {
-            CageState state = std::move(stack.back());
-            stack.pop_back();
-            if (!seen_states.insert(state.face_bits).second) continue;
+        if (state.compatible_targets.empty()) continue;
+
+        std::unordered_set<std::vector<int>, IntVectorHash> seen_states;
+        if (options.max_states_per_seed > 0) {
+            seen_states.reserve(static_cast<std::size_t>(
+                std::min(options.max_states_per_seed, 4096)
+            ));
+        }
+        std::int64_t local_states = 0;
+        std::function<void()> visit = [&]() {
+            if (seen_states.find(state.faces) != seen_states.end()) return;
+            if (options.max_states_per_seed > 0 &&
+                local_states >= options.max_states_per_seed) {
+                throw std::runtime_error(
+                    "Exact cage search reached cage.max_state_per_seed=" +
+                    std::to_string(options.max_states_per_seed) + " at seed " +
+                    std::to_string(seed) + "; no partial frame result was accepted."
+                );
+            }
+            if (options.max_total_states > 0 && total_states >= options.max_total_states) {
+                throw std::runtime_error(
+                    "Exact cage search reached cage.max_total_state=" +
+                    std::to_string(options.max_total_states) +
+                    "; no partial frame result was accepted."
+                );
+            }
+            seen_states.insert(state.faces);
             ++local_states;
             ++total_states;
-            if (state.once.empty()) {
+
+            if (state.open_edges.empty()) {
                 for (const int target : state.compatible_targets) {
                     if (state.counts == targets[target].counts) {
                         add_candidate(state, targets[target].name);
                         break;
                     }
                 }
-                continue;
+                return;
             }
-            auto candidates = boundary_candidates(
-                state, seed, edge_to_rings, ring_edge_masks, active_rings, centers,
-                targets, options, frame.box, hit_boundary_limit
+
+            const auto candidates = boundary_candidates_sparse(
+                state,
+                seed,
+                edge_to_rings,
+                ring_to_edges,
+                local_to_global,
+                rings,
+                targets
             );
-            for (auto iterator = candidates.rbegin(); iterator != candidates.rend(); ++iterator) {
-                const int candidate = *iterator;
-                if (ring_edge_masks[candidate].intersects(state.twice)) continue;
-                CageState next;
-                next.face_bits = state.face_bits;
-                next.face_bits.set(candidate);
-                next.faces = state.faces;
-                next.faces.insert(
-                    std::lower_bound(next.faces.begin(), next.faces.end(), candidate), candidate
+            for (const int candidate : candidates) {
+                const int global_ring = local_to_global[candidate];
+                const int size_index = face_size_index(rings[global_ring].size);
+                const int old_count = state.counts[size_index];
+                const int old_incidence = state.used_incidence;
+                const std::vector<int> old_targets = state.compatible_targets;
+                std::vector<EdgeUndo> undo;
+                apply_ring_edges(state, candidate, ring_to_edges, undo);
+                ++state.counts[size_index];
+                state.used_incidence += rings[global_ring].size;
+                state.compatible_targets = compatible_targets_for_state(
+                    state.counts,
+                    state.used_incidence,
+                    static_cast<int>(state.open_edges.size()),
+                    targets,
+                    &old_targets
                 );
-                next.once = bitwise_transition_once(
-                    state.once, state.twice, ring_edge_masks[candidate], next.twice
-                );
-                next.counts = state.counts;
-                ++next.counts[face_size_index(active_rings[candidate].size)];
-                next.used_incidence = state.used_incidence + active_rings[candidate].size;
-                next.compatible_targets = compatible_targets_for_state(
-                    next.counts, next.used_incidence, next.once, targets, &state.compatible_targets
-                );
-                if (!next.compatible_targets.empty()) stack.push_back(std::move(next));
+                if (!state.compatible_targets.empty()) {
+                    const auto face_position = std::lower_bound(
+                        state.faces.begin(), state.faces.end(), candidate
+                    );
+                    const auto face_index = static_cast<std::size_t>(
+                        std::distance(state.faces.begin(), face_position)
+                    );
+                    state.faces.insert(face_position, candidate);
+                    visit();
+                    state.faces.erase(
+                        state.faces.begin() + static_cast<std::ptrdiff_t>(face_index)
+                    );
+                }
+                state.compatible_targets = old_targets;
+                state.used_incidence = old_incidence;
+                state.counts[size_index] = old_count;
+                undo_ring_edges(state, undo);
             }
-        }
-        if (!stack.empty() && local_states >= options.max_states_per_seed) hit_seed_limit = true;
-        if (!stack.empty() && total_states >= options.max_total_states) {
-            hit_total_limit = true;
-            break;
-        }
+        };
+        visit();
     }
-    if (hit_seed_limit) {
-        warnings.push_back(
-            "Cage search reached max_states_per_seed=" + std::to_string(options.max_states_per_seed) +
-            "; increase it for exhaustive cage counts."
-        );
-    }
-    if (hit_total_limit) {
-        warnings.push_back(
-            "Cage search reached max_total_states=" + std::to_string(options.max_total_states) +
-            "; increase it for exhaustive cage counts."
-        );
-    }
-    if (hit_boundary_limit) {
-        warnings.push_back(
-            "Cage search ranked more shared-edge candidates than max_boundary_candidates=" +
-            std::to_string(options.max_boundary_candidates) + "."
-        );
-    }
+
     std::sort(cages.begin(), cages.end(), [](const CageRecord& left, const CageRecord& right) {
         return std::tie(left.cage_type, left.object_id) < std::tie(right.cage_type, right.object_id);
     });
@@ -1523,7 +1562,6 @@ std::vector<CageRecord> find_cages(
     }
     return cages;
 }
-
 std::optional<double> mean_or_none(const std::vector<double>& values) {
     if (values.empty()) return std::nullopt;
     return std::accumulate(values.begin(), values.end(), 0.0) /
@@ -1665,9 +1703,11 @@ AnalysisResult analyze_frame(const FrameInput& frame, const AnalyzeOptions& opti
           options.hbond_angle_deg <= 180.0)) {
         throw std::invalid_argument("hbond_angle_deg must be between 0 and 180");
     }
-    if (options.max_faces < 1 || options.max_states_per_seed < 1 ||
-        options.max_total_states < 1 || options.max_boundary_candidates < 1) {
-        throw std::invalid_argument("cage limits must be positive integers");
+    if (options.max_faces < 1 || options.max_states_per_seed < 0 ||
+        options.max_total_states < 0 || options.max_boundary_candidates < 1) {
+        throw std::invalid_argument(
+            "cage face/candidate limits must be positive; state guards may be zero (unlimited)"
+        );
     }
     if (!(std::isfinite(options.occupancy_radius_nm) && options.occupancy_radius_nm > 0.0)) {
         throw std::invalid_argument("occupancy radius must be positive and finite");
@@ -1686,11 +1726,11 @@ AnalysisResult analyze_frame(const FrameInput& frame, const AnalyzeOptions& opti
     result.edges = graph.edges;
     result.rings = find_rings(graph.adjacency, ring_sizes, options.chordless);
     result.occupancy_evaluated = !frame.guests.empty();
-    result.cages = find_cages(frame, options, result.rings, result.warnings);
+    result.cages = find_cages(frame, options, result.edges, result.rings, result.warnings);
     result.order = compute_order(frame, options, graph, result.warnings);
     return result;
 }
 
-const char* core_version() noexcept { return "0.3.12"; }
+const char* core_version() noexcept { return "0.4.1"; }
 
 }  // namespace sqq_cpp

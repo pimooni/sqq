@@ -47,7 +47,7 @@ else:  # pragma: no cover - used only by the JSON source-tree fallback.
 
 
 DEFAULT_MODE = "py"
-CONFIG_SCHEMA_VERSION = "0.3.12"
+CONFIG_SCHEMA_VERSION = "0.4.1"
 DEFAULT_ORDER_PARAMETERS = ("f3", "f4")
 CPP_MODE = "cpp"
 CPP_MODES = frozenset({"99", CPP_MODE})
@@ -336,10 +336,10 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "enabled": True,
         "search_mode": "grow",
         "seed_mode": "ring",
-        "max_states_per_seed": 20000,
-        "max_total_states": 5000000,
+        "max_states_per_seed": 0,
+        "max_total_states": 0,
         "max_boundary_candidates": 8,
-        "fast_closure": True,
+        "fast_closure": False,
         "fast_closure_max_states": 20000,
         "scientific_validation": False,
         "max_face_planarity_rms_nm": 0.06,
@@ -832,6 +832,21 @@ def normalize_engine_capabilities(
     half_value = _resolve_auto_toggle(half.get("enabled", "auto"), not cpp)
     quasi = config.setdefault("quasi_cage", {})
     quasi_value = _resolve_auto_toggle(quasi.get("enabled", "auto"), not cpp)
+    cage = config.setdefault("cage", {})
+    explicit_cage = _explicit_section(user_config, "cage")
+    default_fast_limit = DEFAULT_CONFIG["cage"]["fast_closure_max_states"]
+    if (
+        _explicit_toggle_on(explicit_cage.get("fast_closure"))
+        or explicit_cage.get("fast_closure_max_states", default_fast_limit)
+        != default_fast_limit
+    ):
+        _record_capability_adjustment(
+            adjustments,
+            "legacy cage fast closure disabled; exact sparse GROW is used",
+            emit_warnings,
+        )
+    cage["fast_closure"] = False
+    cage["fast_closure_max_states"] = default_fast_limit
 
     if cpp:
         explicit_half = _explicit_section(user_config, "half_cage")
@@ -950,6 +965,7 @@ _RESOLVED_RUN_KEYS = {
     "graph_mode_requested",
     "graph_mode_effective",
     "graph_mode_display",
+    "graph_mode_by_group",
     "order_parameters",
     "find_half",
     "find_quasi",
@@ -994,7 +1010,7 @@ _CONFIG_EXTRA_KEYS: dict[tuple[str, ...], set[str]] = {
         "type_map_source",
         "rebuilt_molecules",
     },
-    ("graph",): {"effective_bond_mode"},
+    ("graph",): {"effective_bond_mode", "effective_bond_mode_by_group"},
 }
 _CONFIG_FLEXIBLE_PATHS = {
     ("component", "role_map"),
@@ -1002,6 +1018,8 @@ _CONFIG_FLEXIBLE_PATHS = {
     ("input", "sampling"),
     ("input", "lammps", "type_map"),
     ("input", "lammps", "resolved_type_map"),
+    ("graph", "effective_bond_mode_by_group"),
+    ("run", "graph_mode_by_group"),
     ("run", "summary_write"),
 }
 
@@ -1131,6 +1149,11 @@ _DEFAULT_CONFIG_INLINE_COMMENTS: dict[tuple[str, ...], str] = {
     ("quasi_cage", "search_policy"): "choices: bounded, exact",
     ("quasi_cage", "max_layer"): "maximum layered growth depth; minimum 1",
     ("cage", "report_type"): "auto, all, I, II, H, HS-I, TS-I, I2II, or cage labels",
+    ("cage", "max_state_per_seed"): "0 = unlimited; positive values are hard diagnostic guards",
+    ("cage", "max_total_state"): "0 = unlimited; positive values are hard diagnostic guards",
+    ("cage", "max_boundary_candidate"): "legacy compatibility key; exact search never truncates candidates",
+    ("cage", "fast_closure"): "legacy compatibility key; normalized to false",
+    ("cage", "fast_closure_max_state"): "legacy compatibility key; ignored by exact search",
     ("cage", "scientific_validation"): "choices: true, false",
     ("hydrate_cluster", "enabled"): "choices: true, false",
     ("order_parameter", "enabled"): "choices: f3, f4, qN, mcg1, mcg3, dhop35, dhop30, all, none",

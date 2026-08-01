@@ -2,7 +2,6 @@ from __future__ import annotations
 
 """Shared human-facing display helpers for terminal, Markdown, and summary output."""
 
-from collections import Counter
 from typing import Any, Iterable
 
 _GRAPH_MODE_ORDER = ("hbond", "oo", "pairs")
@@ -39,10 +38,8 @@ def graph_mode_display(requested: Any, effective_modes: Iterable[Any] | None = N
         if (mode := clean_graph_mode(value))
     ]
     modes = ordered_unique_graph_modes(values)
-    if len(modes) == 1:
-        return f"auto -> {modes[0]}"
-    if len(modes) > 1:
-        counts = Counter(values)
-        details = ", ".join(f"{mode}: {counts[mode]}" for mode in modes)
-        return f"auto -> mixed ({details})"
-    return "auto -> pending"
+    if len(modes) != 1 or modes[0] not in {"hbond", "oo"}:
+        raise ValueError(
+            "graph mode 'auto' must be resolved to exactly one of: hbond, oo"
+        )
+    return f"auto -> {modes[0]}"

@@ -21,7 +21,7 @@ from time import perf_counter
 from typing import Any, Callable, Iterator
 
 from . import __version__
-from .banner import SQQ_BANNER
+from .banner import banner_for_engine
 from .config import (
     DEFAULT_MODE,
     is_cpp_mode,
@@ -54,7 +54,7 @@ from .core.f3f4 import (
 )
 from .core.dhop import compute_dhop_order
 from .core.mcg import compute_mcg_order
-from .core.graph import build_water_graph
+from .core.graph import build_water_graph, resolve_bond_mode
 from .display import graph_mode_display, ordered_unique_graph_modes
 from .core.hydrate_cluster import analyze_hydrate_clusters
 from .core.ice import classify_ice_waters
@@ -129,9 +129,9 @@ def write_terminal_block(lines: list[str], *, stream: Any | None = None) -> None
     target.flush()
 
 
-def print_run_banner() -> None:
+def print_run_banner(engine: str | None = None) -> None:
     """Print the SQQ banner before any run preparation can emit diagnostics."""
-    write_terminal_block([SQQ_BANNER])
+    write_terminal_block([banner_for_engine(engine)])
 
 
 class RunDiagnostics:
@@ -199,7 +199,7 @@ def capture_run_warnings(diagnostics: RunDiagnostics) -> Iterator[None]:
 
 def analyze(args: Namespace) -> None:
     """Run SQQ analysis while exclusively owning its output root."""
-    print_run_banner()
+    print_run_banner(getattr(args, "engine", None))
     outdir = Path(args.output)
     outdir.mkdir(parents=True, exist_ok=True)
     with sqq_output_lock(outdir):
@@ -339,6 +339,12 @@ def _analyze_locked_impl(args: Namespace, diagnostics: RunDiagnostics) -> None:
     else:
         config["input"].pop("sampling", None)
         work_items = len(paths)
+    resolve_run_graph_mode(
+        paths,
+        topology,
+        config,
+        selected_frame_indexes=trajectory_indexes,
+    )
     cleanup_previous_multi_gro_outputs(outdir, config)
     parallelizable = coordinate_parallelizable or (
         trajectory_parallelizable and parallel_backend == "process"
@@ -417,6 +423,7 @@ def _analyze_locked_impl(args: Namespace, diagnostics: RunDiagnostics) -> None:
                 separated_output=separated_frame_output,
                 fragment_dir=fragment_dir,
             )
+        print_output_write_status()
         if bundle_enabled:
             finalize_sqq_cage_bundle(outdir, fragment_dir=fragment_dir)
     except Exception as exc:
@@ -541,6 +548,40 @@ def build_run_info(
     """Collect run-level metadata for terminal, resolved config, and summaries."""
     requested_graph_mode = config["graph"]["bond_mode"]
     effective_graph_modes = row_effective_graph_modes(rows or [])
+    graph_config = config.get("graph", {})
+    configured_graph_mode = str(graph_config.get("effective_bond_mode", "")).strip()
+    raw_group_modes = graph_config.get("effective_bond_mode_by_group", {})
+    configured_group_modes = (
+        {
+            str(label): str(mode).strip()
+            for label, mode in raw_group_modes.items()
+            if str(mode).strip()
+        }
+        if isinstance(raw_group_modes, dict)
+        else {}
+    )
+    allowed_modes = set(configured_group_modes.values())
+    if configured_graph_mode:
+        allowed_modes.add(configured_graph_mode)
+    if effective_graph_modes and allowed_modes:
+        if any(mode not in allowed_modes for mode in effective_graph_modes):
+            raise RuntimeError("Per-frame graph mode disagrees with preflight resolution.")
+    elif not effective_graph_modes:
+        effective_graph_modes = (
+            list(configured_group_modes.values())
+            if configured_group_modes
+            else [configured_graph_mode]
+        )
+    unique_effective_modes = ordered_unique_graph_modes(effective_graph_modes)
+    graph_mode_by_group = {
+        label: graph_mode_display(requested_graph_mode, [mode])
+        for label, mode in configured_group_modes.items()
+    }
+    graph_display = (
+        graph_mode_display(requested_graph_mode, unique_effective_modes)
+        if len(unique_effective_modes) == 1 or requested_graph_mode != "auto"
+        else ""
+    )
     selected_order_parameters = normalize_order_parameters(
         config.get("order", {}).get("parameters")
     )
@@ -592,8 +633,9 @@ def build_run_info(
         "failures": failures,
         "elapsed_seconds": round(elapsed_seconds, 3),
         "graph_mode": requested_graph_mode,
-        "effective_graph_modes": ", ".join(ordered_unique_graph_modes(effective_graph_modes)),
-        "graph_mode_display": graph_mode_display(requested_graph_mode, effective_graph_modes),
+        "effective_graph_modes": ", ".join(unique_effective_modes),
+        "graph_mode_display": graph_display,
+        "graph_mode_by_group": graph_mode_by_group,
         "search_sizes": config["ring"]["sizes"],
         "ring_report_sizes": config["ring"]["report_sizes"],
         "find_half": on_off_text(config.get("half_cage", {}).get("enabled", False)),
@@ -602,7 +644,7 @@ def build_run_info(
         "quasi_cage_side_sizes": config["quasi_cage"].get("side_sizes", "auto"),
         "cage_report_types": config["cage"].get("report_types", []),
         "max_cage_face": config["cage"].get("max_faces", 20),
-        "cage_fast_closure": on_off_text(config["cage"].get("fast_closure", True)),
+        "cage_fast_closure": on_off_text(config["cage"].get("fast_closure", False)),
         "cage_scientific_validation": on_off_text(config["cage"].get("scientific_validation", False)),
         "find_cluster": on_off_text(config.get("hydrate_cluster", {}).get("enabled", False)),
         "cluster_min_cage": config.get("hydrate_cluster", {}).get("min_cage", 2),
@@ -720,7 +762,22 @@ def print_run_header(
         add_field("LAMMPS timestep", lammps.get("timestep", 1.0))
         add_field("LAMMPS atom style", lammps.get("atom_style", "full"))
         add_field("LAMMPS type map", lammps.get("type_map_source", "<configuration>"))
-    add_field("Graph mode", graph_mode_display(config["graph"]["bond_mode"]))
+    requested_graph_mode = config["graph"]["bond_mode"]
+    effective_graph_mode = config["graph"].get("effective_bond_mode", "")
+    group_graph_modes = config["graph"].get("effective_bond_mode_by_group", {})
+    if requested_graph_mode != "auto" or effective_graph_mode:
+        add_field(
+            "Graph mode",
+            graph_mode_display(requested_graph_mode, [effective_graph_mode]),
+        )
+    elif isinstance(group_graph_modes, dict) and group_graph_modes:
+        for label, mode in group_graph_modes.items():
+            add_field(
+                f"Graph mode ({label})",
+                graph_mode_display(requested_graph_mode, [mode]),
+            )
+    else:
+        graph_mode_display(requested_graph_mode, [])
     add_field("Search sizes", config["ring"]["sizes"])
     add_field("Ring definition", config["ring"].get("definition", "chordless"))
     if not is_cpp_mode(config.get("mode")):
@@ -734,7 +791,7 @@ def print_run_header(
     add_field("Cage report types", dashboard_cage_targets(config))
     add_field("Maximum cage face", config["cage"].get("max_faces", 20))
     if not is_cpp_mode(config.get("mode")):
-        add_field("Cage fast closure", on_off_text(config["cage"].get("fast_closure", True)))
+        add_field("Cage fast closure", on_off_text(config["cage"].get("fast_closure", False)))
     add_field("Scientific validation", on_off_text(config["cage"].get("scientific_validation", False)))
     if not is_cpp_mode(config.get("mode")):
         add_field("Find cluster", on_off_text(config.get("hydrate_cluster", {}).get("enabled", False)))
@@ -774,6 +831,11 @@ def print_terminal_field(label: str, value: Any) -> None:
     write_terminal_block([terminal_field_line(label, value)])
 
 
+def print_output_write_status() -> None:
+    """Tell the user that final output publication is still in progress."""
+    write_terminal_block(["Writing output files; please wait and do not close SQQ..."])
+
+
 def print_run_summary(run_info: dict[str, Any]) -> None:
     """Print final effective run metadata as one terminal block."""
     lines = ["Run Summary"]
@@ -785,7 +847,15 @@ def print_run_summary(run_info: dict[str, Any]) -> None:
     add_field("Duration (s)", run_info.get("elapsed_seconds", ""))
     add_field("SQQ version", run_info.get("sqq_version", __version__))
     add_field("SQQ engine", run_info.get("sqq_engine", ""))
-    add_field("Graph mode", run_info.get("graph_mode_display", run_info.get("graph_mode", "")))
+    graph_mode_by_group = run_info.get("graph_mode_by_group", {})
+    if isinstance(graph_mode_by_group, dict) and len(graph_mode_by_group) > 1:
+        for label, mode in graph_mode_by_group.items():
+            add_field(f"Graph mode ({label})", mode)
+    else:
+        add_field(
+            "Graph mode",
+            run_info.get("graph_mode_display", run_info.get("graph_mode", "")),
+        )
     add_field("Order parameters", run_info.get("order_parameters", ""))
     if run_info.get("sqq_engine") != "sqq-cpp":
         add_field("Find cluster", run_info.get("find_cluster", "off"))
@@ -810,6 +880,59 @@ def row_effective_graph_modes(rows: list[dict[str, Any]]) -> list[str]:
         if mode:
             modes.append(mode)
     return modes
+
+
+def resolve_run_graph_mode(
+    paths: list[Path],
+    topology: Path | None,
+    config: dict[str, Any],
+    *,
+    selected_frame_indexes: list[int] | None = None,
+) -> str:
+    """Resolve one effective graph mode before public run metadata is written."""
+    graph = config["graph"]
+    requested = str(graph.get("bond_mode", "auto")).strip().lower()
+    if requested != "auto":
+        effective = resolve_bond_mode(requested, [], graph.get("pair_file"))
+        graph["effective_bond_mode"] = effective
+        return effective
+
+    existing = str(graph.get("effective_bond_mode", "")).strip().lower()
+    if existing in {"hbond", "oo"}:
+        return existing
+    if not paths:
+        raise ValueError("Cannot resolve graph mode without an input frame.")
+
+    first_index = selected_frame_indexes[0] if selected_frame_indexes else 0
+    source_paths = paths if len(paths) == 1 else [paths[0]]
+    frame_indexes = [first_index] if len(source_paths) == 1 else None
+    frames = iter(
+        read_frames(
+            source_paths,
+            topology=topology,
+            xyz_scale=float(config["input"].get("xyz_scale", 0.1)),
+            frame_indexes=frame_indexes,
+            lammps_config=config["input"].get("lammps", {}),
+        )
+    )
+    try:
+        frame = next(frames)
+    except StopIteration as exc:
+        raise ValueError("Cannot resolve graph mode from an empty input.") from exc
+    finally:
+        close = getattr(frames, "close", None)
+        if callable(close):
+            close()
+
+    waters = select_waters(
+        frame.atoms,
+        resnames=set(config["water"]["resnames"]),
+        oxygen_names=set(config["water"]["oxygen_names"]),
+        hydrogen_names=set(config["water"]["hydrogen_names"]),
+    )
+    effective = resolve_bond_mode("auto", waters, graph.get("pair_file"))
+    graph["effective_bond_mode"] = effective
+    return effective
 
 
 def frame_input_metadata(config: dict[str, Any]) -> dict[str, Any]:
@@ -2850,6 +2973,7 @@ def normalize_analysis_scopes(config: dict[str, Any]) -> None:
     graph = config.setdefault("graph", {})
     # Effective mode is internal run state, never a reusable user setting.
     graph.pop("effective_bond_mode", None)
+    graph.pop("effective_bond_mode_by_group", None)
     graph_mode = str(graph.get("bond_mode", "auto")).strip().lower()
     if graph_mode not in {"auto", "hbond", "oo", "pairs"}:
         raise ValueError("graph.bond_mode must be auto, hbond, oo, or pairs.")
@@ -2962,13 +3086,13 @@ def normalize_analysis_scopes(config: dict[str, Any]) -> None:
         raise ValueError("cage.occupancy_mode must be polyhedron, center, or auto.")
     cage["occupancy_mode"] = occupancy_mode
     cage["occupancy_radius_nm"] = finite_float(cage.get("occupancy_radius_nm", 0.5), "cage.occupancy_radius_nm", positive=True)
-    for key, default in (
-        ("max_states_per_seed", 20000),
-        ("max_total_states", 5000000),
-        ("max_boundary_candidates", 8),
-    ):
-        cage[key] = positive_integer(cage.get(key, default), f"cage.{key}")
-    cage["fast_closure"] = parse_on_off(cage.get("fast_closure", True), "cage.fast_closure")
+    for key in ("max_states_per_seed", "max_total_states"):
+        cage[key] = nonnegative_integer(cage.get(key, 0), f"cage.{key}")
+    cage["max_boundary_candidates"] = positive_integer(
+        cage.get("max_boundary_candidates", 8),
+        "cage.max_boundary_candidates",
+    )
+    cage["fast_closure"] = parse_on_off(cage.get("fast_closure", False), "cage.fast_closure")
     cage["fast_closure_max_states"] = positive_integer(cage.get("fast_closure_max_states", 20000), "cage.fast_closure_max_states")
     cage["scientific_validation"] = parse_on_off(
         cage.get("scientific_validation", False),
@@ -3184,6 +3308,19 @@ def positive_integer(value: Any, key: str) -> int:
     return number
 
 
+def nonnegative_integer(value: Any, key: str) -> int:
+    """Normalize one integer that may use zero for no limit."""
+    if isinstance(value, bool):
+        raise ValueError(f"{key} must be a non-negative integer.")
+    try:
+        numeric = float(value)
+        number = int(numeric)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{key} must be a non-negative integer.") from exc
+    if not math.isfinite(numeric) or numeric != number or number < 0:
+        raise ValueError(f"{key} must be a non-negative integer.")
+    return number
+
 def string_list(value: Any, key: str, *, allow_empty: bool = False) -> list[str]:
     """Normalize a comma-separated string or sequence of names."""
     if value is None:
@@ -3327,15 +3464,17 @@ def analyze_frame(
     )
     scientific_validation = bool(config["cage"].get("scientific_validation", False))
     hydrate_cluster_enabled = bool(config.get("hydrate_cluster", {}).get("enabled", False))
+    find_half = bool(config.get("half_cage", {}).get("enabled", False))
+    find_quasi = bool(config["quasi_cage"].get("enabled", False))
     ring_topology = build_ring_topology_index(
         frame,
         rings,
         compute_face_quality=scientific_validation,
         compute_face_normals=hydrate_cluster_enabled,
+        compute_ring_centers=find_half or find_quasi or hydrate_cluster_enabled,
+        compute_adjacency=False,
     )
     warnings: list[str] = []
-    find_half = bool(config.get("half_cage", {}).get("enabled", False))
-    find_quasi = bool(config["quasi_cage"].get("enabled", False))
     if find_half or find_quasi:
         report_stage(stage_callback, "searching half/quasi cage")
     half_cages, quasi_cages = find_cage_patches(
@@ -3367,12 +3506,12 @@ def analyze_frame(
         max_faces=int(config["cage"].get("max_faces", 20)),
         search_mode=str(config["cage"].get("search_mode", "grow")),
         seed_mode=str(config["cage"].get("seed_mode", "ring")),
-        max_states_per_seed=int(config["cage"].get("max_states_per_seed", 20000)),
-        max_total_states=int(config["cage"].get("max_total_states", 5000000)),
+        max_states_per_seed=int(config["cage"].get("max_states_per_seed", 0)),
+        max_total_states=int(config["cage"].get("max_total_states", 0)),
         max_boundary_candidates=int(config["cage"].get("max_boundary_candidates", 8)),
         occupancy_radius_nm=float(config["cage"].get("occupancy_radius_nm", 0.5)),
         occupancy_mode=str(config["cage"].get("occupancy_mode", "polyhedron")),
-        fast_closure=bool(config["cage"].get("fast_closure", True)),
+        fast_closure=bool(config["cage"].get("fast_closure", False)),
         fast_closure_max_states=int(config["cage"].get("fast_closure_max_states", 20000)),
         scientific_validation=scientific_validation,
         max_face_planarity_rms_nm=float(config["cage"].get("max_face_planarity_rms_nm", 0.06)),

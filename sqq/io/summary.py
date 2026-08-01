@@ -19,7 +19,7 @@ from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 
 from .. import __release_date__, __version__
-from ..banner import SQQ_BANNER
+from ..banner import SQQ_AUTHOR, SQQ_TITLE
 from ..config import (
     DEFAULT_MODE,
     dump_config,
@@ -2204,6 +2204,7 @@ def config_with_run_metadata(config: dict[str, Any], run_info: dict[str, Any]) -
         "graph_mode_requested": run_info.get("graph_mode", config.get("graph", {}).get("bond_mode", "")),
         "graph_mode_effective": run_info.get("effective_graph_modes", ""),
         "graph_mode_display": run_info.get("graph_mode_display", ""),
+        "graph_mode_by_group": run_info.get("graph_mode_by_group", {}),
         "order_parameters": run_info.get(
             "order_parameters",
             order_parameter_display(config.get("order", {}).get("parameters")),
@@ -2238,6 +2239,8 @@ def config_with_run_metadata(config: dict[str, Any], run_info: dict[str, Any]) -
         "math_threads_per_worker": run_info.get("math_threads", 1),
         "summary_write": run_info.get("summary_write", {}),
     })
+    if run["graph_mode_by_group"] and not run["graph_mode_display"]:
+        run.pop("graph_mode_display")
     for key in (
         "topology_group_count",
         "topology_group_limit",
@@ -2357,9 +2360,8 @@ def _remove_legacy_summary_detail_csvs(outdir: Path, current_dir: Path) -> None:
 def summary_dashboard_table(data: pd.DataFrame, run_info: dict[str, Any], config: dict[str, Any]) -> pd.DataFrame:
     """Build a compact human-facing dashboard for the summary sheet."""
     cpp_mode = is_cpp_mode(config.get("mode", DEFAULT_MODE))
-    banner_lines = [line.strip("| ") for line in SQQ_BANNER.splitlines() if line.startswith("|")]
-    title = banner_lines[0] if banner_lines else "Shell  Quant  Qualifier"
-    author = banner_lines[1] if len(banner_lines) > 1 else "by J. PANG & Q. SUN"
+    title = SQQ_TITLE
+    author = SQQ_AUTHOR
     matched_files = run_info.get("matched_files", "")
     try:
         matched_count = int(matched_files)

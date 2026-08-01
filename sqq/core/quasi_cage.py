@@ -42,7 +42,7 @@ def find_cage_patches(
     base_allowed = set(base_sizes or [5, 6])
     side_allowed = set(side_sizes or [5, 6])
     all_rings = [ring for group in rings.values() for ring in group]
-    topology = topology_index or build_ring_topology_index(frame, all_rings)
+    topology = topology_index or build_ring_topology_index(frame, all_rings, compute_adjacency=False)
     ring_by_id = topology.ring_by_id
     ring_centers = topology.ring_centers
     # Shared edges filter; centers only rank candidates.

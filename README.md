@@ -2,7 +2,7 @@
 
 **SQQ: Python Joint Toolkit for Water-Shell Topology Analysis.**
 
-Current release: **0.3.12**
+Current release: **0.4.1**
 
 SQQ provides the complete SQQ-Py water-shell topology workflow and the focused SQQ-CPP cage engine. Select the Python workflow with `-e py` or the C++17 graph/ring/cage/occupancy/F3/F4 workflow with `-e cpp`. Algorithms are documented in `docs/design.md` and release notes in `docs/update.md`.
 
@@ -22,15 +22,16 @@ Names are listed alphabetically by family name.
 - Yingtao Sun @ The Hong Kong University of Science and Technology
 - Zhengcai Zhang @ Laoshan Laboratory
 
-## Changed in 0.3.12
+## Changed in 0.4.1
 
-- Package, configuration-schema, and native-core versions are synchronized at `0.3.12`, released Jul 31, 2026.
-- Every trajectory-like input, including multiple XTC/TRR/LAMMPS paths and stacked GRO, and every multi-file GRO/XYZ job now places per-frame Markdown reports directly under `info/` and selected structures under `gro/<frame>/`.
-- A single ordinary one-frame GRO or XYZ keeps the compact frame-root layout; empty or information-only frame directories are not retained.
-- Reusing an output root removes known SQQ artifacts even when the input basename or job shape changes, including obsolete `result_A`-`result_Z` group roots. Grouped/flat F3/F4 files are included, while unknown user files remain untouched.
-- Per-frame files and summary outputs use private staging and transactional publication, so a failed frame or summary write does not leave a partial new result set.
-- Explicit `f3-gro` and `f4-gro` outputs write complete valid water molecules and annotate each oxygen with its per-water F3 or F4 value.
-- Scientific graph, ring, cage, phase, occupancy, and order-parameter definitions are unchanged.
+- Package, configuration-schema, and native-core versions are synchronized at `0.4.1`, released Aug 1, 2026.
+- SQQ-Py and SQQ-CPP now use the same exact sparse GROW contract: ring-edge incidence is stored sparsely, each search branch keeps only local edge counts and its open frontier, and all topologically eligible branches are examined without candidate truncation.
+- Cage state limits default to `0` (unlimited). A positive diagnostic limit stops the frame with an error instead of returning a partial cage set. The legacy fast-closure fallback is disabled.
+- Deterministic final cage ordering makes frame-local cage IDs consistent between the Python and C++ engines without changing cage topology, type, isomer, occupancy, or order-parameter definitions.
+- SQQ-CPP validation includes large systems containing up to approximately 10⁶ water molecules.
+- Multi-frame reports are collected directly under `info/`; selected structures use `gro/<frame>/`. Per-frame and summary publication is transactional, reused output roots clean only known SQQ artifacts, and `f3-gro`/`f4-gro` contain complete water molecules with the per-water value on each oxygen.
+- Automatic graph selection is resolved before run metadata is shown: the terminal, per-frame reports, summaries, and resolved YAML display only `auto -> hbond` or `auto -> oo`.
+- After frame analysis reaches 100%, the terminal displays `Writing output files; please wait and do not close SQQ...` while render, Excel/CSV, and final configuration files are published.
 
 ## Install
 
@@ -139,7 +140,7 @@ For SQQ-Py, `--find-cluster` overrides `hydrate_cluster.enabled` in YAML. Search
 
 Both documented engines default to one worker. `-w` / `--worker` overrides the preset: integer text is a worker count, while `0.5`, `1.0`, `50%`, and `100%` are physical-core fractions. Process parallelism supports independent GRO/XYZ files and indexed XTC/TRR/LAMMPS trajectories. At most `3 * workers` tasks are submitted at once.
 
-The default `chordless`/`bounded` path preserves the established scientific definitions while accelerating neighbor generation, incremental chord pruning, L1 forward checking, cached layer growth, integer-mask subset ownership, and cage target/edge state pruning. Cage DFS also applies exact remaining-edge incidence and parity conditions before expansion. MDAnalysis supplies orthorhombic cutoff candidates when available, but SQQ still rechecks every distance and hydrogen-bond angle with its established float64 logic. F3 and graph-mode Q_l share one graph-vector cache; all Q_l degrees share candidate lists and spherical-angle work. Optional `ring.definition: shortest_path` applies the Franzblau shortest-path criterion and reuses bounded-BFS distance maps. Optional `quasi_cage.search_policy: exact` preserves distinct frontiers and enumerates connected L2/L3 subsets; these opt-in modes can change or add results. Candidate and state truncation is reported through frame warnings.
+The default `chordless`/`bounded` path preserves the established scientific definitions while accelerating neighbor generation, incremental chord pruning, L1 forward checking, cached layer growth, integer-mask subset ownership, and cage target/edge state pruning. Cage DFS also applies exact remaining-edge incidence and parity conditions before expansion. MDAnalysis supplies orthorhombic cutoff candidates when available, but SQQ still rechecks every distance and hydrogen-bond angle with its established float64 logic. F3 and graph-mode Q_l share one graph-vector cache; all Q_l degrees share candidate lists and spherical-angle work. Optional `ring.definition: shortest_path` applies the Franzblau shortest-path criterion and reuses bounded-BFS distance maps. Optional `quasi_cage.search_policy: exact` preserves distinct frontiers and enumerates connected L2/L3 subsets; these opt-in modes can change or add results. Quasi-cage candidate and layer-state truncation is reported through frame warnings; the 0.4.1 cage GROW search itself does not truncate candidates or return partial results.
 
 Every cage now passes the same mandatory topology validation in SQQ-Py and SQQ-CPP: each edge belongs to exactly two faces, `V - E + F = 2`, the face shell is connected, every vertex link is one cycle, and every shell vertex is trivalent. Optional scientific cage validation adds PBC-aware face-planarity and edge-variation limits, nonzero projected area, positive-volume validation, and volume-centroid cage centers. It remains disabled by default, but disabling it no longer bypasses topology validation. SQQ uses an orthorhombic box representation and rejects non-orthogonal/triclinic input explicitly.
 
@@ -224,7 +225,7 @@ Integer worker text is an explicit count. Decimal text and percentages are physi
 The generated file uses YAML `#` comments and canonical singular keys. The main settings are:
 
 ```yaml
-schema_version: "0.3.12"
+schema_version: "0.4.1"
 engine: py  # choices: py, cpp
 
 run:
@@ -296,8 +297,11 @@ cage:
   max_face: 20
   search_mode: grow
   seed_mode: ring
-  fast_closure: true
-  fast_closure_max_state: 20000
+  max_state_per_seed: 0  # 0 = unlimited
+  max_total_state: 0  # 0 = unlimited
+  max_boundary_candidate: 8  # compatibility setting; never truncates exact search
+  fast_closure: false  # legacy compatibility key
+  fast_closure_max_state: 20000  # ignored by the exact sparse search
   scientific_validation: false
   max_face_planarity_rms_nm: 0.06
   max_face_edge_cv: 0.35
@@ -393,13 +397,15 @@ sqq analyze -i md.gro -c sqq_config.yaml -s 4,5,6
 
 Repeated cage types contributed by several groups are reported once. All detected cages still participate in half-cage, quasi-cage, free-ring filtering, and hydrate-cluster topology. A report filter changes user-facing cage counts and files, not topology ownership. Cage detection supports 4/5/6 faces; ring and quasi-cage detection also support size 7 in SQQ-Py.
 
-## Cage Fast Closure and Scientific Validation
+## Exact Sparse Cage Search and Scientific Validation
 
-One frame-local ring topology index stores `ring_by_id`, ring centers, `edge_to_ring_ids`, ring adjacency, and the symmetric distance cache. Half/quasi and cage searches reuse this object instead of rebuilding the same incidence and geometry data.
+SQQ-Py and SQQ-CPP use the same exact frame-local cage-search contract. The shared topology stores compact ring-to-edge and edge-to-ring incidence. A search branch stores only its selected ring IDs, local edge-use counts, and open-edge frontier; it does not allocate a frame-wide bit mask per ring, edge, or state. Ring centers, normals, and adjacency are built only when another enabled analysis actually needs them.
 
-`cage.fast_closure: true` is the default. Only when generic grow reaches a configured state limit, SQQ uses an indexed half-cage overlap graph to assemble connected combinations of two to four standard half-cage patches. Every candidate must still match one generated face composition and pass the ordinary closed-polyhedron test. Existing grow detections are retained first, so exhaustive grow output and object IDs remain unchanged; fast closure only adds a cage when the bounded grow path missed it. Set `cage.fast_closure: false` in YAML for an exact comparison.
+GROW starts from each canonical seed ring, chooses a constrained open edge, and visits every topologically eligible neighboring ring in deterministic order. Candidate count is never used to prune the search. Per-seed duplicate-state detection is exact and released when that seed finishes. `cage.max_boundary_candidate` is retained only so older configuration files remain readable; it does not truncate candidates or change the cage set.
 
-Topology validation is always enabled. Every candidate must use each edge exactly twice, satisfy `V - E + F = 2`, form one edge-connected face shell, have one cyclic face link around every vertex, and have only trivalent shell vertices. These inexpensive checks reject disconnected, pinched, branched, and non-manifold false cages before type/isomer assignment in both engines.
+`cage.max_state_per_seed: 0` and `cage.max_total_state: 0` are the defaults and mean unlimited exact search. Positive values are diagnostic safety guards. Reaching either guard aborts the frame with a clear error and publishes no partial result. The former half-cage fast-closure recovery path is disabled; older configurations that request it are normalized to `false` and record an adjustment in `sqq_config_resolved.yaml`.
+
+Topology validation is always enabled. Every candidate must use each edge exactly twice, satisfy `V - E + F = 2`, form one edge-connected face shell, have one cyclic face link around every vertex, and have only trivalent shell vertices. These checks reject disconnected, pinched, branched, and non-manifold false cages before type/isomer assignment in both engines. Accepted cages receive a deterministic final order from cage type, water membership, and face topology, so SQQ-Py and SQQ-CPP assign the same frame-local IDs to the same cage set.
 
 `cage.scientific_validation: false` is the default. When set to `true` in YAML, a topologically valid cage must additionally satisfy the configured PBC-aware face-planarity RMS and edge-length coefficient-of-variation limits, nonzero projected face area, and positive minimum triangulated volume. Accepted cages then use the volume centroid instead of the mean cage-water position. Enabling it can therefore remove geometrically distorted cages and can change guest occupancy or geometry-resolved hydrate-cluster edges. Raw ring and half/quasi searches remain unchanged; ownership-filtered free-ring and free-patch outputs can increase when a rejected cage no longer consumes them.
 
@@ -409,7 +415,7 @@ Guest occupancy uses the configured center atom when available. The defaults sel
 
 `--find-cluster on` analyzes every detected cage in the selected search scope. Cages become graph nodes and are connected through complete shared ring faces. When several detected cages reference the same face, ring-plane geometry keeps at most one cage on each physical side. YAML `cage.report_type` filters user-facing cage tables and files only; it does not remove cages from cluster connectivity or phase evidence.
 
-The hierarchy follows the HTR+ idea of classifying hydrate type, domains, and boundaries on a cage-connection graph ([DOI 10.1088/1361-648X/ad52df](https://doi.org/10.1088/1361-648X/ad52df)). SQQ implements this independently with labelled shared-face fingerprints, strict local evidence, distributed spatial cores, mutually compatible expansion, and exclusive per-frame domains.
+SQQ classifies hydrate type, domains, and boundaries on a cage-connection graph using labelled shared-face fingerprints, strict local evidence, distributed spatial cores, mutually compatible expansion, and exclusive per-frame domains.
 
 YAML `hydrate_cluster.min_cage` sets the minimum connected-component size; the default is `2`. Smaller components are counted as isolated cages.
 
@@ -517,11 +523,13 @@ Former advanced CLI settings now belong only in YAML:
 | `--lammps-units`, `--lammps-timestep`, `--lammps-atom-style` | `input.lammps.unit`, `input.lammps.timestep`, `input.lammps.atom_style` |
 | `--ring-size`, `--ring-definition` | `ring.report_size`, `ring.definition` |
 | `--quasi-size`, `--quasi-base-size`, `--quasi-side-size`, `--quasi-max-layer`, `--quasi-search-policy` | both size lists; `quasi_cage.base_size`; `quasi_cage.side_size`; `quasi_cage.max_layer`; `quasi_cage.search_policy` |
-| `--cage-size`, `--max-cage-face`, `--cage-fast-closure`, `--cage-scientific-validation` | `cage.report_type`, `cage.max_face`, `cage.fast_closure`, `cage.scientific_validation` |
+| `--cage-size`, `--max-cage-face`, `--cage-scientific-validation` | `cage.report_type`, `cage.max_face`, `cage.scientific_validation` |
 | `--cluster-min-cage` | `hydrate_cluster.min_cage` |
 | `--q-neighbor-mode`, `--q-cutoff`, `--q-n-neighbor` | `order_parameter.q_neighbor_mode`, `order_parameter.q_cutoff_nm`, `order_parameter.q_n_neighbor` |
 | `--pair-id`, `--parallel-backend` | `graph.pair_id`, `parallel.backend` |
 | `--output-type`, `--output-layout`, `--cage-isomer-rows` | `output.type`, `output.structure_layout`, `output.cage_isomer_row` |
+
+The former `--cage-fast-closure` option is removed. Legacy YAML fast-closure keys remain readable but are normalized to the exact 0.4.1 search with `fast_closure: false`.
 
 The legacy compatibility names `--workers`, `--no-q`, `-q`, `--q-degree`, `--mcg3`, `--dhop30`, and `--topology` are removed. Use `-w` / `--worker`, `--order-parameter`, and `-t` / `--top` as applicable.
 
@@ -688,7 +696,7 @@ Unlike `show`, `sqq color` accepts exactly one family per command. Colors accept
 
 The renderer manages representations by VMD's stable representation names, so `show`, `color`, and frame changes remove only SQQ-created representations and preserve representations added by the user. Rapid frame notifications are coalesced into one pending redraw. Fully unknown cage, cage-ID, guest-selection, cluster-ID, and domain-ID targets are rejected against the complete loaded trajectory; recognized phase names remain valid even when the current frame has no matching membership. Re-sourcing a generated script resets its selection/color state.
 
-Cage, cluster, and domain identifiers are frame-local classifications in 0.3.12; the renderer does not claim cross-frame cage identity. Category selections (`phase`, `cluster`, or `domain`) and recognized phase labels simply report no membership when cluster analysis was not run; an explicit cage/type/cluster/domain target that never occurs anywhere in the loaded trajectory is rejected.
+Cage, cluster, and domain identifiers are deterministic frame-local classifications in 0.4.1; the renderer does not claim cross-frame cage identity. Category selections (`phase`, `cluster`, or `domain`) and recognized phase labels simply report no membership when cluster analysis was not run; an explicit cage/type/cluster/domain target that never occurs anywhere in the loaded trajectory is rejected.
 
 When cage or guest objects are shown, the generated VMD script uses the following stable cage-type colors; guest defaults follow the cage type that selected them. The visible shades follow the active VMD ColorID palette.
 

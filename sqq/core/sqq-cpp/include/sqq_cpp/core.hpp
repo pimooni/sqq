@@ -52,8 +52,8 @@ struct AnalyzeOptions {
     int max_faces = 20;
     std::vector<std::string> cage_target_types;
     std::vector<std::string> cage_report_types;
-    int max_states_per_seed = 20000;
-    int max_total_states = 5000000;
+    int max_states_per_seed = 0;
+    int max_total_states = 0;
     int max_boundary_candidates = 8;
     bool scientific_validation = false;
     double max_face_planarity_rms_nm = 0.06;

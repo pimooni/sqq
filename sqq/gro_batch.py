@@ -112,6 +112,21 @@ def analyze_multi_gro_batch(
             else unique_assignment_output_names(group.inputs)
         )
 
+    group_graph_modes = {
+        (
+            "result"
+            if grouping.group_count == 1
+            else f"result_{group.label}"
+        ): group_configs[group.group_index]["graph"]["effective_bond_mode"]
+        for group in grouping.groups
+    }
+    execution_config["graph"]["effective_bond_mode_by_group"] = group_graph_modes
+    unique_group_modes = set(group_graph_modes.values())
+    if len(unique_group_modes) == 1:
+        execution_config["graph"]["effective_bond_mode"] = next(iter(unique_group_modes))
+    else:
+        execution_config["graph"].pop("effective_bond_mode", None)
+
     tasks = [
         StandaloneFileTask(
             global_index=assignment.source_index,
@@ -244,6 +259,7 @@ def analyze_multi_gro_batch(
                 fragment_dirs=bundle_fragment_dirs,
             )
         )
+        pipeline_api.print_output_write_status()
         for group_index in bundle_groups:
             group_config = group_configs[group_index]
             finalize_sqq_cage_bundle(

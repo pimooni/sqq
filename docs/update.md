@@ -2,51 +2,74 @@
 
 This file records versioned update notes. New releases should be appended above older entries.
 
-## Version 0.3.12
+## Version 0.4.1
 
 ### Short Summary
 
-Version 0.3.12 unifies per-frame output placement for every multi-frame trajectory and multi-file analysis, including multiple trajectory paths and independent XYZ inputs. Markdown reports are collected directly under `info/`, while selected structures are written under `gro/<frame>/`; SQQ no longer creates one directory per frame merely to hold one information file. Output-root reuse now cleans known artifacts across input-name and grouped/flat-layout changes, and frame/summary publication is transactional so failures do not expose half-written results. This release also adds explicit per-water `f3-gro` and `f4-gro` outputs. Package, configuration schema, and native-core metadata are synchronized at `0.3.12`, dated Jul 31, 2026. Scientific analysis definitions are unchanged.
+Version 0.4.1 replaces the memory-amplifying cage-state representation in both SQQ-Py and SQQ-CPP with one independently implemented exact sparse GROW contract. Ring-edge incidence is stored once in compact sparse form; each active search branch owns only local edge counts and its open frontier. All eligible branches remain searchable, state limits default to unlimited, and a positive diagnostic guard fails the frame instead of publishing partial cages. This removes the E8 memory failure without relaxing topology, geometry, precision, or cage definitions. The release also includes the multi-frame output and per-water F3/F4 work developed after 0.3.11. Package, configuration schema, native core, and CMake metadata are synchronized at `0.4.1`, dated Aug 1, 2026.
 
 ### Main Changes
 
-1. Unified multi-frame and multi-file layout
-   - Routes one or more XTC/TRR/LAMMPS/DCD paths, stacked GRO, and multiple independent GRO/XYZ inputs to `info/<frame>_info.md`.
-   - Routes selected per-frame structures to `gro/<frame>/` consistently in serial, thread, and process execution.
-   - Keeps a single ordinary one-frame GRO or XYZ in its compact frame-root layout.
-   - Avoids empty or information-only frame directories.
+1. Exact sparse cage search
+   - Replaces frame-wide Python integer masks and C++ dynamic bit vectors for every ring, edge, and state with compact ring-to-edge and edge-to-ring incidence.
+   - Stores only the selected ring IDs, local edge-use counts, and open edges for an active branch; push/undo updates reuse branch storage.
+   - Chooses a constrained open edge deterministically and traverses every eligible neighboring ring. Candidate count is never used as a scientific pruning rule.
+   - Releases exact duplicate-state history after each seed finishes instead of retaining it for the full frame.
+   - Builds ring centers, normals, and adjacency only for enabled analyses that need geometry or ring-to-ring relationships.
 
-2. Reuse cleanup and transactional output
-   - Reads the preceding resolved run metadata and removes known per-frame artifacts across old/new source basenames rather than cleaning only the current stem.
-   - Cleans grouped and flat structure layouts, stale `result_A`-`result_Z` topology roots, and F3/F4 GRO files while preserving unknown user files.
-   - Stages every frame's selected Markdown, TSV, and GRO files and publishes them only as one complete frame bundle.
-   - Stages selected XLSX/main CSV/detail CSV output as one recoverable summary set; a failed write removes temporary data and does not expose a mixed generation.
+2. Exactness and failure contract
+   - Changes `cage.max_state_per_seed` and `cage.max_total_state` defaults to `0`, meaning unlimited.
+   - Treats positive values as diagnostic safety guards. Exceeding either value raises a frame error and publishes no partial cage set.
+   - Retains `cage.max_boundary_candidate` only for configuration compatibility; it no longer truncates a candidate list.
+   - Disables the legacy fast-closure recovery path. Older YAML that requests it is normalized to `false` and records an adjustment.
+   - Keeps all closed-polyhedron, manifold, Euler, trivalent-vertex, optional scientific-geometry, occupancy, and isomer checks unchanged.
 
-3. Per-water F3/F4 GRO output
-   - Adds explicit `f3-gro` and `f4-gro` output types for SQQ-Py and SQQ-CPP; neither is enabled by default.
-   - Writes only waters with a defined per-water value while retaining each complete water molecule in source atom order.
-   - Annotates only the oxygen record with an eight-decimal F3 or F4 value after the fixed-width velocity field.
-   - Places grouped files under `gro/<frame>/order/` for separated multi-frame jobs and applies the existing empty-file policy.
+3. Python/C++ parity and deterministic IDs
+   - Uses the same sparse state semantics, deterministic branch order, exact visited-state key, and hard-limit behavior in both engines.
+   - Applies a final canonical order based on cage type, water membership, and face topology so equal Py/CPP cage sets receive equal frame-local cage IDs.
+   - Keeps IDs frame-local; persistent cross-frame cage tracking remains assigned to SQQ 0.5.1 and is not included here.
 
-4. Release and documentation
-   - Synchronizes Python package, configuration schema, native-core, CMake, and wheel validation at `0.3.12`.
-   - Updates README output trees and design documentation to describe one consistent multi-frame layout.
-   - Normalizes README acknowledgement entries to plain text without institution-specific emphasis.
+4. Output reliability work consolidated into 0.4.1
+   - Routes reports for XTC/TRR/LAMMPS/DCD, stacked GRO, multiple trajectory paths, and multiple GRO/XYZ inputs directly to `info/<frame>_info.md`.
+   - Routes selected per-frame structures to `gro/<frame>/`, while a single ordinary one-frame GRO/XYZ retains the compact frame-root layout.
+   - Cleans known stale SQQ artifacts when reusing an output root while preserving unknown user files.
+   - Stages and transactionally publishes per-frame and summary outputs so failures do not expose a mixed or partial new result set.
+   - Adds opt-in `f3-gro` and `f4-gro` outputs containing complete water molecules; each oxygen carries its defined per-water value.
+   - Resolves automatic graph mode before the terminal header and initial runtime metadata are written. Public output now uses only `auto -> hbond` or `auto -> oo`; heterogeneous GRO groups report one exact value per result group.
+   - Prints one final-output status line after the 100% analysis panel and before render, Excel/CSV, and resolved-config publication, so long summary writes no longer appear stalled.
 
-5. Regression coverage
-   - Covers multiple XYZ inputs and multiple trajectory paths in serial and parallel execution.
-   - Covers output-root reuse after source basename, selected-frame, grouped/flat-layout, and single/multi-system job-shape changes.
-   - Covers F3/F4 stale-file cleanup, preservation of unknown user files, and failure injection during per-frame and summary publication.
-   - Retains single-frame GRO/XYZ compact-layout regression coverage.
+5. Scale, parity, and regression validation
+   - E1-E4 full scientific cage identities match the archived 0.3.11 Python baseline and the new Python/C++ engines. E3 canonical frame-local IDs also match between the two new engines.
+   - E5-E6 full scientific cage identities match between the new Python and C++ engines. E7-E8 use the exact C++ path; Python was intentionally not run at those sizes because it would add long validation time without changing the shared contract.
+   - E6: 126,224 waters and 21,952 cages; Py/CPP full cage hashes match. Measured analysis time was about 220.6 s for Py and 20.4 s for CPP, with peak process memory about 1.57 GiB and 0.88 GiB respectively.
+   - E7 CPP: 298,792 waters and 52,728 cages completed in about 54.9 s with about 1.98 GiB peak process memory.
+   - E8 CPP: 1,088,000 waters, 1,280,000 rings, and 192,000 cages completed in about 196.4 s core analysis time. The strict full-identity validation harness completed in about 223.7 s with about 5.26 GiB peak process memory, replacing the former 120-348 GB growth and termination.
+   - Positive guard tests fail for both engines without leaving a successful JSON result. The maintained external regression suite passes 51 tests.
+
+   | Fixture | Structure | Waters | Rings | Cages | SQQ-Py analysis | SQQ-CPP analysis | Measured peak RSS | Identity check |
+   | --- | --- | ---: | ---: | ---: | ---: | ---: | --- | --- |
+   | E1 | sH | 544 | 640 | 96 | 2.08 s | 0.26 s | not sampled | 0.3.11 = Py = CPP |
+   | E2 | sI | 2,944 | 3,456 | 512 | 5.08 s | 0.61 s | not sampled | 0.3.11 = Py = CPP |
+   | E3 | sII | 8,704 | 10,240 | 1,536 | 9.36 s | 1.57 s | not sampled | 0.3.11 = Py = CPP |
+   | E4 | sII | 29,376 | 34,560 | 5,184 | 34.72 s | 5.09 s | not sampled | 0.3.11 = Py = CPP |
+   | E5 | sH | 68,000 | 80,000 | 12,000 | 244.32 s | 30.21 s | Py 0.63 GiB; CPP 0.51 GiB | Py = CPP |
+   | E6 | sI | 126,224 | 148,176 | 21,952 | 220.64 s | 20.40 s | Py 1.57 GiB; CPP 0.88 GiB | Py = CPP |
+   | E7 | sII | 298,792 | 351,520 | 52,728 | not run | 54.87 s | CPP 1.98 GiB | expected exact counts |
+   | E8 | sII | 1,088,000 | 1,280,000 | 192,000 | not run | 196.43 s | CPP 5.26 GiB | expected exact counts |
+
+6. Release and provenance
+   - Synchronizes `pyproject.toml`, Python package metadata, YAML schema, CMake project, and native-core version at `0.4.1` with release date Aug 1, 2026.
+   - Documents the sparse search as an independent SQQ implementation of standard graph-incidence and backtracking techniques. No TRACE or other `ref_code` source is copied into SQQ.
 
 ### Compatibility and Result Impact
 
-- Graph, ring, half/quasi, cage, occupancy, phase/domain/boundary, F3/F4, other order-parameter, and ice algorithms are unchanged.
-- User-visible changes are limited to output selection, placement, cleanup, and failure-safe publication. Scripts that consume trajectory-frame reports must read them from `info/` instead of one directory per frame.
-- Cleanup and transactional-write changes affect generated-file lifecycle only; they do not alter analyzed values or table schemas.
-- A single ordinary one-frame GRO or XYZ retains its previous compact layout.
+- The cage topology and accepted scientific object set are unchanged for validated overlapping fixtures. Sparse storage changes representation and traversal cost, not coordinates, numerical precision, graph edges, ring definitions, or cage acceptance rules.
+- Canonical final ordering can change an arbitrary 0.3.11 frame-local cage number while preserving the cage type, water set, face set, isomer, guests, and every aggregate value. SQQ-Py and SQQ-CPP now agree on those frame-local IDs.
+- A user-configured positive state limit no longer returns a warning plus partial cages; it is now an explicit hard failure. Use `0` for the default unlimited exact search.
+- Legacy `fast_closure: true` remains readable but is disabled with a recorded adjustment. It no longer supplements or changes GROW output.
+- The consolidated output-layout changes affect generated-file placement and lifecycle only. Scripts consuming multi-frame Markdown reports should read `info/<frame>_info.md`.
 
-Status: these 0.3.12 changes are local and uncommitted. No commit, tag, push, wheel publication, or PyPI publication has been performed.
+Status: these 0.4.1 changes are local and uncommitted. No commit, tag, push, wheel publication, or PyPI publication has been performed.
 
 ## Version 0.3.11
 
@@ -925,7 +948,7 @@ Version 0.2.6 tightens runtime metadata, worker control, and summary-write scala
 
 3. Requested/effective graph-mode display
    - Explicit modes display as `hbond`, `oo`, or `pairs`.
-   - Auto mode displays as `auto -> hbond`, `auto -> oo`, or `auto -> mixed (hbond, oo)` when frames resolve differently.
+   - Auto mode records its effective connectivity; current releases report heterogeneous topology groups separately rather than combining modes in one display value.
    - Per-frame `*_info.md` adds `graph_mode` while retaining the effective `bond_mode` row.
    - Per-frame `connection_mode` columns are unchanged for plotting compatibility.
 

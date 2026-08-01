@@ -56,8 +56,10 @@ def build_ring_topology_index(
     *,
     compute_face_quality: bool = False,
     compute_face_normals: bool = False,
+    compute_ring_centers: bool = True,
+    compute_adjacency: bool = True,
 ) -> RingTopologyIndex:
-    """Build one deterministic ring index for a frame."""
+    """Build one deterministic ring index with optional geometry caches."""
     all_rings = (
         [ring for group in rings.values() for ring in group]
         if isinstance(rings, dict)
@@ -69,53 +71,64 @@ def build_ring_topology_index(
     ring_normals: dict[str, np.ndarray] = {}
     quality: dict[str, RingFaceQuality] = {}
     raw_edge_to_ids: dict[Edge, list[str]] = defaultdict(list)
+    needs_geometry = compute_ring_centers or compute_face_normals or compute_face_quality
 
     for ring in all_rings:
-        coords = ring_unwrapped_coordinates(frame, ring)
-        center = np.mean(coords, axis=0)
-        ring_centers[ring.object_id] = center
+        coords: np.ndarray | None = None
+        center: np.ndarray | None = None
         normal: np.ndarray | None = None
-        if (compute_face_normals or compute_face_quality) and len(coords) >= 3:
-            try:
-                _, _, axes = np.linalg.svd(coords - center, full_matrices=False)
-                candidate = np.asarray(axes[-1], dtype=float)
-                norm = float(np.linalg.norm(candidate))
-                if norm > 1.0e-12:
-                    normal = candidate / norm
-            except np.linalg.LinAlgError:
-                if compute_face_quality:
-                    raise
-        if compute_face_normals and normal is not None:
-            ring_normals[ring.object_id] = normal
+        if needs_geometry:
+            coords = ring_unwrapped_coordinates(frame, ring)
+            center = np.mean(coords, axis=0)
+            if compute_ring_centers or compute_face_normals:
+                ring_centers[ring.object_id] = center
+            if (compute_face_normals or compute_face_quality) and len(coords) >= 3:
+                try:
+                    _, _, axes = np.linalg.svd(coords - center, full_matrices=False)
+                    candidate = np.asarray(axes[-1], dtype=float)
+                    norm = float(np.linalg.norm(candidate))
+                    if norm > 1.0e-12:
+                        normal = candidate / norm
+                except np.linalg.LinAlgError:
+                    if compute_face_quality:
+                        raise
+            if compute_face_normals and normal is not None:
+                ring_normals[ring.object_id] = normal
+            if compute_face_quality:
+                quality[ring.object_id] = measure_ring_face_quality(
+                    coords,
+                    center=center,
+                    normal=normal,
+                )
         for edge in ring.edges:
             raw_edge_to_ids[edge].append(ring.object_id)
-        if compute_face_quality:
-            quality[ring.object_id] = measure_ring_face_quality(
-                coords,
-                center=center,
-                normal=normal,
-            )
 
     edge_to_ring_ids = {
         edge: tuple(sorted(ring_ids))
         for edge, ring_ids in raw_edge_to_ids.items()
     }
-    adjacency: dict[str, set[str]] = {ring_id: set() for ring_id in ring_by_id}
-    for ring_ids in edge_to_ring_ids.values():
-        for left_pos, left in enumerate(ring_ids):
-            for right in ring_ids[left_pos + 1 :]:
-                adjacency[left].add(right)
-                adjacency[right].add(left)
+    if compute_adjacency:
+        adjacency: dict[str, set[str]] = {ring_id: set() for ring_id in ring_by_id}
+        for ring_ids in edge_to_ring_ids.values():
+            for left_pos, left in enumerate(ring_ids):
+                for right in ring_ids[left_pos + 1 :]:
+                    adjacency[left].add(right)
+                    adjacency[right].add(left)
+        frozen_adjacency = {
+            key: frozenset(sorted(value))
+            for key, value in adjacency.items()
+        }
+    else:
+        frozen_adjacency = {}
 
     return RingTopologyIndex(
         ring_by_id=ring_by_id,
         ring_centers=ring_centers,
         edge_to_ring_ids=edge_to_ring_ids,
-        ring_adjacency={key: frozenset(sorted(value)) for key, value in adjacency.items()},
+        ring_adjacency=frozen_adjacency,
         ring_normals=ring_normals,
         face_quality=quality,
     )
-
 
 def ring_unwrapped_coordinates(frame: Frame, ring: Ring) -> np.ndarray:
     """Return ordered ring coordinates after local PBC unwrapping."""
