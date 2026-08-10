@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-"""Shared data models for one SQQ analysis run."""
+"""Compatibility implementation for shared SQQ data models."""
 
 from dataclasses import dataclass, field
 from functools import cached_property

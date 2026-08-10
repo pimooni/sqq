@@ -18,6 +18,7 @@ from pathlib import Path
 from queue import Empty
 from threading import Event, Lock, Thread
 from time import perf_counter
+from types import SimpleNamespace
 from typing import Any, Callable, Iterator
 
 from . import __version__
@@ -38,29 +39,27 @@ from .config import (
     q_degrees_from_order_parameters,
     validate_cpp_cli,
 )
-from .core.cpp_backend import analyze_frame_cpp
+from .core.sqq_cpp import analyze_frame_cpp
+from .core.sqq_py import (
+    analyze_frame as analyze_frame_py,
+    filter_free_patches,
+    is_subset_of_indexed_owner,
+    select_reported_cages,
+    subset_owner_index,
+)
 from .core.cage import (
     CAGE_REPORT_GROUPS,
     TARGET_FACE_COUNTS,
     canonical_cage_type,
-    find_cages,
     parse_cage_face_label,
 )
 from .core.f3f4 import (
-    compute_order_parameters,
     normalize_q_degree,
     normalize_q_neighbor_mode,
     resolve_q_neighbor_count,
 )
-from .core.dhop import compute_dhop_order
-from .core.mcg import compute_mcg_order
-from .core.graph import build_water_graph, resolve_bond_mode
+from .core.graph import resolve_bond_mode
 from .display import graph_mode_display, ordered_unique_graph_modes
-from .core.hydrate_cluster import analyze_hydrate_clusters
-from .core.ice import classify_ice_waters
-from .core.quasi_cage import find_cage_patches
-from .core.ring import find_rings
-from .core.ring_topology import build_ring_topology_index
 from .core.selection import select_guests, select_waters
 from .io.gro_writer import (
     write_cage_gro_files,
@@ -101,7 +100,7 @@ from .io.vmd import (
     sqq_output_lock,
     write_sqq_cage_fragment,
 )
-from .models import Cage, CagePatch, Frame, FrameResult, HydrateOrderResult
+from .models import Frame, FrameResult
 from .parallel import (
     physical_cpu_count,
     initialize_file_worker,
@@ -111,6 +110,7 @@ from .parallel import (
     process_trajectory_batch_task,
     process_worker_cap,
 )
+from .ui import completed_run_statistics, print_final_results, refresh_terminal
 
 
 PARALLEL_SUFFIXES = {".gro", ".xyz"}
@@ -170,11 +170,7 @@ class RunDiagnostics:
 
     def emit(self) -> None:
         """Write a non-empty diagnostics block once."""
-        with self._lock:
-            if self._emitted:
-                return
-            self._emitted = True
-            messages = list(self._messages)
+        messages = self.consume()
         if not messages:
             return
         write_terminal_block(
@@ -186,6 +182,14 @@ class RunDiagnostics:
             ],
             stream=self._stream,
         )
+
+    def consume(self) -> tuple[str, ...]:
+        """Return collected messages once and suppress later duplicate output."""
+        with self._lock:
+            if self._emitted:
+                return ()
+            self._emitted = True
+            return tuple(self._messages)
 
 
 @contextmanager
@@ -300,6 +304,17 @@ def _analyze_locked_impl(args: Namespace, diagnostics: RunDiagnostics) -> None:
             run_started_at,
             started_at,
             diagnostics=diagnostics,
+            services=SimpleNamespace(
+                build_run_info=build_run_info,
+                normalize_parallel_backend=normalize_parallel_backend,
+                ParallelRunProgressDisplay=ParallelRunProgressDisplay,
+                print_output_write_status=print_output_write_status,
+                print_run_header=print_run_header,
+                process_in_flight_limit=process_in_flight_limit,
+                resolve_workers=resolve_workers,
+                RunProgressDisplay=RunProgressDisplay,
+                process_frame=process_frame,
+            ),
         )
         return
 
@@ -423,9 +438,14 @@ def _analyze_locked_impl(args: Namespace, diagnostics: RunDiagnostics) -> None:
                 separated_output=separated_frame_output,
                 fragment_dir=fragment_dir,
             )
+        analysis_completed_at = perf_counter()
         print_output_write_status()
         if bundle_enabled:
-            finalize_sqq_cage_bundle(outdir, fragment_dir=fragment_dir)
+            finalize_sqq_cage_bundle(
+                outdir,
+                fragment_dir=fragment_dir,
+                tracking_config=config.get("track", {}),
+            )
     except Exception as exc:
         if fragment_dir is not None:
             cleanup_sqq_cage_fragment_workspace(fragment_dir)
@@ -482,9 +502,32 @@ def _analyze_locked_impl(args: Namespace, diagnostics: RunDiagnostics) -> None:
         run_info["error"] = str(exc)
         write_run_config(outdir, config, run_info)
         raise
-    diagnostics.emit()
-    print_run_summary(run_info)
-    print(f"Wrote SQQ results: {outdir}")
+    final_finished_at = datetime.now().astimezone()
+    total_seconds = perf_counter() - started_at
+    analysis_seconds = max(0.0, analysis_completed_at - started_at)
+    write_seconds = max(0.0, total_seconds - analysis_seconds)
+    run_info["elapsed_seconds"] = round(total_seconds, 3)
+    run_info["analysis_seconds"] = round(analysis_seconds, 3)
+    run_info["write_seconds"] = round(write_seconds, 3)
+    run_info["finish_time"] = final_finished_at.strftime("%H:%M:%S")
+    run_info["finished_at"] = final_finished_at.isoformat(timespec="seconds")
+    write_run_config(outdir, config, run_info)
+    statistics = completed_run_statistics(
+        run_info,
+        config,
+        result_path=outdir,
+        requested_frames=work_items,
+        analysis_seconds=analysis_seconds,
+        write_seconds=write_seconds,
+        total_seconds=total_seconds,
+        track=(
+            int(run_info.get("frames_ok", 0) or 0) > 1
+            and any(outdir.glob("**/track/track_state.json"))
+        ),
+    )
+    statistics["diagnostic_messages"] = diagnostics.consume()
+    refresh_terminal()
+    print_final_results(run_info, config, statistics)
 
 
 def sampling_metadata(selection: TrajectorySelection) -> dict[str, Any]:
@@ -2137,6 +2180,8 @@ def process_frame(
                     fragment_dir or outdir / FRAGMENT_DIRECTORY,
                     frame_index,
                     requested_graph_mode=config["graph"]["bond_mode"],
+                    atom_scope=config.get("render", {}).get("atom_scope", "full"),
+                    component_config=config,
                 )
             commit_staged_frame_outputs(
                 frame.name,
@@ -2994,6 +3039,38 @@ def normalize_analysis_scopes(config: dict[str, Any]) -> None:
         raise ValueError("pbc.box_mode must be orthorhombic.")
     pbc["box_mode"] = box_mode
 
+    component = config.setdefault("component", {})
+    component["auto_classify"] = parse_on_off(
+        component.get("auto_classify", True),
+        "component.auto_classify",
+    )
+    unknown_role = str(component.get("unknown_role", "other")).strip().lower()
+    if unknown_role not in {"water", "guest", "additive", "environment", "other"}:
+        raise ValueError(
+            "component.unknown_role must be water, guest, additive, "
+            "environment, or other."
+        )
+    component["unknown_role"] = unknown_role
+    unknown_action = str(component.get("unknown_action", "warn")).strip().lower()
+    if unknown_action not in {"warn", "ignore", "error"}:
+        raise ValueError("component.unknown_action must be warn, ignore, or error.")
+    component["unknown_action"] = unknown_action
+    if not isinstance(component.get("role_map", {}), dict):
+        raise ValueError("component.role_map must be a mapping.")
+
+    additive = config.setdefault("additive", {})
+    additive["resnames"] = string_list(
+        additive.get("resnames", []),
+        "additive.resnames",
+        allow_empty=True,
+    )
+    environment = config.setdefault("environment", {})
+    environment["resnames"] = string_list(
+        environment.get("resnames", []),
+        "environment.resnames",
+        allow_empty=True,
+    )
+
     water = config.setdefault("water", {})
     water["resnames"] = string_list(water.get("resnames", []), "water.resnames")
     water["oxygen_names"] = string_list(water.get("oxygen_names", []), "water.oxygen_names", allow_empty=True)
@@ -3173,6 +3250,11 @@ def normalize_analysis_scopes(config: dict[str, Any]) -> None:
     if structure_layout not in {"grouped", "flat"}:
         raise ValueError("output.structure_layout must be grouped or flat.")
     output["structure_layout"] = structure_layout
+    render = config.setdefault("render", {})
+    atom_scope = str(render.get("atom_scope", "full")).strip().lower()
+    if atom_scope not in {"full", "compact"}:
+        raise ValueError("render.atom_scope must be full or compact.")
+    render["atom_scope"] = atom_scope
     guest_center_mode = str(config.get("guest", {}).get("center_mode", "center_atom")).strip().lower()
     if guest_center_mode not in {"center_atom", "centroid", "auto"}:
         raise ValueError("guest.center_mode must be center_atom, centroid, or auto.")
@@ -3385,13 +3467,6 @@ def resolve_cage_report_types(
     return tuple(resolved)
 
 
-def select_reported_cages(cages: list[Cage], report_types: tuple[str, ...] | None) -> list[Cage]:
-    """Filter detected cages for reports without changing topology filtering."""
-    if report_types is None:
-        return list(cages)
-    allowed = set(report_types)
-    return [cage for cage in cages if cage.cage_type in allowed]
-
 def analyze_frame(
     frame: Frame,
     config: dict[str, Any],
@@ -3399,20 +3474,32 @@ def analyze_frame(
     *,
     normalize_config: bool = True,
 ) -> FrameResult:
-    """Analyze one frame and return all topology objects for export."""
+    """Normalize and dispatch one frame to the selected engine backend."""
     report_stage(stage_callback, "resolving settings")
     if normalize_config:
         normalize_analysis_scopes(config)
     ring_sizes = resolve_size_list(config["ring"]["sizes"], fallback=[], key="ring.sizes")
-    ring_report_sizes = resolve_size_list(config["ring"].get("report_sizes", "auto"), fallback=ring_sizes, key="ring.report_sizes")
-    quasi_base_sizes = resolve_size_list(config["quasi_cage"].get("base_sizes", "auto"), fallback=ring_sizes, key="quasi_cage.base_sizes")
-    quasi_side_sizes = resolve_size_list(config["quasi_cage"].get("side_sizes", "auto"), fallback=ring_sizes, key="quasi_cage.side_sizes")
-    cage_ring_sizes = [size for size in ring_sizes if size in {4, 5, 6}]
+    ring_report_sizes = resolve_size_list(
+        config["ring"].get("report_sizes", "auto"),
+        fallback=ring_sizes,
+        key="ring.report_sizes",
+    )
+    quasi_base_sizes = resolve_size_list(
+        config["quasi_cage"].get("base_sizes", "auto"),
+        fallback=ring_sizes,
+        key="quasi_cage.base_sizes",
+    )
+    quasi_side_sizes = resolve_size_list(
+        config["quasi_cage"].get("side_sizes", "auto"),
+        fallback=ring_sizes,
+        key="quasi_cage.side_sizes",
+    )
     cage_report_types = resolve_cage_report_types(
         config["cage"].get("report_types", []),
         ring_sizes,
         int(config["cage"].get("max_faces", 20)),
     )
+
     report_stage(stage_callback, "selecting molecules")
     waters = select_waters(
         frame.atoms,
@@ -3426,6 +3513,7 @@ def analyze_frame(
         center_atoms=config["guest"].get("center_atoms", {}),
         center_mode=str(config["guest"].get("center_mode", "center_atom")),
     )
+
     if is_cpp_mode(config.get("mode")):
         report_stage(stage_callback, "building water graph")
         report_stage(stage_callback, "searching rings")
@@ -3440,238 +3528,20 @@ def analyze_frame(
         )
         report_stage(stage_callback, "computing order parameters")
         return result
-    # All structure classifiers use this graph.
-    report_stage(stage_callback, "building water graph")
-    graph = build_water_graph(
-        frame.atoms,
+
+    return analyze_frame_py(
+        frame,
         waters,
-        frame.box,
-        bond_mode=config["graph"].get(
-            "effective_bond_mode", config["graph"]["bond_mode"]
-        ),
-        oo_cutoff_nm=float(config["graph"]["oo_cutoff_nm"]),
-        hbond_distance_nm=float(config["graph"]["hbond_distance_nm"]),
-        hbond_angle_deg=float(config["graph"]["hbond_angle_deg"]),
-        pair_file=config["graph"].get("pair_file"),
-        pair_id=str(config["graph"].get("pair_id", "resid")),
-    )
-    report_stage(stage_callback, "searching rings")
-    rings = find_rings(
-        graph.adjacency,
-        sizes=ring_sizes,
-        chordless=bool(config["ring"]["chordless"]),
-        definition=str(config["ring"].get("definition", "chordless")),
-    )
-    scientific_validation = bool(config["cage"].get("scientific_validation", False))
-    hydrate_cluster_enabled = bool(config.get("hydrate_cluster", {}).get("enabled", False))
-    find_half = bool(config.get("half_cage", {}).get("enabled", False))
-    find_quasi = bool(config["quasi_cage"].get("enabled", False))
-    ring_topology = build_ring_topology_index(
-        frame,
-        rings,
-        compute_face_quality=scientific_validation,
-        compute_face_normals=hydrate_cluster_enabled,
-        compute_ring_centers=find_half or find_quasi or hydrate_cluster_enabled,
-        compute_adjacency=False,
-    )
-    warnings: list[str] = []
-    if find_half or find_quasi:
-        report_stage(stage_callback, "searching half/quasi cage")
-    half_cages, quasi_cages = find_cage_patches(
-        frame,
-        rings,
-        find_half=find_half,
-        find_quasi=find_quasi,
-        base_sizes=quasi_base_sizes,
-        side_sizes=quasi_side_sizes,
-        max_combinations_per_base=int(config["quasi_cage"].get("max_combinations_per_base", 50000)),
-        max_layers=int(config["quasi_cage"].get("max_layers", 1)),
-        max_rings_per_layer=int(config["quasi_cage"].get("max_rings_per_layer", config["quasi_cage"].get("max_outer_layer_rings", 6))),
-        max_layer_states_per_seed=int(config["quasi_cage"].get("max_layer_states_per_seed", 200)),
-        max_candidates_per_edge=int(config["quasi_cage"].get("max_candidates_per_edge", 4)),
-        max_layer_candidates=int(config["quasi_cage"].get("max_layer_candidates", 24)),
-        topology_index=ring_topology,
-        search_policy=str(config["quasi_cage"].get("search_policy", "bounded")),
-        warnings=warnings,
-    )
-    cage_seed_patches = [*half_cages, *quasi_cages]
-    report_stage(stage_callback, "searching cage")
-    all_cages = find_cages(
-        frame,
-        rings,
-        cage_seed_patches,
         guests,
-        enabled=bool(config["cage"].get("enabled", False)),
-        ring_sizes=cage_ring_sizes,
-        max_faces=int(config["cage"].get("max_faces", 20)),
-        search_mode=str(config["cage"].get("search_mode", "grow")),
-        seed_mode=str(config["cage"].get("seed_mode", "ring")),
-        max_states_per_seed=int(config["cage"].get("max_states_per_seed", 0)),
-        max_total_states=int(config["cage"].get("max_total_states", 0)),
-        max_boundary_candidates=int(config["cage"].get("max_boundary_candidates", 8)),
-        occupancy_radius_nm=float(config["cage"].get("occupancy_radius_nm", 0.5)),
-        occupancy_mode=str(config["cage"].get("occupancy_mode", "polyhedron")),
-        fast_closure=bool(config["cage"].get("fast_closure", False)),
-        fast_closure_max_states=int(config["cage"].get("fast_closure_max_states", 20000)),
-        scientific_validation=scientific_validation,
-        max_face_planarity_rms_nm=float(config["cage"].get("max_face_planarity_rms_nm", 0.06)),
-        max_face_edge_cv=float(config["cage"].get("max_face_edge_cv", 0.35)),
-        min_cage_volume_nm3=float(config["cage"].get("min_cage_volume_nm3", 1.0e-6)),
-        topology_index=ring_topology,
-        warnings=warnings,
-    )
-    cages = select_reported_cages(all_cages, cage_report_types)
-    hydrate_cluster_detail = output_enabled(config, "cluster-detail")
-    if hydrate_cluster_enabled:
-        report_stage(stage_callback, "classifying hydrate cluster")
-        rings_by_id = ring_topology.ring_by_id
-        ring_sizes_by_id = {ring_id: ring.size for ring_id, ring in rings_by_id.items()}
-        hydrate_clusters, hydrate_motifs, hydrate_domains, isolated_cage_ids = analyze_hydrate_clusters(
-            all_cages,
-            min_cage=int(config.get("hydrate_cluster", {}).get("min_cage", 2)),
-            ring_sizes=ring_sizes_by_id,
-            frame=frame,
-            rings_by_id=rings_by_id,
-            face_geometries=ring_topology.face_geometries(),
-        )
-    else:
-        hydrate_clusters, hydrate_motifs, hydrate_domains, isolated_cage_ids = [], [], [], ()
-    report_stage(stage_callback, "filtering free patches")
-    quasi_cages = filter_free_patches(quasi_cages, all_cages)
-    half_cages = filter_free_patches(half_cages, all_cages, higher_priority_patches=quasi_cages)
-    focus_resids = {int(item) for item in config["order"].get("focus_waters", [])}
-    report_stage(stage_callback, "computing order parameters")
-    order_parameters = normalize_order_parameters(
-        config.get("order", {}).get("parameters", ["f3", "f4"])
-    )
-    selected_order_parameters = set(order_parameters)
-    q_degrees = q_degrees_from_order_parameters(order_parameters)
-    if selected_order_parameters & {"f3", "f4"} or q_degrees:
-        f3f4 = compute_order_parameters(
-            frame,
-            waters,
-            graph,
-            f3_enabled="f3" in selected_order_parameters,
-            f4_enabled="f4" in selected_order_parameters,
-            q_enabled=bool(q_degrees),
-            q_neighbor_mode=str(config["order"].get("q_neighbor_mode", "graph")),
-            q_cutoff_nm=float(config["order"].get("q_cutoff_nm", 0.35)),
-            q_n_neighbor=config["order"].get("q_n_neighbor", None),
-            q_degree=q_degrees,
-            focus_resids=focus_resids,
-        )
-    else:
-        f3f4 = None
-
-    hydrate_parameters = selected_order_parameters & {
-        "mcg1",
-        "mcg3",
-        "dhop35",
-        "dhop30",
-    }
-    if hydrate_parameters:
-        hydrate_order_config = {
-            **config.get("hydrate_order", {}),
-            "mcg1_enabled": "mcg1" in hydrate_parameters,
-            "mcg3_enabled": "mcg3" in hydrate_parameters,
-            "dhop35_enabled": "dhop35" in hydrate_parameters,
-            "dhop30_enabled": "dhop30" in hydrate_parameters,
-        }
-        mcg1, mcg3 = compute_mcg_order(frame, waters, guests, hydrate_order_config)
-        dhop35, dhop30 = compute_dhop_order(frame, waters, hydrate_order_config)
-        hydrate_order = HydrateOrderResult(
-            mcg1=mcg1,
-            dhop35=dhop35,
-            mcg3=mcg3,
-            dhop30=dhop30,
-        )
-    else:
-        hydrate_order = None
-    report_stage(stage_callback, "classifying ice")
-    ice_classes = classify_ice_waters(
-        graph,
-        waters,
-        rings,
-        enabled=bool(config["ice"].get("enabled", False)),
-        min_six_rings=int(config["ice"].get("min_six_rings", 2)),
-        require_four_coord_neighbors=bool(config["ice"].get("require_four_coord_neighbors", True)),
-    )
-    if (find_half or find_quasi) and not half_cages and not quasi_cages:
-        warnings.append("No enabled half_cage or quasi_cage was found with the current patch criteria.")
-    return FrameResult(
-        frame=frame,
-        waters=waters,
-        guests=guests,
-        graph=graph,
-        rings=rings,
-        ring_report_sizes=tuple(ring_report_sizes),
-        half_cages=half_cages,
-        quasi_cages=quasi_cages,
-        cages=cages,
-        all_cages=all_cages,
+        config,
         cage_report_types=cage_report_types,
-        hydrate_cluster_enabled=hydrate_cluster_enabled,
-        hydrate_cluster_detail=hydrate_cluster_detail,
-        hydrate_clusters=hydrate_clusters,
-        hydrate_motifs=hydrate_motifs,
-        hydrate_domains=hydrate_domains,
-        isolated_cage_ids=isolated_cage_ids,
-        f3f4=f3f4,
-        hydrate_order=hydrate_order,
-        ice_like_waters=ice_classes.ice_like,
-        ice_i_waters=ice_classes.ice_i,
-        interfacial_ice_waters=ice_classes.interfacial,
-        warnings=warnings,
+        ring_report_sizes=tuple(ring_report_sizes),
+        ring_sizes=ring_sizes,
+        quasi_base_sizes=quasi_base_sizes,
+        quasi_side_sizes=quasi_side_sizes,
+        stage_callback=stage_callback,
     )
 
-
-def filter_free_patches(
-    patches: list[CagePatch],
-    cages: list[Cage],
-    higher_priority_patches: list[CagePatch] | None = None,
-) -> list[CagePatch]:
-    """Remove consumed patches using ring-to-owner inverted indexes."""
-    cage_ring_sets = [frozenset(cage.rings) for cage in cages]
-    higher_priority_ring_sets = [frozenset(patch.rings) for patch in higher_priority_patches or []]
-    cage_index = subset_owner_index(cage_ring_sets)
-    higher_index = subset_owner_index(higher_priority_ring_sets)
-    free_patches = []
-    for patch in patches:
-        patch_rings = frozenset(patch.rings)
-        if is_subset_of_indexed_owner(patch_rings, cage_ring_sets, cage_index, strict=False):
-            continue
-        if is_subset_of_indexed_owner(patch_rings, higher_priority_ring_sets, higher_index, strict=True):
-            continue
-        free_patches.append(patch)
-    return free_patches
-
-
-def subset_owner_index(ring_sets: list[frozenset[str]]) -> dict[str, set[int]]:
-    """Index candidate supersets by every ring they contain."""
-    owners: dict[str, set[int]] = {}
-    for index, ring_ids in enumerate(ring_sets):
-        for ring_id in ring_ids:
-            owners.setdefault(ring_id, set()).add(index)
-    return owners
-
-
-def is_subset_of_indexed_owner(
-    ring_ids: frozenset[str],
-    owners: list[frozenset[str]],
-    index: dict[str, set[int]],
-    *,
-    strict: bool,
-) -> bool:
-    """Test subset ownership after narrowing candidates by the rarest ring."""
-    if not ring_ids:
-        return any((not strict) or bool(owner) for owner in owners)
-    if any(ring_id not in index for ring_id in ring_ids):
-        return False
-    anchor = min(ring_ids, key=lambda ring_id: len(index[ring_id]))
-    return any(
-        ring_ids < owners[owner_index] if strict else ring_ids <= owners[owner_index]
-        for owner_index in index[anchor]
-    )
 
 def resolve_size_list(value: Any, fallback: list[int], key: str) -> list[int]:
     """Resolve ring-size settings, allowing patch sizes to follow ring sizes."""

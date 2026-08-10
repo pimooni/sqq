@@ -28,6 +28,7 @@ from .io.trajectory import (
     trajectory_atom_metadata,
     read_frames,
 )
+from .runtime.frame import process_frame
 
 
 StageEvent = tuple[str, int, str, float]
@@ -114,8 +115,6 @@ def process_trajectory_frame_task(frame_index: int, raw_frame_index: int) -> tup
     if _WORKER_CONFIG is None or _WORKER_OUTDIR is None or _WORKER_TRAJECTORY_PATH is None or _WORKER_UNIVERSE is None:
         raise RuntimeError("SQQ trajectory worker was not initialized.")
     from time import perf_counter
-    from .pipeline import process_frame
-
     display_name = f"{_WORKER_TRAJECTORY_PATH.stem}_frame{raw_frame_index:06d}"
     _emit_stage("start", frame_index, display_name, perf_counter())
 
@@ -201,8 +200,6 @@ def process_file_task(
         raise RuntimeError("SQQ process worker was not initialized.")
 
     from time import perf_counter
-
-    from .pipeline import process_frame
 
     path = Path(path_text)
     if group_key is None:

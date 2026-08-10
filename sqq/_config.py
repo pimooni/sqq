@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-"""Configuration defaults and YAML/JSON loading."""
+"""Compatibility implementation for SQQ configuration handling."""
 
 from copy import deepcopy
 import json
@@ -47,7 +47,7 @@ else:  # pragma: no cover - used only by the JSON source-tree fallback.
 
 
 DEFAULT_MODE = "py"
-CONFIG_SCHEMA_VERSION = "0.4.3"
+CONFIG_SCHEMA_VERSION = "0.5.1"
 DEFAULT_ORDER_PARAMETERS = ("f3", "f4")
 CPP_MODE = "cpp"
 CPP_MODES = frozenset({"99", CPP_MODE})
@@ -204,6 +204,9 @@ _YAML_KEY_ALIASES: dict[tuple[str, ...], dict[str, str]] = {
     ("parallel",): {
         "worker": "workers",
         "math_thread": "math_threads",
+    },
+    ("track",): {
+        "min_shared_water": "min_shared_waters",
     },
     ("debug",): {
         "use_networkx_check": "use_networkx_checks",
@@ -385,10 +388,23 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "context_roles": [],
         "center_resname": "CNT",
     },
+    "render": {
+        "atom_scope": "full",
+    },
     "parallel": {
         "backend": "process",
         "workers": "auto",
         "math_threads": 1,
+    },
+    "track": {
+        "target": "all",
+        "source": None,
+        "min_jaccard": 0.50,
+        "min_shared_fraction": 0.60,
+        "min_shared_waters": 3,
+        "max_center_distance_nm": None,
+        "gap_frame": 0,
+        "guest_tiebreak": True,
     },
     "debug": {
         "use_networkx_checks": False,
@@ -1084,6 +1100,11 @@ def load_config(path: Path | None, mode: Any = None) -> dict[str, Any]:
     merge_config(config, user_config)
     config["mode"] = selected_mode
     config["schema_version"] = CONFIG_SCHEMA_VERSION
+    render = config.setdefault("render", {})
+    atom_scope = str(render.get("atom_scope", "full")).strip().lower()
+    if atom_scope not in {"full", "compact"}:
+        raise ValueError("render.atom_scope must be full or compact.")
+    render["atom_scope"] = atom_scope
     normalize_engine_capabilities(config, user_config=user_config)
     return config
 
@@ -1117,7 +1138,9 @@ _DEFAULT_CONFIG_SECTION_COMMENTS: dict[str, str] = {
     "order_parameter": "Order-parameter calculation",
     "ice": "Ice-like water classification (SQQ-Py)",
     "output": "Output selection and layout",
+    "render": "VMD render topology and trajectory",
     "parallel": "Worker and math-thread policy",
+    "track": "Cross-frame persistent cage tracking",
     "debug": "Developer diagnostics",
 }
 
@@ -1160,9 +1183,18 @@ _DEFAULT_CONFIG_INLINE_COMMENTS: dict[tuple[str, ...], str] = {
     ("order_parameter", "q_neighbor_mode"): "choices: graph, cutoff, nearest, lammps",
     ("output", "type"): "default may be combined; all/none are exclusive",
     ("output", "structure_layout"): "choices: grouped, flat",
+    ("render", "atom_scope"): "choices: full, compact",
     ("parallel", "backend"): "choices: process, thread, serial",
     ("parallel", "worker"): "auto, integer count, fraction, or percentage",
     ("parallel", "math_thread"): "numeric-library threads per worker",
+    ("track", "target"): "all, cage type, hydrate phase, persistent tID, or comma-separated targets",
+    ("track", "source"): "Analyze result directory; null uses the current directory",
+    ("track", "min_jaccard"): "minimum member-water Jaccard similarity in [0, 1]",
+    ("track", "min_shared_fraction"): "minimum smaller-cage shared-water fraction in [0, 1]",
+    ("track", "min_shared_water"): "minimum number of shared water molecules",
+    ("track", "max_center_distance_nm"): "optional orthorhombic-PBC center-distance guard",
+    ("track", "gap_frame"): "maximum explicitly recorded missing selected frames; 0 disables bridging",
+    ("track", "guest_tiebreak"): "use guest continuity only to break otherwise comparable matches",
 }
 
 

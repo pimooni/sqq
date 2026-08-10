@@ -35,6 +35,7 @@ from .io.vmd import (
     prepare_sqq_cage_fragments,
 )
 from .parallel import initialize_file_worker, limited_math_threads, process_file_task
+from .ui import completed_run_statistics, print_final_results, refresh_terminal
 
 
 @dataclass(frozen=True)
@@ -65,9 +66,10 @@ def analyze_multi_gro_batch(
     started_at: float,
     *,
     diagnostics: Any | None = None,
+    services: Any,
 ) -> None:
     """Analyze heterogeneous GRO inputs in topology-compatible result roots."""
-    from . import pipeline as pipeline_api
+    pipeline_api = services
 
     strict = bool(config.get("run", {}).get("strict", False))
     grouping = scan_and_group_gro_inputs(paths, strict=strict)
@@ -257,14 +259,17 @@ def analyze_multi_gro_batch(
                 strict=strict,
                 total_started_at=started_at,
                 fragment_dirs=bundle_fragment_dirs,
+                services=services,
             )
         )
+        analysis_completed_at = perf_counter()
         pipeline_api.print_output_write_status()
         for group_index in bundle_groups:
             group_config = group_configs[group_index]
             finalize_sqq_cage_bundle(
                 group_outdirs[group_index],
                 fragment_dir=bundle_fragment_dirs[group_index],
+                tracking_config=group_config.get("track", {}),
             )
     except Exception as exc:
         for fragment_dir in bundle_fragment_dirs.values():
@@ -401,10 +406,46 @@ def analyze_multi_gro_batch(
             exc,
         )
         raise
+    final_finished_at = datetime.now().astimezone()
+    total_seconds = perf_counter() - started_at
+    analysis_seconds = max(0.0, analysis_completed_at - started_at)
+    write_seconds = max(0.0, total_seconds - analysis_seconds)
+    root_info["elapsed_seconds"] = round(total_seconds, 3)
+    root_info["analysis_seconds"] = round(analysis_seconds, 3)
+    root_info["write_seconds"] = round(write_seconds, 3)
+    root_info["finish_time"] = final_finished_at.strftime("%H:%M:%S")
+    root_info["finished_at"] = final_finished_at.isoformat(timespec="seconds")
+    final_config = (
+        group_configs[grouping.groups[0].group_index]
+        if grouping.group_count == 1 and grouping.groups
+        else execution_config
+    )
+    write_run_config(outdir, final_config, root_info)
+    group_has_trackable_sequence = any(
+        sum(
+            1
+            for index in group.source_indices
+            if index in rows_by_index
+            and str(rows_by_index[index].get("status", "")).lower() == "ok"
+        )
+        > 1
+        and any(group_outdirs[group.group_index].glob("**/track/track_state.json"))
+        for group in grouping.groups
+    )
+    statistics = completed_run_statistics(
+        root_info,
+        final_config,
+        result_path=outdir,
+        requested_frames=len(paths),
+        analysis_seconds=analysis_seconds,
+        write_seconds=write_seconds,
+        total_seconds=total_seconds,
+        track=group_has_trackable_sequence,
+    )
     if diagnostics is not None:
-        diagnostics.emit()
-    pipeline_api.print_run_summary(root_info)
-    print(f"Wrote SQQ results: {outdir}")
+        statistics["diagnostic_messages"] = diagnostics.consume()
+    refresh_terminal()
+    print_final_results(root_info, final_config, statistics)
 
 
 def analyze_grouped_gro_tasks(
@@ -418,17 +459,19 @@ def analyze_grouped_gro_tasks(
     strict: bool,
     total_started_at: float,
     fragment_dirs: dict[int, Path],
+    services: Any,
 ) -> dict[int, dict[str, Any]]:
     """Analyze every topology group through one shared scheduling pool."""
     if not tasks:
         return {}
     if workers <= 1 or backend == "serial":
         return analyze_grouped_gro_serial(
-            tasks, group_configs, fragment_dirs, strict, total_started_at
+            tasks, group_configs, fragment_dirs, strict, total_started_at, services
         )
     if backend == "thread":
         return analyze_grouped_gro_threaded(
-            tasks, group_configs, fragment_dirs, workers, strict, total_started_at
+            tasks, group_configs, fragment_dirs, workers, strict, total_started_at,
+            services,
         )
     if backend != "process":
         raise ValueError("Parallel analysis requires backend=process or backend=thread.")
@@ -441,6 +484,7 @@ def analyze_grouped_gro_tasks(
         workers,
         strict,
         total_started_at,
+        services,
     )
 
 
@@ -450,9 +494,10 @@ def analyze_grouped_gro_serial(
     fragment_dirs: dict[int, Path],
     strict: bool,
     total_started_at: float,
+    services: Any,
 ) -> dict[int, dict[str, Any]]:
     """Analyze grouped GRO tasks serially while retaining local frame indexes."""
-    from . import pipeline as pipeline_api
+    pipeline_api = services
 
     rows: dict[int, dict[str, Any]] = {}
     progress = pipeline_api.RunProgressDisplay(
@@ -478,6 +523,7 @@ def analyze_grouped_gro_serial(
                 strict,
                 fragment_dir=fragment_dirs.get(task.group_key),
                 callback=callback,
+                process_frame_fn=services.process_frame,
             )
             rows[task.global_index] = row
             progress.complete_frame(row.get("status") == "ok")
@@ -493,9 +539,10 @@ def analyze_grouped_gro_threaded(
     workers: int,
     strict: bool,
     total_started_at: float,
+    services: Any,
 ) -> dict[int, dict[str, Any]]:
     """Analyze grouped GRO tasks in one shared thread pool."""
-    from . import pipeline as pipeline_api
+    pipeline_api = services
 
     rows: dict[int, dict[str, Any]] = {}
     progress = pipeline_api.ParallelRunProgressDisplay(
@@ -535,6 +582,7 @@ def analyze_grouped_gro_threaded(
                         None,
                         progress,
                         display_index,
+                        services.process_frame,
                     )
                     futures[future] = task
 
@@ -568,9 +616,10 @@ def analyze_grouped_gro_processes(
     workers: int,
     strict: bool,
     total_started_at: float,
+    services: Any,
 ) -> dict[int, dict[str, Any]]:
     """Analyze grouped GRO tasks in one shared spawned-process pool."""
-    from . import pipeline as pipeline_api
+    pipeline_api = services
 
     rows: dict[int, dict[str, Any]] = {}
     progress = pipeline_api.ParallelRunProgressDisplay(
@@ -680,9 +729,11 @@ def process_thread_task(
     callback: Any = None,
     progress: Any = None,
     display_index: int | None = None,
+    process_frame_fn: Any = None,
 ) -> tuple[int, dict[str, Any]]:
     """Read and analyze one grouped GRO task in the current process."""
-    from .pipeline import process_frame
+    if process_frame_fn is None:
+        raise RuntimeError("Grouped GRO runtime services did not provide process_frame.")
 
     if callback is None and progress is not None and display_index is not None:
         callback = progress.start_file(display_index, task.output_name)
@@ -696,7 +747,7 @@ def process_thread_task(
             )
         )
         frame.name = task.output_name
-        row = process_frame(
+        row = process_frame_fn(
             task.local_index,
             frame,
             config,

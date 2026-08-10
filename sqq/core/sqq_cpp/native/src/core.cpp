@@ -1,8 +1,8 @@
 #include "sqq_cpp/core.hpp"
 
 #include <algorithm>
-#include <cctype>
 #include <array>
+#include <cctype>
 #include <cmath>
 #include <cstdint>
 #include <functional>
@@ -1731,6 +1731,6 @@ AnalysisResult analyze_frame(const FrameInput& frame, const AnalyzeOptions& opti
     return result;
 }
 
-const char* core_version() noexcept { return "0.4.3"; }
+const char* core_version() noexcept { return "0.5.1"; }
 
 }  // namespace sqq_cpp

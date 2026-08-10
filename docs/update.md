@@ -1,6 +1,64 @@
 # SQQ Update Notes
 
-This file records versioned update notes. New releases should be appended above older entries.
+## Version 0.5.1
+
+### Short Summary
+
+Version 0.5.1 adds stable topology-position water identity, persistent cross-frame cage IDs, and raw/source `sqq track` workflows with explicit gaps, independent target directories, normalized Track tables, and target-specific render packages. Render packages now preserve complete input frames by default and expose optional component context in VMD. Raw persistent-ID tracking adds a bounded second precursor pass, while the terminal now ends on final results and feature-aware citation guidance. Python, configuration schema, CMake, and native-core metadata are synchronized at `0.5.1`, dated Aug 9, 2026.
+
+### Main Changes
+
+1. Persistent Analyze cage identity
+   - Reduces each completed frame to stable atom-identity, cage-topology, center, phase, and guest snapshots while the normal Analyze result is still in memory.
+   - Links cages deterministically across selected frames and writes `track/track_state.json` plus observation, track/lifetime, event, population, guest-residence, and lifetime-distribution CSV files.
+   - Rewrites cage-center and cage-membership records in the compact Analyze TSV from frame-local cage numbers to persistent IDs when the complete selected-frame sequence is available.
+   - Refuses to bridge missing Analyze fragments silently; a discontinuous or partial render sequence keeps its valid scientific output but skips persistent-ID publication with a diagnostic.
+
+2. `sqq track` workflow
+   - Adds `track` to root help alongside `init`, `analyze`, and `vmd`.
+   - Accepts raw trajectory/stacked-GRO input through the shared readers and engines, including `-dt`, or imports an existing Analyze result through `--source`. With neither input form, it discovers one state under the current directory.
+   - Inherits the Analyze engine from source `sqq_config_resolved.yaml`, preserves its `sqq-py` or `sqq-cpp` identity in terminal and newly resolved metadata, and applies C++ half/quasi normalization for an SQQ-CPP source.
+   - Normalizes raw Track to one serial worker and uses a fixed configuration/state/CSV/target-render output set independent of `--output-type`.
+   - Supports `--target all`, cage types, hydrate phases, persistent IDs, and comma-separated mixed targets. Every target is filtered and written independently as `all/`, `type_<type>/`, `phase_<phase>/`, or `cage_<tID>/`; a phase target automatically resolves `find_cluster` to `on` and requires SQQ-Py.
+   - Keeps the complete lifecycle for any track that matches a type or phase at least once. A persistent-ID raw-input target with pre-birth frames uses a second pass over only the required prefix to write precursor-state/member-water history and add precursor VMD membership; imported state reports precursor history as unavailable rather than fabricating it.
+
+3. Scientific matching and events
+   - Uses stable water atom identity and member-water overlap/Jaccard as primary evidence, with cage topology and orthorhombic-PBC center displacement as secondary constraints. Guest continuity is only a deterministic tie-break.
+   - Applies global one-to-one assignment and stable ID ordering. It records birth, death, type change, phase change, split, merge, and explicit gap events.
+   - Makes `track.gap_frame` an explicit selected-frame tolerance. The default `0` ends a track at the first missing observation; a positive value records every bridged gap in observations and events.
+   - Reports left/right censoring and keeps guest residence non-exclusive when a guest belongs to several cages.
+
+4. Shared Track visualization
+   - Writes a self-contained four-file `sqq_track.*` package for every target and reuses the same Tcl renderer/manifest contract as Analyze.
+   - Keeps Analyze and Track VMD command grammar aligned. `sqq target save` writes the currently selected persistent cage ID or IDs to `sqq_target.txt` beside the render files.
+   - Makes YAML `render.atom_scope: full` the default for Analyze and raw Track under both SQQ-Py and SQQ-CPP. GRO/XTC render frames preserve all input atoms, including water hydrogens, complete guests, additives, environment/walls, and other retained components; `compact` preserves the legacy water-oxygen plus complete-guest topology.
+   - Adds `P` component records to the membership TSV and `sqq show component all|water|guest|additive|environment|other|RESNAME` plus matching `sqq color component ...` controls. The default sourced view remains cage-only (`sqq show cage all`) and context stays hidden until requested.
+   - Splits large component memberships into bounded `P` rows, preventing full-system TSV fields from exceeding CSV-reader limits without changing atom membership.
+   - Preserves additive show/color behavior, center/guest picking, white background, persistent cage selection, and sparse membership metadata. Source Track inherits the topology and atom scope of its imported Analyze bundle.
+
+5. Final terminal results and citation recommendation
+   - After all selected outputs finish, interactive runs clear the completed progress panel and redraw `Basic Information`, `Configuration`, `Analysis Results` or `Tracking Results`, and `Citation Recommendation`.
+   - Reports requested/analyzed/successful/failed frames, total/analysis/write time, mean time per successful frame, status, and result path. Redirected output is never cleared.
+   - Builds the recommendation only from analyses and outputs that actually completed, then appends the provisional publication line and full GitHub URL.
+
+6. Package organization
+   - Adds parallel public backend contracts under `core/sqq_py` and `core/sqq_cpp`; native C++17 source now lives below `core/sqq_cpp/native`.
+   - Places command entry points under `workflow`, runtime worker entry points under `runtime`, terminal result rendering under `ui`, configuration/model compatibility packages under `config` and `models`, and reporting/rendering under `io`.
+   - Extracts the shared VMD Tcl implementation into the packaged `io/render/sqq_cage.tcl` resource while preserving generated script content and wheel/sdist inclusion.
+   - Retains established import paths through compatibility exports for the 0.5.x transition.
+
+7. Validation
+   - Covers stable IDs, water-membership change, orthorhombic PBC translation, type/phase changes, birth/death, split/merge, guest residence, deterministic assignment, `-dt`, explicit gap handling, state/table round trips, source/raw CLI workflows, mixed targets, final terminal snapshots, and automated Analyze/Track render-package checks.
+   - A 10,000-frame streaming regression completed with bounded memory rather than retaining every frame result.
+   - The existing scientific, output-layout, transaction, sampling, VMD, engine-contract, and terminal regressions remain green.
+
+### Compatibility and Result Impact
+
+- Ring, half/quasi-cage, closed-cage, phase/domain, occupancy, and order-parameter definitions are unchanged. Tracking adds a temporal identity layer over accepted per-frame cages.
+- Aggregate per-frame scientific counts remain unchanged. Cage IDs in a complete Analyze render bundle intentionally change from arbitrary frame-local labels to persistent `tID` values.
+- Full-frame versus compact rendering changes visualization atoms and file size only; graph, ring, cage, phase, occupancy, order-parameter, and tracking results are unchanged.
+- Old Analyze render packages remain readable by `sqq vmd`, but `sqq track --source` requires the 0.5.1 `track/track_state.json` output.
+- Existing YAML remains readable. The new `track` section has defaults and does not change ordinary Analyze matching thresholds outside persistent-ID construction.
 
 ## Version 0.4.3
 
@@ -56,8 +114,6 @@ Version 0.4.2 corrects the expanded product name to **Shell Quant Qualifier** ac
 
 - Command syntax, configuration semantics, graph/ring/cage algorithms, order parameters, phase assignment, and generated scientific data are unchanged.
 - The visible differences are limited to corrected product text, banner presentation, and version metadata.
-
-Status: these 0.4.2 changes are local and uncommitted. No commit, tag, push, wheel publication, or PyPI publication has been performed.
 
 ## Version 0.4.1
 
@@ -126,8 +182,6 @@ Version 0.4.1 replaces the memory-amplifying cage-state representation in both S
 - Legacy `fast_closure: true` remains readable but is disabled with a recorded adjustment. It no longer supplements or changes GROW output.
 - The consolidated output-layout changes affect generated-file placement and lifecycle only. Scripts consuming multi-frame Markdown reports should read `info/<frame>_info.md`.
 
-Status: these 0.4.1 changes are local and uncommitted. No commit, tag, push, wheel publication, or PyPI publication has been performed.
-
 ## Version 0.3.11
 
 ### Short Summary
@@ -178,8 +232,6 @@ Version 0.3.11 fixes the remaining VMD cage-center/guest picking problems and si
 - Existing `show`, `color`, `pick`, and `clear` commands are unchanged. Output types `sqq-cage-gro` and `vmd` are removed; use `sqq-render`.
 - Cross-frame cage tracking and persistent cage IDs remain deferred.
 
-Status: these 0.3.11 changes are local and uncommitted. No commit, tag, push, wheel publication, or PyPI publication has been performed.
-
 ## Version 0.3.10
 
 ### Short Summary
@@ -226,8 +278,6 @@ Version 0.3.10 fixes LAMMPS native-time propagation, makes Analyze terminal outp
 - Existing `sqq show`, `sqq color`, and output-type names are unchanged.
 - Terminal formatting and stream ownership change, but resolved configuration, scientific tables, and structure membership do not.
 - Cross-frame cage tracking and persistent cage IDs remain deferred; Analyze identifiers are still frame-local.
-
-Status: these 0.3.10 changes are local and uncommitted. No commit, tag, push, wheel publication, or PyPI publication has been performed.
 
 ## Version 0.3.9
 
@@ -301,7 +351,6 @@ Version 0.3.9 introduces a compact public CLI, `-e` / `--engine`, singular `--pa
 - Output locking, fragment staging, cleanup, and failure-semantics changes do not alter scientific results.
 - Cross-frame cage tracking, persistent IDs, lifetime/event/residence tables, and Track-specific render packages are intentionally excluded from 0.3.9 and are planned for a later release.
 
-Status: these 0.3.9 implementation and documentation changes are local. No commit or push is implied by this release-note update.
 ## Version 0.3.8
 
 ### Short Summary

@@ -8,9 +8,11 @@ from pathlib import Path
 
 from . import __release_date__, __version__
 from .banner import HELP_BANNER
-from .config import write_default_config
-from .vmd_command import VMD_COMMAND_HELP, run_vmd_command
-from .pipeline import analyze
+from .workflow.analyze import analyze
+from .workflow.init import initialize_config
+from .workflow.track import track
+from .workflow.vmd import run_vmd_command
+from .workflow.vmd import VMD_COMMAND_HELP
 
 
 ROOT_EPILOG = """
@@ -18,9 +20,10 @@ Quick start:
   sqq init
   sqq analyze -i test.gro -o ./result_sqq
   sqq analyze -i traj.xtc -t topol.gro -c sqq_config.yaml -o ./result_sqq
+  sqq track --source ./result_sqq --target 512,sI -o ./result_track
   sqq vmd ./result_sqq
 
-Use `sqq analyze -h` for analysis options and `sqq vmd -h` for VMD commands.
+Use `sqq analyze -h`, `sqq track -h`, or `sqq vmd -h` for command options.
 """.strip()
 
 
@@ -123,6 +126,19 @@ Accepted engine values are 00, py, 99, and cpp. The default is py.
 """.strip()
 
 
+TRACK_EPILOG = """
+Examples:
+  sqq track --source ./result_sqq -o ./result_track
+  sqq track --source ./result_sqq --target 512,51264,sI,t133 -o ./result_track
+  sqq track -i traj.xtc -t topol.gro -dt 100 --target all -o ./result_track
+  sqq track -i traj.lammpstrj -t system.data -e cpp -o ./result_track
+
+Targets may be all, cage types, hydrate phases, or persistent IDs (t1, t2, ...).
+Comma-separated targets are written to independent result directories.
+Without -i or --source, Track searches the current directory for Analyze state.
+""".strip()
+
+
 
 def _add_analysis_arguments(
     command_parser: argparse.ArgumentParser,
@@ -171,7 +187,10 @@ def _add_analysis_arguments(
         "--worker",
         metavar="N|auto",
         default=None,
-        help="Worker count or physical-core fraction, e.g. 4, 0.5, or 50%%.",
+        help=(
+            "Worker count or physical-core fraction, e.g. 4, 0.5, or 50%%; "
+            "raw Track currently normalizes this to one worker."
+        ),
     )
     command_parser.add_argument(
         "-dt",
@@ -217,7 +236,7 @@ def _add_analysis_arguments(
         metavar="TYPE[,TYPE...]",
         help=(
             "Replace the output list; use default with extra types to extend "
-            "the engine defaults."
+            "the Analyze engine defaults. Track uses its fixed Track output set."
         ),
     )
     command_parser.add_argument(
@@ -260,6 +279,25 @@ def build_parser() -> argparse.ArgumentParser:
     )
     _add_analysis_arguments(analyze_parser, input_required=True)
 
+    track_parser = subparsers.add_parser(
+        "track",
+        help="Track cages across analyzed frames.",
+        epilog=TRACK_EPILOG,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    _add_analysis_arguments(track_parser, input_required=False)
+    track_parser.add_argument(
+        "--source",
+        metavar="ANALYZE_RESULT",
+        help="Import persistent Track state from an Analyze result directory.",
+    )
+    track_parser.add_argument(
+        "--target",
+        metavar="TARGET[,TARGET...]",
+        default=None,
+        help="Track all cages, cage types, phases, or persistent IDs; default all.",
+    )
+
     vmd_parser = subparsers.add_parser(
         "vmd",
         help="Locate and validate SQQ VMD render packages.",
@@ -288,7 +326,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "init":
         out = Path(args.output)
         try:
-            write_default_config(out)
+            initialize_config(out)
         except FileExistsError as exc:
             print(f"Error: {exc}", file=sys.stderr)
             return 2
@@ -296,6 +334,9 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if args.command == "analyze":
         analyze(args)
+        return 0
+    if args.command == "track":
+        track(args)
         return 0
     if args.command == "vmd":
         return run_vmd_command(args.path)

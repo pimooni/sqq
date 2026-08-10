@@ -13,6 +13,14 @@ SQQ_BANNER = """
 ┗━━━━━┛   ┗━┛   ┗━┛  +-----------------------------+
 """.strip()
 
+# Reserved artwork. It is intentionally not included in the public banner.
+IRSM_BANNER = """
+┏━━━┳━━━┳━━━┳━━━━━┓
+┗┓ ┏┫ ┏━┫ ══┃ ┃ ┃ ┃
+┏┛ ┗┫ ┃ ┃══ ┃ ┃ ┃ ┃
+┗━━━┻━┛ ┗━━━┻━┻━┻━┛
+""".strip()
+
 ENGINE_BADGES = {
     "00": """
 ┏━━━━━┳━━━━━┓
