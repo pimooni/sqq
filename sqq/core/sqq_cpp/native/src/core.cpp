@@ -255,17 +255,14 @@ GraphInternal build_graph(const FrameInput& frame, const AnalyzeOptions& options
     }
     if (graph.mode == "pairs") {
         std::set<Edge> normalized;
-        for (auto pair : frame.pair_edges) {
-            int left = pair.first;
-            int right = pair.second;
-            const bool atom_ids = water_by_oxygen.count(left) && water_by_oxygen.count(right);
-            if (!atom_ids) {
-                if (left < 0 || right < 0 || left >= static_cast<int>(frame.waters.size()) ||
-                    right >= static_cast<int>(frame.waters.size())) {
-                    throw std::invalid_argument("pair_edges contains an unknown water identifier");
-                }
-                left = frame.waters[left].oxygen;
-                right = frame.waters[right].oxygen;
+        for (const auto pair : frame.pair_edges) {
+            const int left = pair.first;
+            const int right = pair.second;
+            if (!water_by_oxygen.count(left) || !water_by_oxygen.count(right)) {
+                throw std::invalid_argument(
+                    "pair_edges must contain selected-water oxygen atom indices only; "
+                    "water ordinals and other atom identities are not accepted"
+                );
             }
             if (left != right) {
                 normalized.insert(sorted_edge(left, right));
@@ -1731,6 +1728,6 @@ AnalysisResult analyze_frame(const FrameInput& frame, const AnalyzeOptions& opti
     return result;
 }
 
-const char* core_version() noexcept { return "0.5.1"; }
+const char* core_version() noexcept { return "0.5.2"; }
 
 }  // namespace sqq_cpp

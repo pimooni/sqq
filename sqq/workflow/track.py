@@ -4,7 +4,9 @@ from __future__ import annotations
 
 from argparse import Namespace
 from collections import defaultdict
+from copy import deepcopy
 import csv
+from dataclasses import replace
 from datetime import datetime
 import os
 from pathlib import Path
@@ -19,19 +21,18 @@ import yaml
 from .. import __release_date__, __version__
 from ..config import (
     DEFAULT_MODE,
+    apply_cli_overrides,
     engine_display,
     is_cpp_mode,
     load_config,
     normalize_engine_capabilities,
+    normalize_analysis_scopes,
+    refresh_resolution_report,
     normalize_mode,
     validate_cpp_cli,
 )
 from ..core.tracking import (
-    TargetSelection,
-    TargetSpec,
     TrackingAccumulator,
-    TrackingConfig,
-    TrackingResult,
     parse_targets,
     select_targets,
     snapshot_from_frame_result,
@@ -42,19 +43,19 @@ from ..io.lammps import (
     inspect_lammps_topology_mapping,
 )
 from ..io.render import (
-    SqqCageBundle,
-    finalize_sqq_cage_bundle,
-    prepare_sqq_cage_fragments,
-    sqq_output_lock,
-    visualization_atoms,
-    write_sqq_cage_fragment,
-)
-from ..io.summary import write_run_config
-from ..io.tracking import (
+    RenderSession,
+    RenderSpec,
+    RenderBundle,
     TRACK_MEMBERSHIP_NAME,
     TRACK_RENDER_DIRECTORY,
-    add_precursor_membership,
     discover_sqq_cage_bundle,
+    publish_target_render_bundle,
+    validate_tracking_source_bundle,
+)
+from ..io.render.frame import visualization_atoms
+from ..io.reporting import write_run_config
+from ..io.tracking import (
+    add_precursor_membership,
     discover_track_state,
     read_tracking_result,
     target_directory_name,
@@ -62,19 +63,22 @@ from ..io.tracking import (
 )
 from ..io.trajectory import expand_inputs, read_frames, trajectory_frame_selection
 from ..models import FrameResult
-from ..pipeline import (
-    RunDiagnostics,
-    RunProgressDisplay,
-    analyze_frame,
-    apply_cli_overrides,
-    capture_run_warnings,
-    format_time_zone,
-    input_format_label,
-    normalize_analysis_scopes,
-    print_run_banner,
-    sampling_metadata,
+from ..models.tracking import (
+    TargetSelection,
+    TargetSpec,
+    TrackingConfig,
+    TrackingResult,
 )
+from ..runtime.contracts import FrameTask, RunPlan, TaskOutcome
+from ..runtime.frame import analyze_frame
+from ..runtime.output_lock import output_lock
+from ..ui.diagnostics import RunDiagnostics, capture_run_warnings
+from ..ui.formatting import format_time_zone
+from ..ui.progress import RunProgressDisplay
+from ..ui.run_header import input_format_label, print_run_banner
 from ..ui import completed_run_statistics, print_final_results, refresh_terminal
+from .analyze_plan import build_run_plan
+from .session import AnalysisEvent, AnalysisRunner, AnalysisSink
 
 
 __all__ = ["track"]
@@ -132,6 +136,61 @@ _PrecursorData = tuple[
 ]
 
 
+class _TrackingAnalysisSink(AnalysisSink):
+    """Link successful frame results in authoritative plan order."""
+
+    def __init__(self, accumulator: TrackingAccumulator) -> None:
+        self.accumulator = accumulator
+        self.consumed = 0
+
+    def start(self, plan: RunPlan) -> None:
+        self.consumed = 0
+
+    def consume(self, task: FrameTask, outcome: TaskOutcome) -> None:
+        if not outcome.ok:
+            raise RuntimeError(
+                "Tracking cannot skip failed frame "
+                f"{task.display_name!r}: {outcome.error_message or 'analysis failed'}"
+            )
+        if outcome.result is None:
+            raise RuntimeError(
+                f"Tracking frame {task.display_name!r} did not retain its analysis result."
+            )
+        self.accumulator.add(
+            snapshot_from_frame_result(outcome.result, int(task.frame_index))
+        )
+        self.consumed += 1
+
+    def finish(
+        self,
+        plan: RunPlan,
+        outcomes: Sequence[TaskOutcome],
+    ) -> None:
+        if self.consumed != len(plan.tasks):
+            raise RuntimeError(
+                "Tracking linked "
+                f"{self.consumed} frames; expected {len(plan.tasks)}."
+            )
+
+
+class _TrackProgressSink:
+    """Translate shared runner events into the Track progress panel."""
+
+    def __init__(self, display: RunProgressDisplay) -> None:
+        self.display = display
+
+    def __call__(self, event: AnalysisEvent) -> None:
+        task = event.task
+        if event.kind == "task-start" and task is not None:
+            self.display.start_frame(task.frame_index, task.display_name)
+        elif event.kind == "stage" and event.stage is not None:
+            self.display.update_stage(event.stage)
+        elif event.kind == "task-complete":
+            self.display.complete_frame(event.status == "ok")
+        elif event.kind == "task-cancelled":
+            self.display.complete_frame(False)
+
+
 def _track_executed_features(
     config: Mapping[str, Any],
     *,
@@ -182,7 +241,7 @@ def track(args: Namespace) -> None:
     print_run_banner(getattr(args, "engine", None))
     output = Path(args.output)
     output.mkdir(parents=True, exist_ok=True)
-    with sqq_output_lock(output):
+    with output_lock(output):
         diagnostics = RunDiagnostics()
         with capture_run_warnings(diagnostics):
             try:
@@ -218,6 +277,7 @@ def _track_locked(args: Namespace, diagnostics: RunDiagnostics) -> None:
     _prepare_target_capabilities(config, targets)
     validate_cpp_cli(args, config)
     normalize_analysis_scopes(config)
+    refresh_resolution_report(config)
     requested_tracking = _tracking_config(config)
 
     try:
@@ -283,13 +343,22 @@ def _track_locked(args: Namespace, diagnostics: RunDiagnostics) -> None:
                 else None
             )
             analysis_completed_at = perf_counter()
+            validate_tracking_source_bundle(
+                source_bundle,
+                frame_count=len(result.frames),
+            )
             written = write_track_outputs(
                 result,
                 output,
                 targets=[target.raw for target in targets],
-                source=source,
-                source_bundle=source_bundle,
             )
+            for selection in selections:
+                directory = written[target_directory_name(selection.target)]
+                publish_target_render_bundle(
+                    selection,
+                    directory,
+                    source_bundle,
+                )
 
         _write_precursor_outputs(
             selections,
@@ -381,7 +450,7 @@ def _track_input(
     source_root: Path,
 ) -> tuple[
     TrackingResult,
-    SqqCageBundle,
+    RenderBundle,
     list[FrameResult] | None,
     dict[str, Any],
 ]:
@@ -403,14 +472,6 @@ def _track_input(
         str(topology.resolve()) if topology is not None else None
     )
     _prepare_lammps_metadata(config, trajectory, topology, args)
-
-    selection = trajectory_frame_selection(
-        trajectory,
-        topology,
-        delta_time_ps=config["input"].get("delta_time_ps"),
-        lammps_config=config["input"].get("lammps", {}),
-    )
-    config["input"]["sampling"] = sampling_metadata(selection)
     config["parallel"]["workers"] = 1
     config["parallel"]["backend"] = "serial"
     config.setdefault("adjustments", [])
@@ -418,11 +479,68 @@ def _track_input(
     if adjustment not in config["adjustments"]:
         config["adjustments"].append(adjustment)
 
-    retained: list[FrameResult] | None = None
+    # Track owns a temporary Analyze workspace.  Only the render fragments are
+    # needed there; target-specific reports are published later by io.tracking.
+    execution_config = deepcopy(config)
+    execution_config.setdefault("output", {})["types"] = ["sqq-render"]
+    plan = build_run_plan(
+        paths,
+        execution_config,
+        source_root,
+        topology=topology,
+    )
+    selected_frames = len(plan.tasks)
+    if selected_frames < 1:
+        raise ValueError("sqq track did not select any trajectory frames.")
+
+    planned_config = plan.context.config
+    planned_graph = planned_config.get("graph", {})
+    config.setdefault("graph", {}).update(
+        {
+            key: planned_graph[key]
+            for key in (
+                "effective_bond_mode",
+                "effective_bond_mode_reason",
+            )
+            if key in planned_graph
+        }
+    )
+    config.setdefault("input", {})["sampling"] = dict(plan.sampling)
+
+    effective_modes = tuple(dict.fromkeys(plan.effective_graph_modes.values()))
+    render_session = RenderSession.create(
+        source_root,
+        RenderSpec(
+            atom_scope=str(config.get("render", {}).get("atom_scope", "full")),
+            component_roles=planned_config,
+            requested_graph_mode=str(config["graph"]["bond_mode"]),
+            effective_graph_mode=(
+                effective_modes[0] if len(effective_modes) == 1 else None
+            ),
+        ),
+    )
+    plan = replace(
+        plan,
+        context=replace(
+            plan.context,
+            strict=True,
+            retain_results=False,
+            stream_results=True,
+            fragment_dir=render_session.fragment_dir,
+        ),
+        policy=replace(
+            plan.policy,
+            backend="serial",
+            workers=1,
+            strict=True,
+            in_flight_limit=1,
+        ),
+    )
+
     accumulator = TrackingAccumulator(tracking_config)
-    fragment_dir = prepare_sqq_cage_fragments(source_root)
+    tracking_sink = _TrackingAnalysisSink(accumulator)
     progress = RunProgressDisplay(
-        total=selection.selected_frames,
+        total=selected_frames,
         total_started_at=started,
         include_cluster_stage=bool(
             config.get("hydrate_cluster", {}).get("enabled", False)
@@ -433,82 +551,37 @@ def _track_input(
             or config.get("quasi_cage", {}).get("enabled", False)
         ),
     )
-    analyzed_count = 0
     try:
-        frames = read_frames(
-            paths,
-            topology=topology,
-            xyz_scale=float(config["input"].get("xyz_scale", 0.1)),
-            frame_indexes=selection.raw_indexes,
-            lammps_config=config["input"].get("lammps", {}),
-        )
-        for frame_index, frame in enumerate(frames):
-            if frame.time_ps is None:
-                raw_index = selection.raw_indexes[frame_index]
-                frame.time_ps = (
-                    float(config["input"]["first_file_time_ps"])
-                    + raw_index * float(config["input"]["frame_time_step_ps"])
-                )
-            callback = progress.start_frame(frame_index, frame.name)
-            try:
-                analyzed = analyze_frame(
-                    frame,
-                    config,
-                    stage_callback=callback,
-                    normalize_config=False,
-                )
-                accumulator.add(snapshot_from_frame_result(analyzed, frame_index))
-                write_sqq_cage_fragment(
-                    analyzed,
-                    fragment_dir,
-                    frame_index,
-                    requested_graph_mode=config["graph"]["bond_mode"],
-                    atom_scope=config.get("render", {}).get("atom_scope", "full"),
-                    component_config=config,
-                )
-                analyzed_count += 1
-            except Exception as exc:
-                progress.complete_frame(False)
-                raise RuntimeError(
-                    f"Tracking cannot skip failed frame {frame.name!r}: {exc}"
-                ) from exc
-            progress.complete_frame(True)
+        outcomes = AnalysisRunner(
+            plan,
+            event_sink=_TrackProgressSink(progress),
+            sinks=(tracking_sink,),
+        ).run()
+        if len(outcomes) != selected_frames or any(not item.ok for item in outcomes):
+            raise RuntimeError(
+                "Tracking cannot skip failed or missing trajectory frames."
+            )
+        result = accumulator.result()
+        bundle = render_session.finalize(tracking=result)
+    except Exception:
+        render_session.abort()
+        raise
     finally:
         progress.close()
 
-    if analyzed_count != selection.selected_frames:
-        raise RuntimeError(
-            "Trajectory reader returned "
-            f"{analyzed_count} selected frames; expected "
-            f"{selection.selected_frames}."
-        )
-    result = accumulator.result()
-    bundle = finalize_sqq_cage_bundle(
-        source_root,
-        fragment_dir=fragment_dir,
-        write_gro=True,
-        write_script=True,
-        # This workflow already tracked incrementally above.  Avoid a second
-        # pass through fragment snapshots and keep the temporary source bundle
-        # frame-local; io.tracking rewrites each published target exactly once.
-        write_tracking=False,
-    )
-    if any(
-        path is None
-        for path in (bundle.gro_path, bundle.xtc_path, bundle.membership_path)
-    ):
+    if not bundle.complete:
         raise RuntimeError("No SQQ render bundle was produced for tracking.")
     metadata = {
         "source": None,
         "input": str(trajectory.resolve()),
         "topology": str(topology.resolve()) if topology is not None else None,
         "input_format": config["input"]["format"],
-        "selected_frames": selection.selected_frames,
-        "source_frames_total": selection.total_frames,
-        "native_frame_interval_ps": selection.native_interval_ps,
-        "raw_frame_step": selection.raw_frame_step,
+        "selected_frames": selected_frames,
+        "source_frames_total": int(plan.sampling.get("total_frames", selected_frames)),
+        "native_frame_interval_ps": plan.sampling.get("native_frame_interval_ps"),
+        "raw_frame_step": int(plan.sampling.get("raw_frame_step", 1)),
     }
-    return result, bundle, retained, metadata
+    return result, bundle, None, metadata
 
 
 def _prepare_target_capabilities(
@@ -837,7 +910,6 @@ def _raw_precursor_histories(
                     frame,
                     config,
                     stage_callback=callback,
-                    normalize_config=False,
                 )
                 for track_id, (birth_index, water_ids) in targets.items():
                     if frame_index > birth_index:
@@ -1161,6 +1233,10 @@ def _run_info(
     }
 
 
+def _markdown_table_cell(value: object) -> str:
+    return str(value).replace("|", r"\|")
+
+
 def _write_root_track_info(
     output: Path,
     config: Mapping[str, Any],
@@ -1190,8 +1266,7 @@ def _write_root_track_info(
         "| item | value |",
         "| --- | --- |",
         *(
-            f"| {str(item).replace('|', r'\|')} | "
-            f"{str(value).replace('|', r'\|')} |"
+            f"| {_markdown_table_cell(item)} | {_markdown_table_cell(value)} |"
             for item, value in values
         ),
         "",

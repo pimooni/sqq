@@ -1,12 +1,8 @@
-"""SQQ-Py scientific kernel namespace.
-
-The namespace groups the Python topology implementation while compatibility
-imports continue to resolve from :mod:`sqq.core` during the 0.5.x transition.
-"""
+"""Public namespace for the SQQ-Py scientific kernel."""
 
 from ..cage import find_cages
 from ..graph import build_water_graph
-from ..quasi_cage import find_cage_patches
+from ..half_quasi import find_cage_patches
 from ..ring import find_rings
 from .backend import (
     analyze_frame,

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-"""Half-cage and quasi-cage search from layered ring-face patches."""
+"""Layered half-cage and quasi-cage search."""
 
 from collections import Counter, defaultdict, deque
 import numpy as np

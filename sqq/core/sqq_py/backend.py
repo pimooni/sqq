@@ -1,10 +1,6 @@
 from __future__ import annotations
 
-"""SQQ-Py frame-analysis backend.
-
-This module owns the Python scientific kernel.  Configuration normalization,
-molecule selection, and engine dispatch remain in :mod:`sqq.pipeline`.
-"""
+"""SQQ-Py frame-analysis backend."""
 
 from typing import Any, Callable
 
@@ -15,13 +11,11 @@ from ...config import (
 )
 from ...models import Cage, CagePatch, Frame, FrameResult, Guest, HydrateOrderResult, Water
 from ..cage import find_cages
-from ..dhop import compute_dhop_order
-from ..f3f4 import compute_order_parameters
 from ..graph import build_water_graph
-from ..hydrate_cluster import analyze_hydrate_clusters
+from ..phase import analyze_hydrate_clusters
 from ..ice import classify_ice_waters
-from ..mcg import compute_mcg_order
-from ..quasi_cage import find_cage_patches
+from ..order import compute_dhop_order, compute_mcg_order, compute_order_parameters
+from ..half_quasi import find_cage_patches
 from ..ring import find_rings
 from ..ring_topology import build_ring_topology_index
 
@@ -32,6 +26,7 @@ def analyze_frame(
     guests: list[Guest],
     config: dict[str, Any],
     *,
+    pair_edges: list[tuple[int, int]] | None = None,
     cage_report_types: tuple[str, ...] | None,
     ring_report_sizes: tuple[int, ...],
     ring_sizes: list[int],
@@ -46,18 +41,19 @@ def analyze_frame(
     outside the backend gives SQQ-Py and SQQ-CPP the same dispatch boundary.
     """
     _report_stage(stage_callback, "building water graph")
+    graph_config = config["graph"]
+    graph_mode = str(
+        graph_config.get("effective_bond_mode", graph_config["bond_mode"])
+    )
     graph = build_water_graph(
         frame.atoms,
         waters,
         frame.box,
-        bond_mode=config["graph"].get(
-            "effective_bond_mode", config["graph"]["bond_mode"]
-        ),
-        oo_cutoff_nm=float(config["graph"]["oo_cutoff_nm"]),
-        hbond_distance_nm=float(config["graph"]["hbond_distance_nm"]),
-        hbond_angle_deg=float(config["graph"]["hbond_angle_deg"]),
-        pair_file=config["graph"].get("pair_file"),
-        pair_id=str(config["graph"].get("pair_id", "resid")),
+        bond_mode=graph_mode,
+        oo_cutoff_nm=float(graph_config["oo_cutoff_nm"]),
+        hbond_distance_nm=float(graph_config["hbond_distance_nm"]),
+        hbond_angle_deg=float(graph_config["hbond_angle_deg"]),
+        pair_edges=pair_edges,
     )
     _report_stage(stage_callback, "searching rings")
     rings = find_rings(
@@ -116,14 +112,11 @@ def analyze_frame(
         max_boundary_candidates=int(config["cage"].get("max_boundary_candidates", 8)),
         occupancy_radius_nm=float(config["cage"].get("occupancy_radius_nm", 0.5)),
         occupancy_mode=str(config["cage"].get("occupancy_mode", "polyhedron")),
-        fast_closure=bool(config["cage"].get("fast_closure", False)),
-        fast_closure_max_states=int(config["cage"].get("fast_closure_max_states", 20000)),
         scientific_validation=scientific_validation,
         max_face_planarity_rms_nm=float(config["cage"].get("max_face_planarity_rms_nm", 0.06)),
         max_face_edge_cv=float(config["cage"].get("max_face_edge_cv", 0.35)),
         min_cage_volume_nm3=float(config["cage"].get("min_cage_volume_nm3", 1.0e-6)),
         topology_index=ring_topology,
-        warnings=warnings,
     )
     cages = select_reported_cages(all_cages, cage_report_types)
     hydrate_cluster_detail = output_enabled(config, "cluster-detail")

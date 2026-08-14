@@ -205,7 +205,7 @@ Standalone files whose case-insensitive stems collide inside the same output roo
 
 Terminal and main-summary dashboard metadata share the same display helpers. The requested graph mode is preserved from YAML or retained CLI. Explicit graph modes display as `hbond`, `oo`, or `pairs`. Automatic graph mode is resolved during preflight from the first selected frame before the terminal header or initial resolved YAML is written. A compatible topology therefore displays only `auto -> hbond` or `auto -> oo` in the terminal, per-frame reports, summaries, VMD metadata, and resolved YAML. Multiple-GRO topology groups are resolved independently; when groups differ, the root terminal and manifest list one exact mode per `result_A` ... `result_Z` instead of a pending or mixed placeholder.
 
-Root `sqq` / `sqq -h` output renders the banner and the `SQQ (Shell Quant Qualifier)` product sentence, then `SQQ version: 0.5.1   Release date: Aug 9, 2026`, then the ordinary `usage:` line. The root command list contains `init`, `analyze`, `track`, and `vmd`. Root `sqq -v` / `sqq --version` exits successfully after printing only that version line. Subcommand help retains the standard argparse layout. Every `sqq analyze` and raw-input `sqq track` invocation prints the SQQ banner before directory creation, output locking, reader initialization, or other preflight work; the version remains in the standard `Configuration` block, so it is not duplicated. Even an early validation failure therefore has a stable first screen.
+Root `sqq` / `sqq -h` output renders the banner and the `SQQ (Shell Quant Qualifier)` product sentence, then `SQQ version: 0.5.2   Release date: Aug 10, 2026`, then the ordinary `usage:` line. The root command list contains `init`, `analyze`, `track`, and `vmd`. Root `sqq -v` / `sqq --version` exits successfully after printing only that version line. Subcommand help retains the standard argparse layout. Every `sqq analyze` and raw-input `sqq track` invocation prints the SQQ banner before directory creation, output locking, reader initialization, or other preflight work; the version remains in the standard `Configuration` block, so it is not duplicated. Even an early validation failure therefore has a stable first screen.
 
 `sqq init` writes the fixed commented template to `sqq_config.yaml` by default; `sqq init -o NAME.yaml` changes only that destination. It refuses to overwrite an existing file. The template uses `#` section/choices comments and defaults `ring.size` to `[4, 5, 6]`. Analyze does not auto-read a same-named current-directory file when `-c` is omitted. User YAML is never rewritten: relative paths in it resolve from the YAML directory, while CLI paths resolve from the invocation directory. Duplicate mapping keys and unknown public keys are errors.
 
@@ -291,43 +291,49 @@ Citation wording is derived from an explicit map of features that actually ran a
 
 ## Modules
 
-SQQ 0.5.1 uses these responsibility boundaries:
+SQQ 0.5.2 uses these responsibility boundaries:
 
 ```text
 sqq/
-├ config/                 public defaults/loading/resolution interfaces
-├ models/                 structure/topology/phase/order/result contracts
+├ config/                 defaults, migration, resolution, and validation
+├ models/                 structure, topology, result, and tracking contracts
 ├ core/
 │  ├ sqq_py/              Python frame-analysis backend
-│  ├ sqq_cpp/             Python adapter plus native C++17 source in native/
-│  └ tracking.py          deterministic temporal cage identity
+│  ├ sqq_cpp/             Python adapter and native C++17 source in native/
+│  ├ order/               F3/F4, Steinhardt Q, MCG, and DHOP
+│  └ tracking.py          deterministic temporal matching algorithms
 ├ workflow/               init, analyze, track, and vmd command flows
-├ runtime/                worker-safe frame execution and scheduler boundary
+├ runtime/                plans, frame tasks, workers, and execution policy
 ├ io/
-│  ├ reporting/           per-frame and aggregate report interface
-│  ├ render/              render-bundle interface and packaged Tcl resource
-│  ├ tracking.py          Track state, CSV, and target-bundle publication
+│  ├ reporting/           per-frame and aggregate reports
+│  ├ render/              Analyze/Track render packages and Python Tcl template
+│  ├ tracking.py          Track state, CSV, and membership conversion
 │  └ trajectory/LAMMPS/GRO readers and writers
-└ ui/                     final terminal results, timing, and citation wording
+└ ui/                     progress, diagnostics, final results, and citations
 ```
 
 The two cage kernels are peers. `sqq.core.sqq_py.analyze_frame` and `sqq.core.sqq_cpp.analyze_frame` share the normalized `Frame`, selected `Water`/`Guest`, configuration, callback, and `FrameResult` contract. Their documented capabilities remain different; the shared Python workflow applies engine normalization before dispatch and never falls back silently from C++ to Python.
 
 `workflow/init.py`, `workflow/analyze.py`, `workflow/track.py`, and `workflow/vmd.py` are parallel command entry points. Workflow code owns orchestration and final publication; scientific acceptance remains in `core`, serialization remains in `io`, scheduling remains in `runtime`, and terminal-only presentation remains in `ui`. The C++17 implementation and pybind11 bindings live below `core/sqq_cpp/native`, so native and Python backends are visibly parallel while wheel builds still compile one `_sqq_cpp` extension.
 
-The shared VMD renderer is stored as the package resource `io/render/sqq_cage.tcl`. Python supplies the generated manifest, actual filenames, molecule name, and synchronized help body when publishing Analyze or Track scripts. `workflow/vmd.py` owns the public `sqq vmd` flow; render discovery, validation, and file generation remain I/O responsibilities.
+The shared VMD renderer is stored as a readable raw string in `io/render/tcl_template.py`; no standalone Tcl source file is tracked or packaged. Python supplies the generated manifest, actual filenames, molecule name, and synchronized help body when publishing Analyze or Track scripts. The published render package still contains the ordinary `*.vmd.tcl` file required by VMD, with the same content and command interface as before. `workflow/vmd.py` owns the public `sqq vmd` flow; render discovery, validation, and file generation remain I/O responsibilities.
 
-The established modules `sqq.config`, `sqq.models`, `sqq.pipeline`, `sqq.parallel`, `sqq.io.summary`, `sqq.io.vmd`, and `sqq.core.cpp_backend` remain compatibility entry points during the 0.5.x transition. New code should import the responsibility-specific package paths. Compatibility exports preserve old callers without creating a second scientific implementation.
+The public Python surface is `sqq.load_config`, `sqq.read_frames`, and `sqq.analyze_frame`, together with the exported models and typed exceptions. Retired monolithic modules are removed rather than kept as parallel compatibility implementations. Internal callers use the responsibility-specific package paths shown above.
 
 Important implementation modules remain:
 
 - `core/graph.py`, `ring.py`, and `ring_topology.py`: water graph, ring search, and sparse ring incidence.
-- `core/quasi_cage.py`, `cage.py`, and `hydrate_cluster.py`: open patches, exact closed cages, and frame-local hydrate phase/domain classification.
-- `core/f3f4.py`, `mcg.py`, `dhop.py`, and `ice.py`: order parameters and ice classification.
+- `core/half_quasi.py`, `cage.py`, and `phase.py`: open patches, exact closed cages, and frame-local hydrate phase/domain classification.
+- `core/order/{f3f4,steinhardt,mcg,dhop}.py` and `core/ice.py`: order parameters and ice classification.
 - `core/tracking.py`: persistent-ID matching, events, lifetimes, targets, and streaming accumulation.
 - `io/trajectory.py` and `io/lammps.py`: normalized coordinate/topology readers.
-- `io/tracking.py`: versioned Track state, normalized tables, target selection, persistent membership rewriting, and target render bundles.
+- `io/tracking.py`: versioned Track state, normalized tables, target selection, and persistent membership conversion.
+- `io/render/tracking.py`: target render discovery, validation, naming, and publication.
 - `ui/final_results.py` and `ui/run_statistics.py`: final-page wording and measured run statistics.
+
+### Stable Python API
+
+`sqq.load_config` accepts a YAML path, a partial mapping, or `None`, performs migration and engine-capability normalization, and returns a `ResolvedConfig` carrying an auditable `ResolutionReport`. `sqq.read_frames` yields normalized public `Frame` values through the same supported readers used by the CLI. `sqq.analyze_frame` dispatches one `Frame` to the resolved Python or C++ backend and returns the public `FrameResult`. Configuration, input, and analysis failures use distinct exported SQQ exception types. These functions are the supported programmatic interface; workflow, runtime, and I/O modules remain implementation details.
 
 ## Input Validation and Coordinate Units
 
@@ -444,7 +450,7 @@ References: Barnes et al. (DOI 10.1063/1.4871898), Knott et al. (DOI 10.1021/jp5
 
 ## Ring Search
 
-Rings are searched on the already-built water graph; geometry is not used after the graph edge set is fixed. Sorted adjacency tuples and one node-to-bit map are built once. Every DFS state stores an immutable path plus an integer visited mask. The minimum node must remain the start, and a closing path is accepted only in one direction (`second < last`), eliminating rotational and reverse rediscovery before final canonical ordering.
+Rings are searched on the already-built water graph; geometry is not used after the graph edge set is fixed. Sorted adjacency tuples are built once. Every bounded DFS state stores one short immutable path, and membership is checked directly against that path. The minimum node must remain the start, and a closing path is accepted only in one direction (`second < last`), eliminating rotational and reverse rediscovery before final canonical ordering.
 
 With the default `ring.definition: chordless`, adding a node checks its graph neighbors already present in the partial path. A connection to any non-previous node is an immediate chord and prunes the branch. A connection back to the start closes the candidate immediately; the path is not extended beyond that closure edge. Random-graph regression compares this optimized traversal with the previous final-only chord test.
 
@@ -453,7 +459,7 @@ With `ring.definition: shortest_path`, every chordless candidate additionally ap
 Current behavior:
 
 - supported ring sizes: 4, 5, 6, 7;
-- default ring sizes: 5, 6;
+- default ring sizes: 4, 5, 6;
 - default definition: `chordless`;
 - optional definition: `shortest_path`;
 - ring nodes are water oxygen indices;
@@ -545,11 +551,10 @@ cage.seed_mode = ring
 cage.max_state_per_seed = 0
 cage.max_total_state = 0
 cage.max_boundary_candidate = 8
-cage.fast_closure = false
 cage.scientific_validation = false
 ```
 
-Ring seeds remain the default; patch seeds are retained for compatibility and targeted comparisons. `0` state guards mean unlimited exact search. `max_boundary_candidate` and the fast-closure keys remain readable so older configuration files migrate cleanly, but neither truncates nor supplements the current exact GROW result. Mandatory topology validation is unconditional. Optional scientific validation changes only geometric acceptance and the center definition.
+Ring seeds remain the default; patch seeds are retained for compatibility and targeted comparisons. `0` state guards mean unlimited exact search. `max_boundary_candidate` does not truncate the exact result. Legacy fast-closure keys are accepted only during configuration migration, ignored, and recorded as adjustments; they are not part of the resolved schema. Mandatory topology validation is unconditional. Optional scientific validation changes only geometric acceptance and the center definition.
 ### Search Scope and Report Scope
 
 `ring.size` / `--size` defines the shared face-size search universe. Ring and quasi-cage detection support 4/5/6/7. Cage detection intentionally uses only the 4/5/6 intersection of that universe.
@@ -828,7 +833,7 @@ Guest residence is calculated as contiguous observation episodes within a persis
 
 ### Analyze integration
 
-Every compact Analyze render fragment carries one tracking snapshot. Finalization consumes snapshots once with `TrackingAccumulator`; it does not retain all `FrameResult` objects. For a complete contiguous selected-frame sequence, Analyze writes `track_state.json` and six normalized CSV tables under `track/`, then atomically rewrites cage-center (`C`) and cage-membership (`M`) TSV records to persistent IDs. This applies to the default SQQ-Py and SQQ-CPP presets because both select `sqq-render`. A partial/failed fragment sequence is never silently compressed into a continuous trajectory; persistent state is skipped with a diagnostic while already valid per-frame scientific outputs retain their original identity.
+Analyze has a dedicated tracking sink independent of optional rendering. It converts each successful `FrameResult` immediately to a compact snapshot and feeds one `TrackingAccumulator` per topology group; it does not retain all frame results. For every complete selected-frame sequence, Analyze writes `track_state.json` and six normalized CSV tables under `track/`, whether or not `sqq-render` is selected. When rendering is enabled, the completed persistent-ID result is passed to `RenderSession`, which atomically rewrites cage-center (`C`) and cage-membership (`M`) TSV records before publication. A failed frame never gets silently compressed out of a continuous trajectory: that topology group's persistent state is skipped with a diagnostic while already valid per-frame scientific outputs remain available.
 
 The versioned JSON state contains frame stamps, configuration, tracks/observations, and events. Schema version 2 is written; version 1 can be migrated on read. A future matching configuration cannot be retroactively applied in `--source` mode because the assignments have already been made; Track reports the stored settings.
 
@@ -914,7 +919,7 @@ sqq_render/
   sqq_cage.vmd.tcl          # VMD loader and interactive commands
 ```
 
-When `sqq-render` is selected and the chosen frames form a complete sequence, the same result root also owns the following tracking state and six CSV tables. Both SQQ-Py and SQQ-CPP defaults select `sqq-render`:
+Every completed Analyze sequence owns the following tracking state and six CSV tables independently of `sqq-render`:
 
 ```text
 track/
@@ -931,7 +936,7 @@ For 2-26 topology groups, the requested root owns the batch manifest and each `r
 
 For more than 26 topology groups, output normalization is replaced by the information-only safety selection for the complete run. The root contains `sqq_config_resolved.yaml` plus `info/*_info.md`; no group directories, summaries, detail CSV, GRO, or `sqq_render/` package is produced. The root manifest records the detected group count, source assignments, warning, requested output types, and effective information-only selection.
 
-The four files in `sqq_render/` are one indivisible visualization package when `sqq-render` is selected. `sqq_cage.gro` contains one standard GRO block: the stable atom topology and coordinates/box of the first selected render frame. YAML `render.atom_scope` defaults to `full`, so this topology and every XTC frame contain all normalized input-frame atoms in original order: water hydrogens, complete guests, additives, environment/wall components, and other retained atoms. `compact` selects only water oxygens and complete guests. Wrapped coordinates are preserved without PBC reimaging. `sqq_cage.xtc` stores coordinates and orthorhombic boxes for every selected render frame with physical times when available. `sqq_cage.membership.tsv` is a sparse typed manifest: `F` records identify each render/source frame and time; `C` records store each cage center, wrapped into the primary orthorhombic box in nm and then converted to angstrom; `G` records map every rendered guest atom to its complete molecule group; `M` records preserve atom-level cage/guest membership plus cage type and optional cage/phase/domain/cluster IDs; and `P` records map rendered atom indices to component role and residue name. Large component groups are emitted as bounded repeated `P` records rather than one unbounded TSV field. Atoms without cage membership are absent only from `M`; full-scope atoms remain present in every XTC frame and are classified through `P`. Multiple memberships and complete multi-atom guest groups are retained rather than flattened. Finalization validates stable atom identity/order, constructs persistent cage IDs, and atomically replaces the four destination files from run-private fragments. Analyze and raw Track share this writer under both engines; source Track inherits the imported bundle's topology and atom scope.
+The four files in `sqq_render/` are one indivisible visualization package when `sqq-render` is selected. `sqq_cage.gro` contains one standard GRO block: the stable atom topology and coordinates/box of the first selected render frame. YAML `render.atom_scope` defaults to `full`, so this topology and every XTC frame contain all normalized input-frame atoms in original order: water hydrogens, complete guests, additives, environment/wall components, and other retained atoms. `compact` selects only water oxygens and complete guests. Wrapped coordinates are preserved without PBC reimaging. `sqq_cage.xtc` stores coordinates and orthorhombic boxes for every selected render frame with physical times when available. `sqq_cage.membership.tsv` is a sparse typed manifest: `F` records identify each render/source frame and time; `C` records store each cage center, wrapped into the primary orthorhombic box in nm and then converted to angstrom; `G` records map every rendered guest atom to its complete molecule group; `M` records preserve atom-level cage/guest membership plus cage type and optional cage/phase/domain/cluster IDs; and `P` records map rendered atom indices to component role and residue name. Large component groups are emitted as bounded repeated `P` records rather than one unbounded TSV field. Atoms without cage membership are absent only from `M`; full-scope atoms remain present in every XTC frame and are classified through `P`. Multiple memberships and complete multi-atom guest groups are retained rather than flattened. Finalization validates stable atom identity/order, applies the already completed persistent-ID result when available, and atomically replaces the four destination files from run-private fragments. Analyze and raw Track share this writer under both engines; source Track inherits the imported bundle's topology and atom scope.
 
 Every newly generated Analyze Tcl embeds a comment-only JSON render-package manifest between `SQQ-RENDER-MANIFEST-BEGIN` and `SQQ-RENDER-MANIFEST-END`. It records `schema`, package `kind`, and a general list of actual file `role`, relative `path`, and `required` state. The manifest is stored inside `sqq_cage.vmd.tcl`, so the package remains four files. Tcl path declarations and manifest entries are generated from the same filename arguments.
 

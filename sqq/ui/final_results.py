@@ -16,13 +16,11 @@ from pathlib import Path
 from typing import Any, TextIO
 
 from .. import __version__
-
-
-PUBLICATION_LINE = (
-    "Publication: J. Pang & Q. Sun, SQQ: Python Joint Toolkit for "
-    "Water-Shell Topology Analysis, in submission."
+from ..citation import (
+    GITHUB_LINE,
+    PUBLICATION_LINE,
+    build_citation_recommendation,
 )
-GITHUB_LINE = "Github     : https://github.com/pimooni/sqq"
 
 _ANSI_BOLD = "\x1b[1m"
 _ANSI_RESET = "\x1b[0m"
@@ -87,14 +85,14 @@ def render_final_results(
     _add_field(lines, "Run status", totals["status"])
     _add_field(lines, "Result path", totals["result_path"])
 
-    sentence = build_citation_sentence(run_info, config, statistics)
+    citation = build_citation_recommendation(run_info, config, statistics)
     lines.extend(
         [
             "",
             _bold("Citation Recommendation", ansi),
-            _bold(sentence, ansi),
-            PUBLICATION_LINE,
-            GITHUB_LINE,
+            _bold(citation.sentence, ansi),
+            citation.publication,
+            citation.github,
         ]
     )
     return "\n".join(lines)
@@ -156,134 +154,8 @@ def build_citation_sentence(
     config: Mapping[str, Any],
     statistics: Mapping[str, Any],
 ) -> str:
-    """Build a deterministic recommendation from work that actually ran.
-
-    An enabled search is described as an analysis even when it found zero
-    matching objects.  The sentence intentionally never claims that a
-    structure was identified.  ``executed_features`` may be a mapping of
-    feature names to booleans or an authoritative iterable of feature names.
-    """
-    _require_mapping("run_info", run_info)
-    _require_mapping("config", config)
-    _require_mapping("statistics", statistics)
-
-    totals = _result_totals(run_info, statistics)
-    completed_scientific_work = totals["successful"] > 0
-    features: list[str] = []
-
-    if _feature_ran(
-        "water_network",
-        run_info,
-        config,
-        statistics,
-        default=completed_scientific_work and _configured_enabled(config, ("graph", "enabled"), True),
-    ):
-        features.append("water-network analysis")
-    if _feature_ran(
-        "ring_topology",
-        run_info,
-        config,
-        statistics,
-        aliases=("ring", "rings"),
-        default=completed_scientific_work and _configured_enabled(config, ("ring", "enabled"), True),
-    ):
-        features.append("ring-topology analysis")
-
-    cage_ran = _feature_ran(
-        "cage_topology",
-        run_info,
-        config,
-        statistics,
-        aliases=("cage", "cages"),
-        default=completed_scientific_work and _configured_enabled(config, ("cage", "enabled"), True),
-    )
-    if cage_ran:
-        features.append("cage-topology analysis")
-
-    if _feature_ran(
-        "half_cage",
-        run_info,
-        config,
-        statistics,
-        default=completed_scientific_work
-        and _effective_enabled(run_info, config, "find_half", "half_cage"),
-    ):
-        features.append("half-cage analysis")
-    if _feature_ran(
-        "quasi_cage",
-        run_info,
-        config,
-        statistics,
-        default=completed_scientific_work
-        and _effective_enabled(run_info, config, "find_quasi", "quasi_cage"),
-    ):
-        features.append("quasi-cage analysis")
-    if _feature_ran(
-        "cage_isomer",
-        run_info,
-        config,
-        statistics,
-        aliases=("isomer", "cage_isomers"),
-        default=cage_ran,
-    ):
-        features.append("cage-isomer analysis")
-    if _feature_ran(
-        "cage_occupancy",
-        run_info,
-        config,
-        statistics,
-        aliases=("occupancy",),
-        default=completed_scientific_work
-        and _explicit_or_inferred_occupancy(run_info, statistics),
-    ):
-        features.append("cage-occupancy analysis")
-
-    parameters = _executed_order_parameters(run_info, config, statistics)
-    if completed_scientific_work and parameters:
-        features.append(f"{_slash_join(parameters)} order-parameter analysis")
-
-    if _feature_ran(
-        "hydrate_phase_domain",
-        run_info,
-        config,
-        statistics,
-        aliases=("hydrate_cluster", "cluster", "phase_domain"),
-        default=completed_scientific_work
-        and _effective_enabled(run_info, config, "find_cluster", "hydrate_cluster"),
-    ):
-        features.append("hydrate phase/domain analysis")
-
-    if _feature_ran(
-        "vmd_rendering",
-        run_info,
-        config,
-        statistics,
-        aliases=("sqq_render", "render", "vmd"),
-        default=_completed_render_output(run_info, config, statistics, totals["status"]),
-    ):
-        features.append("VMD rendering")
-    if _feature_ran(
-        "cage_tracking",
-        run_info,
-        config,
-        statistics,
-        aliases=("tracking", "track"),
-        default=completed_scientific_work and _future_feature_enabled(config, "track"),
-    ):
-        features.append("cage-tracking analysis")
-    if _feature_ran(
-        "cage_lifetime",
-        run_info,
-        config,
-        statistics,
-        aliases=("lifetime", "lifetimes"),
-        default=completed_scientific_work and _future_feature_enabled(config, "lifetime"),
-    ):
-        features.append("cage-lifetime analysis")
-
-    if not features:
-        return "Please cite SQQ when using results from this run."
-    return f"Please cite SQQ when using results from this run, including {_natural_join(features)}."
+    """Return the shared feature-derived citation sentence."""
+    return build_citation_recommendation(run_info, config, statistics).sentence
 
 
 def _append_basic_information(lines: list[str], run_info: Mapping[str, Any]) -> None:
@@ -318,16 +190,40 @@ def _append_configuration(
     engine = _engine_name(run_info, config)
     _add_field(lines, "SQQ version", _first(_lookup(run_info, "sqq_version"), __version__))
     _add_field(lines, "SQQ engine", engine)
+    _add_present_field(lines, "Engine selector", _lookup(run_info, "engine_selector"))
+    _add_present_field(lines, "Profile", _lookup(run_info, "profile"))
     _add_present_field(lines, "Config file", _lookup(run_info, "config_file"))
     _add_present_field(lines, "Topology", _lookup(run_info, "topology"))
     _add_present_field(lines, "Sampling interval", _lookup(run_info, "sampling_interval"))
 
     group_modes = _lookup(run_info, "graph_mode_by_group")
     if isinstance(group_modes, Mapping) and len(group_modes) > 1:
+        group_reasons = _lookup(run_info, "graph_mode_reason_by_group")
         for label, mode in group_modes.items():
             _add_field(lines, f"Graph mode ({label})", mode)
+            if isinstance(group_reasons, Mapping):
+                _add_present_field(
+                    lines,
+                    f"Graph reason ({label})",
+                    group_reasons.get(label, _MISSING),
+                )
     else:
         _add_present_field(lines, "Graph mode", _graph_mode(run_info, config))
+        _add_present_field(lines, "Graph mode reason", _lookup(run_info, "graph_mode_reason"))
+
+    adjustments = _lookup(run_info, "resolution_adjustments")
+    if isinstance(adjustments, Iterable) and not isinstance(adjustments, (str, bytes, Mapping)):
+        for adjustment in adjustments:
+            if not isinstance(adjustment, Mapping):
+                continue
+            parameter = adjustment.get("parameter", "parameter")
+            effective = adjustment.get("effective")
+            reason = adjustment.get("reason", "automatic adjustment")
+            value = str(parameter)
+            if effective is not None:
+                value += f" -> {effective}"
+            value += f" [{reason}]"
+            _add_field(lines, "Adjustment", value)
 
     _add_present_field(
         lines,
@@ -592,71 +488,6 @@ def _result_totals(
     }
 
 
-def _feature_ran(
-    name: str,
-    run_info: Mapping[str, Any],
-    config: Mapping[str, Any],
-    statistics: Mapping[str, Any],
-    *,
-    aliases: tuple[str, ...] = (),
-    default: bool,
-) -> bool:
-    del config  # Kept in the signature so every feature resolver has one contract.
-    names = tuple(_normalize_feature_name(item) for item in (name, *aliases))
-    executed = _lookup(statistics, "executed_features")
-    if isinstance(executed, Mapping):
-        normalized = {
-            _normalize_feature_name(str(key)): value for key, value in executed.items()
-        }
-        for candidate in names:
-            if candidate in normalized:
-                return _as_bool(normalized[candidate], False)
-        return False
-    elif executed is not _MISSING and not isinstance(executed, (str, bytes)):
-        try:
-            normalized_names = {_normalize_feature_name(str(item)) for item in executed}
-        except TypeError as exc:
-            raise TypeError("statistics['executed_features'] must be a mapping or iterable") from exc
-        return any(candidate in normalized_names for candidate in names)
-
-    direct_names = tuple(
-        item
-        for candidate in names
-        for item in (candidate, f"{candidate}_analyzed", f"{candidate}_executed")
-    )
-    direct = _lookup(statistics, *direct_names)
-    if direct is not _MISSING:
-        return _as_bool(direct, False)
-    run_value = _lookup(run_info, *direct_names)
-    if run_value is not _MISSING:
-        return _as_bool(run_value, False)
-    return bool(default)
-
-
-def _executed_order_parameters(
-    run_info: Mapping[str, Any],
-    config: Mapping[str, Any],
-    statistics: Mapping[str, Any],
-) -> tuple[str, ...]:
-    explicit = _lookup(statistics, "executed_order_parameters", "order_parameters_executed")
-    if explicit is not _MISSING:
-        return _tokens(explicit)
-    feature_set = _lookup(statistics, "executed_features")
-    if isinstance(feature_set, Mapping):
-        normalized = {
-            _normalize_feature_name(str(key))
-            for key, enabled in feature_set.items()
-            if _as_bool(enabled, False)
-        }
-        if not normalized & {"order_parameter", "order_parameters"}:
-            return ()
-    elif feature_set is not _MISSING:
-        normalized = {_normalize_feature_name(str(item)) for item in feature_set}
-        if not normalized & {"order_parameter", "order_parameters"}:
-            return ()
-    return _selected_order_parameters(run_info, config)
-
-
 def _selected_order_parameters(
     run_info: Mapping[str, Any],
     config: Mapping[str, Any],
@@ -684,49 +515,6 @@ def _selected_outputs(
     )
 
 
-def _completed_render_output(
-    run_info: Mapping[str, Any],
-    config: Mapping[str, Any],
-    statistics: Mapping[str, Any],
-    status: str,
-) -> bool:
-    completed = _first(
-        _lookup(statistics, "completed_outputs", "written_outputs"),
-        _lookup(run_info, "completed_outputs", "written_outputs"),
-    )
-    if completed is not _MISSING:
-        outputs = {_normalize_feature_name(item) for item in _tokens(completed)}
-        return bool(outputs & {"sqq_render", "vmd", "vmd_render", "vmd_rendering"})
-    if status not in {"completed", "completed with failures", "partial"}:
-        return False
-    outputs = {_normalize_feature_name(item) for item in _selected_outputs(run_info, config)}
-    return "sqq_render" in outputs
-
-
-def _explicit_or_inferred_occupancy(
-    run_info: Mapping[str, Any],
-    statistics: Mapping[str, Any],
-) -> bool:
-    explicit = _first(
-        _lookup(statistics, "occupancy_evaluated", "cage_occupancy_evaluated"),
-        _lookup(run_info, "occupancy_evaluated", "cage_occupancy_evaluated"),
-    )
-    if explicit is not _MISSING:
-        return _as_bool(explicit, False)
-    guests = _first(
-        _lookup(statistics, "guest_molecules", "guest_count", "n_guests", "has_selected_guests"),
-        _lookup(run_info, "guest_molecules", "guest_count", "n_guests", "has_selected_guests"),
-    )
-    if guests is _MISSING:
-        return False
-    if isinstance(guests, bool):
-        return guests
-    try:
-        return float(guests) > 0
-    except (TypeError, ValueError):
-        return _as_bool(guests, False)
-
-
 def _effective_enabled(
     run_info: Mapping[str, Any],
     config: Mapping[str, Any],
@@ -737,25 +525,6 @@ def _effective_enabled(
     if run_value is not _MISSING:
         return _as_bool(run_value, False)
     return _as_bool(_config_value(config, config_section, "enabled"), False)
-
-
-def _future_feature_enabled(config: Mapping[str, Any], feature: str) -> bool:
-    direct = _config_value(config, feature, "enabled")
-    if direct is not _MISSING:
-        return _as_bool(direct, False)
-    track = _config_value(config, "track", feature)
-    if isinstance(track, Mapping):
-        return _as_bool(_lookup(track, "enabled"), False)
-    return _as_bool(track, False)
-
-
-def _configured_enabled(
-    config: Mapping[str, Any],
-    path: tuple[str, str],
-    default: bool,
-) -> bool:
-    value = _config_value(config, *path)
-    return default if value is _MISSING else _as_bool(value, default)
 
 
 def _engine_name(run_info: Mapping[str, Any], config: Mapping[str, Any]) -> str:
@@ -817,36 +586,6 @@ def _tokens(value: Any) -> tuple[str, ...]:
 
 def _display_tokens(values: tuple[str, ...]) -> str:
     return ", ".join(values) if values else "none"
-
-
-def _slash_join(values: tuple[str, ...]) -> str:
-    return "/".join(_order_parameter_label(value) for value in values)
-
-
-def _order_parameter_label(value: str) -> str:
-    text = value.strip()
-    lowered = text.lower().replace("_", "")
-    if lowered.startswith("q") and lowered[1:].isdigit():
-        return f"Q{lowered[1:]}"
-    if lowered.startswith("mcg"):
-        return lowered.upper()
-    if lowered.startswith("dhop"):
-        return lowered.upper()
-    if lowered in {"f3", "f4"}:
-        return lowered.upper()
-    return text
-
-
-def _natural_join(values: list[str]) -> str:
-    if len(values) == 1:
-        return values[0]
-    if len(values) == 2:
-        return f"{values[0]} and {values[1]}"
-    return f"{', '.join(values[:-1])}, and {values[-1]}"
-
-
-def _normalize_feature_name(value: Any) -> str:
-    return re.sub(r"[^a-z0-9]+", "_", str(value).strip().lower()).strip("_")
 
 
 def _format_seconds(value: float | None) -> str:

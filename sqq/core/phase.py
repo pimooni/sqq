@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-"""Fast face-graph classification of hydrate clusters and phase domains."""
+"""Face-graph classification of hydrate phases and domains."""
 
 from collections import Counter, defaultdict, deque
 from dataclasses import dataclass, replace

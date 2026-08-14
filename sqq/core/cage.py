@@ -64,17 +64,13 @@ def find_cages(
     max_boundary_candidates: int = 8,
     occupancy_radius_nm: float = 0.5,
     occupancy_mode: str = "polyhedron",
-    fast_closure: bool = False,
-    fast_closure_max_states: int = 20000,
     scientific_validation: bool = False,
     max_face_planarity_rms_nm: float = 0.06,
     max_face_edge_cv: float = 0.35,
     min_cage_volume_nm3: float = 1.0e-6,
     topology_index: RingTopologyIndex | None = None,
-    warnings: list[str] | None = None,
 ) -> list[Cage]:
     """Find every valid closed cage in the configured face-size scope."""
-    del fast_closure, fast_closure_max_states, warnings
     if not enabled:
         return []
 

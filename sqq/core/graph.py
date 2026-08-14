@@ -3,14 +3,15 @@ from __future__ import annotations
 """Build the water graph used by rings, open cage patches, cages, and order metrics."""
 
 from collections import defaultdict
+from collections.abc import Iterable
 from itertools import combinations
 from math import cos, radians
 from pathlib import Path
-import re
 
 import numpy as np
 
 from ..models import Atom, GraphResult, Water
+from ..config.resolve import resolve_graph_mode
 from .pbc import minimum_image
 
 
@@ -22,13 +23,17 @@ def build_water_graph(
     oo_cutoff_nm: float,
     hbond_distance_nm: float,
     hbond_angle_deg: float,
-    pair_file: str | Path | None = None,
-    pair_id: str = "resid",
+    pair_edges: Iterable[tuple[int, int]] | None = None,
 ) -> GraphResult:
     """Construct graph edges between water oxygen nodes."""
-    mode = resolve_bond_mode(bond_mode, waters, pair_file)
+    if str(bond_mode).strip().lower() == "pairs":
+        if pair_edges is None:
+            raise ValueError("bond_mode=pairs requires normalized oxygen pair edges.")
+        mode = "pairs"
+    else:
+        mode = resolve_bond_mode(bond_mode, waters)
     if mode == "pairs":
-        edges = read_pair_edges(Path(pair_file), atoms, waters, pair_id)  # type: ignore[arg-type]
+        edges = _canonical_oxygen_edges(pair_edges, waters)
         adjacency = adjacency_from_edges(waters, edges)
         return GraphResult(mode=mode, edges=edges, adjacency=adjacency)
 
@@ -53,14 +58,8 @@ def build_water_graph(
 
 
 def resolve_bond_mode(bond_mode: str, waters: list[Water], pair_file: str | Path | None = None) -> str:
-    """Resolve auto mode from available hydrogen atoms."""
-    if bond_mode not in {"auto", "hbond", "oo", "pairs"}:
-        raise ValueError(f"Unsupported bond_mode: {bond_mode}")
-    if bond_mode == "auto":
-        return "hbond" if waters and all(water.hydrogens for water in waters) else "oo"
-    if bond_mode == "pairs" and pair_file is None:
-        raise ValueError("bond_mode=pairs requires graph.pair_file or --pair.")
-    return bond_mode
+    """Return the effective graph mode under the shared resolution rule."""
+    return resolve_graph_mode(bond_mode, waters, pair_file).effective
 
 
 def adjacency_from_edges(waters: list[Water], edges: list[tuple[int, int]]) -> dict[int, set[int]]:
@@ -72,50 +71,30 @@ def adjacency_from_edges(waters: list[Water], edges: list[tuple[int, int]]) -> d
     return adjacency
 
 
-def read_pair_edges(path: Path, atoms: list[Atom], waters: list[Water], pair_id: str) -> list[tuple[int, int]]:
-    """Read a user-provided water-neighbor pair file."""
-    id_map = water_id_map(atoms, waters, pair_id)
-    edges: set[tuple[int, int]] = set()
-    for lineno, raw_line in enumerate(path.read_text(encoding="utf-8-sig").splitlines(), start=1):
-        line = raw_line.split("#", 1)[0].strip()
-        if not line:
-            continue
-        parts = [part for part in re.split(r"[\s,;]+", line) if part]
-        if len(parts) < 2:
-            raise ValueError(f"Invalid pair line {lineno} in {path}: {raw_line!r}")
+def _canonical_oxygen_edges(
+    pair_edges: Iterable[tuple[int, int]], waters: list[Water]
+) -> list[tuple[int, int]]:
+    """Enforce the scientific-kernel contract for pair graph endpoints."""
+    oxygen_indices = {int(water.oxygen) for water in waters}
+    normalized: set[tuple[int, int]] = set()
+    for edge_number, edge in enumerate(pair_edges, start=1):
         try:
-            left = int(parts[0])
-            right = int(parts[1])
-        except ValueError as exc:
-            raise ValueError(f"Pair ids must be integers at {path}:{lineno}") from exc
-        if left not in id_map or right not in id_map:
-            raise ValueError(f"Pair id not found at {path}:{lineno}: {left}, {right}")
-        a, b = sorted((id_map[left], id_map[right]))
-        if a != b:
-            edges.add((a, b))
-    return sorted(edges)
-
-
-def water_id_map(atoms: list[Atom], waters: list[Water], pair_id: str) -> dict[int, int]:
-    """Map unique external pair ids to internal oxygen node indices."""
-    if pair_id == "resid":
-        identifiers = ((water.resid, water.oxygen) for water in waters)
-    elif pair_id == "oxygen_index":
-        identifiers = ((water.oxygen, water.oxygen) for water in waters)
-    elif pair_id == "atomid":
-        identifiers = ((atoms[water.oxygen].atomid, water.oxygen) for water in waters)
-    else:
-        raise ValueError("graph.pair_id must be one of: resid, oxygen_index, atomid")
-
-    id_map: dict[int, int] = {}
-    for identifier, oxygen in identifiers:
-        if identifier in id_map and id_map[identifier] != oxygen:
+            left, right = edge
+        except (TypeError, ValueError) as exc:
             raise ValueError(
-                f"graph.pair_id={pair_id!r} is not unique among selected waters; "
-                "use oxygen_index or atomid."
+                f"pair_edges edge {edge_number} must contain exactly two oxygen atom indices."
+            ) from exc
+        left, right = int(left), int(right)
+        unknown = [value for value in (left, right) if value not in oxygen_indices]
+        if unknown:
+            values = ", ".join(str(value) for value in unknown)
+            raise ValueError(
+                "pair_edges must contain selected-water oxygen atom indices only; "
+                f"edge {edge_number} contains {values}."
             )
-        id_map[identifier] = oxygen
-    return id_map
+        if left != right:
+            normalized.add(tuple(sorted((left, right))))
+    return sorted(normalized)
 
 
 def iter_water_pairs(atoms: list[Atom], waters: list[Water], box: np.ndarray | None, cutoff: float):

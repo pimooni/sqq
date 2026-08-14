@@ -1,15 +1,16 @@
-from __future__ import annotations
-
 """DHOP30/DHOP35 planar-water hydrate order parameters."""
+
+from __future__ import annotations
 
 from collections import defaultdict
 from typing import Any
 
 import numpy as np
 
-from .pbc import minimum_image
-from .spatial import self_cutoff_pairs
-from ..models import ClusterOrderValue, Frame, Water
+from .common import connected_components
+from ..pbc import minimum_image
+from ..spatial import self_cutoff_pairs
+from ...models import ClusterOrderValue, Frame, Water
 
 
 def compute_dhop_order(
@@ -113,7 +114,7 @@ def _cluster_value(
     tagged = set(seeds)
     for index in seeds:
         tagged.update(adjacency.get(index, set()))
-    components = _components(tagged, adjacency)
+    components = connected_components(tagged, adjacency)
     largest = min(components, key=lambda item: (-len(item), tuple(item))) if components else ()
     members = tuple(waters[index].oxygen for index in largest)
     return ClusterOrderValue(
@@ -124,19 +125,4 @@ def _cluster_value(
     )
 
 
-def _components(nodes: set[int], adjacency: dict[int, set[int]]) -> list[tuple[int, ...]]:
-    remaining = set(nodes)
-    components: list[tuple[int, ...]] = []
-    while remaining:
-        root = min(remaining)
-        stack = [root]
-        remaining.remove(root)
-        component: list[int] = []
-        while stack:
-            node = stack.pop()
-            component.append(node)
-            for neighbor in sorted(adjacency.get(node, set()) & remaining, reverse=True):
-                remaining.remove(neighbor)
-                stack.append(neighbor)
-        components.append(tuple(sorted(component)))
-    return components
+__all__ = ["compute_dhop_order", "planar_pair_event_counts"]

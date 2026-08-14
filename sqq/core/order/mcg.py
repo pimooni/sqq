@@ -1,16 +1,17 @@
-from __future__ import annotations
-
 """Mutually coordinated guest (MCG) hydrate order parameters."""
+
+from __future__ import annotations
 
 from collections import defaultdict
 from typing import Any
 
 import numpy as np
 
-from .geometry import pbc_aware_centroid
-from .pbc import minimum_image
-from .spatial import cross_cutoff_pairs, self_cutoff_pairs
-from ..models import ClusterOrderValue, Frame, Guest, Water
+from .common import connected_components
+from ..geometry import pbc_aware_centroid
+from ..pbc import minimum_image
+from ..spatial import cross_cutoff_pairs, self_cutoff_pairs
+from ...models import ClusterOrderValue, Frame, Guest, Water
 
 
 def compute_mcg_order(
@@ -90,7 +91,7 @@ def _cluster_value(
         adjacency[first].add(second)
         adjacency[second].add(first)
     eligible = {node for node, neighbors in adjacency.items() if len(neighbors) >= min_degree}
-    components = _components(eligible, adjacency)
+    components = connected_components(eligible, adjacency)
     largest = min(components, key=lambda item: (-len(item), tuple(item))) if components else ()
     original_members = tuple(selected[index][0] for index in largest)
     return ClusterOrderValue(
@@ -101,20 +102,4 @@ def _cluster_value(
     )
 
 
-def _components(nodes: set[int], adjacency: dict[int, set[int]]) -> list[tuple[int, ...]]:
-    remaining = set(nodes)
-    components: list[tuple[int, ...]] = []
-    while remaining:
-        root = min(remaining)
-        stack = [root]
-        remaining.remove(root)
-        component: list[int] = []
-        while stack:
-            node = stack.pop()
-            component.append(node)
-            neighbors = sorted(adjacency.get(node, set()) & remaining, reverse=True)
-            for neighbor in neighbors:
-                remaining.remove(neighbor)
-                stack.append(neighbor)
-        components.append(tuple(sorted(component)))
-    return components
+__all__ = ["compute_mcg_order"]

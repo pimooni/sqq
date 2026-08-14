@@ -1,5 +1,56 @@
 # SQQ Update Notes
 
+## Version 0.5.2
+
+### Short Summary
+
+Version 0.5.2 reorganizes SQQ into explicit configuration, model, scientific-core, workflow, runtime, reporting, rendering, and UI layers. Analyze and Track now share one typed execution plan and runner; Track state is independent of optional VMD output; reporting and render publication have single owners; and the supported Python API is explicit. Confirmed compatibility, worker-shutdown, configuration, pair-identity, and packaging problems are fixed. Python, configuration schema, CMake, and native-core metadata are synchronized at `0.5.2`, dated Aug 10, 2026.
+
+### Main Changes
+
+1. Explicit package architecture
+   - Splits configuration, public models, scientific algorithms, command workflows, execution runtime, reporting, rendering, and terminal UI into responsibility-specific packages.
+   - Keeps SQQ-Py and SQQ-CPP as peer frame-analysis backends with one normalized `Frame`/`FrameResult` contract.
+   - Removes the former monolithic compatibility modules instead of retaining duplicate implementations.
+   - Moves F3/F4, Steinhardt Q, MCG, and DHOP into `core/order`; renames the half/quasi and hydrate-phase modules to match their responsibilities.
+
+2. Unified Analyze and Track execution
+   - Uses one `RunPlan`, frame-task contract, execution policy, and `AnalysisRunner` for single files, grouped GRO inputs, stacked GRO, XTC/TRR, and LAMMPS.
+   - Uses ordered serial/thread/process execution, non-blocking progress events, bounded in-flight work, and deterministic cleanup after a fatal worker error.
+   - Streams raw Track results into the temporal accumulator without retaining every `FrameResult` in long trajectories.
+   - Builds persistent Track state and its six normalized CSV tables independently of `sqq-render`; enabling or disabling VMD output no longer changes tracking availability.
+
+3. Reporting and rendering ownership
+   - Separates logical report tables, CSV/XLSX writers, frame info, transactions, and dashboard construction under `io/reporting`.
+   - Publishes Analyze and Track visualization data only through the render service as an atomic four-file GRO/XTC/membership-TSV/Tcl package.
+   - Moves Track target render discovery, membership conversion, naming, Tcl composition, and publication under `io/render`, while `io/tracking` owns only state and tabular data.
+   - Embeds the shared Tcl template in `io/render/tcl_template.py`; generated VMD scripts and command grammar remain unchanged.
+
+4. Configuration and public API
+   - Splits defaults, migration, presets, capability normalization, overrides, validation, resolution, and serialization into explicit configuration modules.
+   - Records the requested selector, effective engine/profile, graph-mode reason, and every compatibility adjustment in the resolved YAML.
+   - Generates the complete order-parameter choices comment from the same source used by validation and help output.
+   - Adds supported `sqq.load_config`, `sqq.read_frames`, and `sqq.analyze_frame` Python entry points plus typed configuration, input, and analysis exceptions.
+
+5. Confirmed bug and compatibility fixes
+   - Removes a Track f-string construct that prevented Python 3.10/3.11 CLI import and extends wheel startup checks to import the CLI and execute version/help commands.
+   - Rejects mixed or incomplete water-hydrogen topology in automatic graph mode instead of silently reporting a pending or ambiguous effective mode.
+   - Resolves pair-file identifiers once to oxygen atom indices and passes the same explicit edge set to both engines; the native core no longer guesses whether an integer is an atom index or water ordinal.
+   - Makes accelerated spatial pair output unique and deterministic, matching the fallback contract.
+   - Replaces Python ring-search integer bitmasks with bounded path membership while preserving canonical ring results.
+   - Removes inactive fast-closure settings and records legacy keys only as ignored migration adjustments.
+
+6. Version and native packaging
+   - Synchronizes `pyproject.toml`, Python package metadata, configuration schema, CMake project, native-core version, and wheel validation at `0.5.2`.
+   - Keeps native source in source distributions, installs only the compiled extension in platform wheels, and excludes local validation data from published packages.
+
+### Compatibility and Result Impact
+
+- Valid graph, ring, half/quasi-cage, closed-cage, phase/domain, occupancy, order-parameter, and temporal-matching definitions are unchanged.
+- Scientific regression tables remain unchanged for valid inputs. Inputs with ambiguous automatic graph topology or ambiguous pair identifiers now fail explicitly instead of selecting an unintended interpretation.
+- Report values, four-file render-package layout, VMD commands, and generated Tcl behavior remain compatible.
+- Existing YAML is migrated. Removed fast-closure keys are ignored and recorded; SQQ-CPP still normalizes unsupported half/quasi options rather than failing solely because an older general-purpose YAML enabled them.
+
 ## Version 0.5.1
 
 ### Short Summary

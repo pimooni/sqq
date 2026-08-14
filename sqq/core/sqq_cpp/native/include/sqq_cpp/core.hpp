@@ -39,6 +39,7 @@ struct FrameInput {
     std::vector<WaterInput> waters;
     std::vector<GuestInput> guests;
     std::optional<Box> box;
+    // Endpoints are selected-water oxygen indices into positions; never water ordinals.
     std::vector<std::pair<int, int>> pair_edges;
 };
 

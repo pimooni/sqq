@@ -7,7 +7,7 @@ build-backend = "scikit_build_core.build"
 
 [project]
 name = "sqq"
-version = "0.5.1"
+version = "0.5.2"
 description = "Shell Quant Qualifier for water-shell topology analysis in MD trajectories."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -51,7 +51,6 @@ cmake.build-type = "Release"
 wheel.packages = ["sqq"]
 wheel.exclude = ["sqq/core/sqq_cpp/native/**"]
 sdist.include = [
-  "sqq/io/render/sqq_cage.tcl",
   "sqq/core/sqq_cpp/native/CMakeLists.txt",
   "sqq/core/sqq_cpp/native/include/**",
   "sqq/core/sqq_cpp/native/src/**",

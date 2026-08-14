@@ -1,5 +1,24 @@
-"""Execution helpers shared by Analyze workflows and worker processes."""
+"""Lightweight runtime contracts shared by Analyze, Track, and workers."""
 
-from .frame import process_frame
+from .contracts import (
+    ExecutionPolicy,
+    FrameTask,
+    InputKind,
+    RunContext,
+    RunPlan,
+    TaskOutcome,
+    TaskStatus,
+)
+from .output_lock import OutputLock, output_lock
 
-__all__ = ["process_frame"]
+__all__ = [
+    "ExecutionPolicy",
+    "FrameTask",
+    "InputKind",
+    "OutputLock",
+    "RunContext",
+    "RunPlan",
+    "TaskOutcome",
+    "TaskStatus",
+    "output_lock",
+]

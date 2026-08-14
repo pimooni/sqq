@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-"""State, normalized tables, and target bundles for cage tracking."""
+"""State, normalized tables, and target membership data for cage tracking."""
 
 from collections import Counter
 import csv
@@ -8,30 +8,12 @@ import json
 import os
 from pathlib import Path
 import re
-import shutil
 from typing import Iterable, Mapping, Sequence
 from uuid import uuid4
 
 import numpy as np
 
-from .render import (
-    SQQ_CAGE_GRO_NAME,
-    SQQ_CAGE_MEMBERSHIP_NAME,
-    SQQ_CAGE_XTC_NAME,
-    SQQ_RENDER_DIRECTORY,
-    SQQ_RENDER_SCRIPT_NAME,
-    SqqCageBundle,
-    vmd_script_text,
-)
 from ..core.tracking import (
-    CageObservation,
-    CageTrack,
-    FrameStamp,
-    TargetSelection,
-    TargetSpec,
-    TrackEvent,
-    TrackingConfig,
-    TrackingResult,
     event_rows,
     guest_residence_rows,
     lifetime_distribution_rows,
@@ -40,15 +22,20 @@ from ..core.tracking import (
     population_rows,
     select_targets,
 )
+from ..models.tracking import (
+    CageObservation,
+    CageTrack,
+    FrameStamp,
+    TargetSelection,
+    TargetSpec,
+    TrackEvent,
+    TrackingConfig,
+    TrackingResult,
+)
 
 
 TRACK_DIRECTORY_NAME = "track"
 TRACK_STATE_NAME = "track_state.json"
-TRACK_RENDER_DIRECTORY = SQQ_RENDER_DIRECTORY
-TRACK_GRO_NAME = "sqq_track.gro"
-TRACK_XTC_NAME = "sqq_track.xtc"
-TRACK_MEMBERSHIP_NAME = "sqq_track.membership.tsv"
-TRACK_TCL_NAME = "sqq_track.vmd.tcl"
 
 _STATE_FORMAT = "SQQ track state"
 _STATE_VERSION = 2
@@ -177,15 +164,8 @@ _TABLE_SPECS = (
 
 __all__ = [
     "TRACK_DIRECTORY_NAME",
-    "TRACK_GRO_NAME",
-    "TRACK_MEMBERSHIP_NAME",
-    "TRACK_RENDER_DIRECTORY",
     "TRACK_STATE_NAME",
-    "TRACK_TCL_NAME",
-    "TRACK_XTC_NAME",
     "deserialize_tracking_result",
-    "discover_sqq_cage_bundle",
-    "discover_sqq_cage_gro",
     "discover_track_state",
     "read_tracking_result",
     "rewrite_membership_track_ids",
@@ -309,81 +289,6 @@ def discover_track_state(source: str | Path | None = None) -> Path:
     )
 
 
-def discover_sqq_cage_bundle(
-    source: str | Path | None = None,
-    *,
-    state_path: str | Path | None = None,
-) -> SqqCageBundle:
-    """Find the current underscore-named compact visualization bundle."""
-    roots: list[Path] = []
-    if source is not None:
-        root = Path(source)
-        if root.is_file():
-            root = root.parent
-        roots.extend((root / SQQ_RENDER_DIRECTORY, root))
-    if state_path is not None:
-        state = Path(state_path)
-        roots.extend(
-            (
-                state.parent / SQQ_RENDER_DIRECTORY,
-                state.parent.parent / SQQ_RENDER_DIRECTORY,
-            )
-        )
-    if source is None and state_path is None:
-        roots.extend(
-            (
-                Path.cwd() / SQQ_RENDER_DIRECTORY,
-                Path.cwd() / TRACK_DIRECTORY_NAME / SQQ_RENDER_DIRECTORY,
-            )
-        )
-    bundles: list[SqqCageBundle] = []
-    seen: set[str] = set()
-    for candidate in roots:
-        render_dir = candidate.resolve()
-        identity = os.path.normcase(str(render_dir))
-        if identity in seen:
-            continue
-        seen.add(identity)
-        gro = render_dir / SQQ_CAGE_GRO_NAME
-        xtc = render_dir / SQQ_CAGE_XTC_NAME
-        membership = render_dir / SQQ_CAGE_MEMBERSHIP_NAME
-        script = render_dir / SQQ_RENDER_SCRIPT_NAME
-        if all(path.is_file() for path in (gro, xtc, membership, script)):
-            bundles.append(
-                SqqCageBundle(
-                    gro_path=gro,
-                    script_path=script,
-                    frame_count=_membership_frame_count(membership),
-                    xtc_path=xtc,
-                    membership_path=membership,
-                    render_dir=render_dir,
-                )
-            )
-    if len(bundles) == 1:
-        return bundles[0]
-    if len(bundles) > 1:
-        raise ValueError(
-            "Multiple SQQ render bundles were found: "
-            + ", ".join(str(bundle.render_dir) for bundle in bundles)
-        )
-    raise FileNotFoundError(
-        f"Cannot find {SQQ_RENDER_DIRECTORY}/{{{SQQ_CAGE_GRO_NAME}, "
-        f"{SQQ_CAGE_XTC_NAME}, {SQQ_CAGE_MEMBERSHIP_NAME}, "
-        f"{SQQ_RENDER_SCRIPT_NAME}}}."
-    )
-
-
-def discover_sqq_cage_gro(
-    source: str | Path | None = None,
-    *,
-    state_path: str | Path | None = None,
-) -> Path:
-    bundle = discover_sqq_cage_bundle(source, state_path=state_path)
-    if bundle.gro_path is None:
-        raise FileNotFoundError("The SQQ render bundle has no topology GRO.")
-    return bundle.gro_path
-
-
 def target_directory_name(target: TargetSpec) -> str:
     if target.kind == "all":
         name = "all"
@@ -416,31 +321,13 @@ def write_tracking_tables(
 def write_target_selection(
     selection: TargetSelection,
     track_root: str | Path,
-    *,
-    source_bundle: SqqCageBundle,
 ) -> Path:
-    """Write one target and convert copied membership IDs to persistent IDs."""
+    """Write normalized tables and metadata for one Track target."""
     root = Path(track_root)
     directory = _safe_child(root, target_directory_name(selection.target))
     directory.mkdir(parents=True, exist_ok=True)
     write_tracking_tables(selection, directory)
     _atomic_write_text(directory / "track_info.md", _track_info_text(selection))
-
-    gro_source, xtc_source, membership_source = _required_render_paths(source_bundle)
-    render_dir = directory / TRACK_RENDER_DIRECTORY
-    render_dir.mkdir(parents=True, exist_ok=True)
-    _atomic_link_or_copy(gro_source, render_dir / TRACK_GRO_NAME)
-    _atomic_link_or_copy(xtc_source, render_dir / TRACK_XTC_NAME)
-    membership_target = render_dir / TRACK_MEMBERSHIP_NAME
-    _atomic_copy(membership_source, membership_target)
-    rewrite_membership_track_ids(membership_target, selection)
-    _atomic_write_text(
-        render_dir / TRACK_TCL_NAME,
-        _target_vmd_script(selection),
-        encoding="ascii",
-    )
-    (directory / TRACK_GRO_NAME).unlink(missing_ok=True)
-    (directory / TRACK_TCL_NAME).unlink(missing_ok=True)
     return directory
 
 
@@ -449,37 +336,14 @@ def write_track_outputs(
     outdir: str | Path,
     *,
     targets: str | Iterable[str] = "all",
-    source: str | Path | None = None,
-    source_bundle: SqqCageBundle | None = None,
-    source_gro: str | Path | None = None,
 ) -> dict[str, Path]:
-    """Write run state/tables and one self-contained bundle per target."""
-    if source_bundle is None:
-        if source_gro is not None:
-            raise ValueError(
-                "Track visualization requires the complete render bundle, "
-                "not a standalone GRO."
-            )
-        source_bundle = discover_sqq_cage_bundle(
-            source if source is not None else outdir
-        )
-    _required_render_paths(source_bundle)
-    if source_bundle.frame_count != len(result.frames):
-        raise ValueError(
-            "Tracking state and render bundle frame counts differ: "
-            f"{len(result.frames)} versus {source_bundle.frame_count}."
-        )
-
+    """Write Track state, normalized tables, and target metadata."""
     root = Path(outdir) / TRACK_DIRECTORY_NAME
     root.mkdir(parents=True, exist_ok=True)
     written = write_tracking_tables(result, root)
     written[TRACK_STATE_NAME] = write_tracking_result(result, root / TRACK_STATE_NAME)
     for selection in select_targets(result, targets):
-        directory = write_target_selection(
-            selection,
-            root,
-            source_bundle=source_bundle,
-        )
+        directory = write_target_selection(selection, root)
         written[target_directory_name(selection.target)] = directory
     return written
 
@@ -1037,43 +901,6 @@ def _track_info_text(selection: TargetSelection) -> str:
     return "\n".join(lines)
 
 
-def _target_vmd_script(selection: TargetSelection) -> str:
-    target_name = target_directory_name(selection.target)
-    script = vmd_script_text(
-        gro_filename=TRACK_GRO_NAME,
-        xtc_filename=TRACK_XTC_NAME,
-        membership_filename=TRACK_MEMBERSHIP_NAME,
-        molecule_name=f"SQQ track {target_name}",
-        render_kind="track",
-    ).rstrip()
-    return (
-        script
-        + "\n\n# Default lifecycle view for this tracking target.\n"
-        + "\n".join(_selection_commands(selection))
-        + "\n"
-    )
-
-
-def _selection_commands(selection: TargetSelection) -> list[str]:
-    if selection.target.kind == "all":
-        return ["sqq show cage all"]
-    object_ids = sorted(
-        {track.track_id for track in selection.tracks},
-        key=lambda value: int(value[1:]),
-    )
-    if not object_ids:
-        return [
-            "set ::SQQ::active_families {}",
-            "set ::SQQ::custom_show_active 1",
-            "::SQQ::render_current",
-            f'puts "SQQ track target {target_directory_name(selection.target)} matched no cages."',
-        ]
-    return [
-        "sqq show cage " + " ".join(object_ids[start : start + 100])
-        for start in range(0, len(object_ids), 100)
-    ]
-
-
 def _compact_cage_type(value: str) -> str:
     text = str(value).strip()
     matches = _CAGE_TERM.findall(text)
@@ -1108,29 +935,6 @@ def _safe_child(root: Path, component: str) -> Path:
     return child
 
 
-def _required_render_paths(bundle: SqqCageBundle) -> tuple[Path, Path, Path]:
-    paths = (bundle.gro_path, bundle.xtc_path, bundle.membership_path)
-    labels = ("topology GRO", "XTC trajectory", "membership TSV")
-    missing = [
-        label
-        for label, path in zip(labels, paths)
-        if path is None or not Path(path).is_file()
-    ]
-    if missing:
-        raise FileNotFoundError(
-            "Incomplete SQQ render bundle; missing " + ", ".join(missing) + "."
-        )
-    return tuple(Path(path).resolve() for path in paths)  # type: ignore[return-value]
-
-
-def _membership_frame_count(path: Path) -> int:
-    with Path(path).open("r", encoding="utf-8", newline="") as handle:
-        reader = csv.DictReader(handle, delimiter="\t")
-        if reader.fieldnames is None or "record" not in reader.fieldnames:
-            raise ValueError(f"Invalid SQQ membership TSV: {path}")
-        return sum(1 for row in reader if row.get("record") == "F")
-
-
 def _atomic_write_text(path: Path, text: str, *, encoding: str = "utf-8") -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = _temporary_path(path)
@@ -1162,35 +966,6 @@ def _atomic_write_csv(
             handle.flush()
             os.fsync(handle.fileno())
         os.replace(temporary, path)
-    finally:
-        temporary.unlink(missing_ok=True)
-
-
-def _atomic_copy(source: Path, target: Path) -> None:
-    target.parent.mkdir(parents=True, exist_ok=True)
-    if target.exists() and source.samefile(target):
-        return
-    temporary = _temporary_path(target)
-    try:
-        shutil.copyfile(source, temporary)
-        os.replace(temporary, target)
-    finally:
-        temporary.unlink(missing_ok=True)
-
-
-def _atomic_link_or_copy(source: Path, target: Path) -> None:
-    source = Path(source).resolve()
-    target.parent.mkdir(parents=True, exist_ok=True)
-    if target.exists() and source.samefile(target):
-        return
-    temporary = _temporary_path(target)
-    try:
-        try:
-            os.link(source, temporary)
-        except OSError:
-            temporary.unlink(missing_ok=True)
-            shutil.copyfile(source, temporary)
-        os.replace(temporary, target)
     finally:
         temporary.unlink(missing_ok=True)
 

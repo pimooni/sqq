@@ -26,18 +26,16 @@ def find_rings(
     shortest_path_cache: dict[tuple[int, int], dict[int, int]] = {}
     nodes = sorted(adjacency)
     ordered_neighbors = {node: tuple(sorted(adjacency.get(node, ()))) for node in nodes}
-    bit_for_node = {node: 1 << index for index, node in enumerate(nodes)}
 
     for start in nodes:
-        start_bit = bit_for_node[start]
-        stack: list[tuple[tuple[int, ...], int]] = [((start,), start_bit)]
+        stack: list[tuple[int, ...]] = [(start,)]
         while stack:
-            path, visited = stack.pop()
+            path = stack.pop()
             current = path[-1]
             if len(path) >= max_size:
                 continue
             for neighbor in reversed(ordered_neighbors.get(current, ())):
-                if neighbor <= start or visited & bit_for_node.get(neighbor, 0):
+                if neighbor <= start or neighbor in path:
                     continue
                 if require_chordless:
                     earlier_neighbors = adjacency.get(neighbor, set()).intersection(path[:-1])
@@ -54,13 +52,13 @@ def find_rings(
                             ):
                                 found.add(canonical_cycle(list(new_path)))
                         continue
-                    stack.append((new_path, visited | bit_for_node[neighbor]))
+                    stack.append(new_path)
                     continue
 
                 new_path = (*path, neighbor)
                 if start in adjacency.get(neighbor, set()) and len(new_path) in allowed and new_path[1] < new_path[-1]:
                     found.add(canonical_cycle(list(new_path)))
-                stack.append((new_path, visited | bit_for_node[neighbor]))
+                stack.append(new_path)
 
     by_size: dict[int, list[Ring]] = defaultdict(list)
     counts: dict[int, int] = defaultdict(int)

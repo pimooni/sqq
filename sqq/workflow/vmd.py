@@ -1,5 +1,6 @@
-"""VMD command workflow."""
+"""Read-only VMD render-package inspection workflow."""
 
-from ..vmd_command import VMD_COMMAND_HELP, run_vmd_command
+from ..io.render.inspect import run_vmd_command
+from ..io.render.tcl import VMD_COMMAND_HELP
 
 __all__ = ["VMD_COMMAND_HELP", "run_vmd_command"]

@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 """CHILL-style ice classification on the shared water graph."""
 

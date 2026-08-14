@@ -137,8 +137,10 @@ std::vector<std::pair<int, int>> parse_pair_edges(const py::dict& frame) {
     std::vector<std::pair<int, int>> result;
     for (const py::handle item : frame["pair_edges"].cast<py::iterable>()) {
         const py::sequence pair = py::reinterpret_borrow<py::sequence>(item);
-        if (pair.size() < 2) {
-            throw std::invalid_argument("each pair_edges item must contain two integers");
+        if (pair.size() != 2) {
+            throw std::invalid_argument(
+                "each pair_edges item must contain exactly two oxygen atom indices"
+            );
         }
         result.emplace_back(pair[0].cast<int>(), pair[1].cast<int>());
     }

@@ -8,6 +8,7 @@ from pathlib import Path
 
 from . import __release_date__, __version__
 from .banner import HELP_BANNER
+from .config import ORDER_PARAMETER_CHOICES
 from .workflow.analyze import analyze
 from .workflow.init import initialize_config
 from .workflow.track import track
@@ -74,43 +75,6 @@ class DescriptionFirstArgumentParser(argparse.ArgumentParser):
         if self.description:
             return f"{self.description.rstrip()}\n{body}"
         return body
-
-
-# Configuration-only fields retain neutral Namespace defaults so shared runtime
-# normalization stays independent of the public command-line surface.
-RUNTIME_COMPATIBILITY_DEFAULTS = {
-    "pattern": None,
-    "xyz_scale": None,
-    "lammps_units": None,
-    "lammps_timestep": None,
-    "lammps_atom_style": None,
-    "ring_size": None,
-    "quasi_size": None,
-    "quasi_base_size": None,
-    "quasi_side_size": None,
-    "quasi_max_layer": None,
-    "quasi_search_policy": None,
-    "ring_definition": None,
-    "no_q": False,
-    "q_degree": None,
-    "q_neighbor_mode": None,
-    "q_cutoff": None,
-    "q_n_neighbor": None,
-    "mcg3": None,
-    "dhop30": None,
-    "cage_size": None,
-    "max_cage_face": None,
-    "cage_fast_closure": None,
-    "cage_scientific_validation": None,
-    "cluster_min_cage": None,
-    "pair_id": None,
-    "parallel_backend": None,
-    "recursive": False,
-    "strict": False,
-    "output_layout": None,
-    "output_type": None,
-    "cage_isomer_rows": None,
-}
 
 
 ANALYZE_EPILOG = """
@@ -229,7 +193,11 @@ def _add_analysis_arguments(
     command_parser.add_argument(
         "--order-parameter",
         metavar="NAME[,NAME...]",
-        help="Select order parameters, e.g. f3,f4,q6, all, or none.",
+        help=(
+            "Select order parameters. Choices: "
+            + ", ".join(ORDER_PARAMETER_CHOICES)
+            + "."
+        ),
     )
     command_parser.add_argument(
         "--output-type",
@@ -245,7 +213,6 @@ def _add_analysis_arguments(
         metavar="PAIRS.txt",
         help="Pair file used with --bond-mode pairs.",
     )
-    command_parser.set_defaults(**RUNTIME_COMPATIBILITY_DEFAULTS)
 
 
 def build_parser() -> argparse.ArgumentParser:

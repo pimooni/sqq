@@ -1,4 +1,8 @@
-# SQQ annotated cage and guest renderer for VMD.
+"""Embedded Tcl source used to generate SQQ VMD render scripts."""
+
+from __future__ import annotations
+
+SQQ_CAGE_TCL = r"""# SQQ annotated cage and guest renderer for VMD.
 __SQQ_RENDER_MANIFEST__
 namespace eval ::SQQ {
     catch {trace remove variable ::vmd_frame write ::SQQ::frame_changed}
@@ -1632,3 +1636,6 @@ trace add variable ::vmd_pick_graphics write ::SQQ::pick_graphics_changed
 ::SQQ::startup_help
 ::SQQ::reset_show
 catch {color Display Background white}
+"""
+
+__all__ = ["SQQ_CAGE_TCL"]

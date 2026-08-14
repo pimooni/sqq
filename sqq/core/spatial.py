@@ -223,9 +223,11 @@ def _filter_cross_pairs(
     distances2 = np.einsum("ij,ij->i", deltas, deltas)
     cutoff2 = float(cutoff) ** 2
     return sorted(
-        (int(i), int(j))
-        for (i, j), distance2 in zip(candidates, distances2, strict=True)
-        if float(distance2) <= cutoff2
+        {
+            (int(i), int(j))
+            for (i, j), distance2 in zip(candidates, distances2, strict=True)
+            if float(distance2) <= cutoff2
+        }
     )
 
 

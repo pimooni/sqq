@@ -3,7 +3,6 @@ from __future__ import annotations
 """Python adapter for the optional C++17 analysis core."""
 
 from collections import defaultdict
-from pathlib import Path
 from typing import Any
 
 import numpy as np
@@ -11,7 +10,6 @@ import numpy as np
 from ... import __version__
 from ...config import normalize_cpp_order_parameters
 from ...models import Cage, F3F4Result, Frame, FrameResult, GraphResult, Guest, Ring, Water, WaterOrder
-from ..graph import read_pair_edges
 
 
 def analyze_frame_cpp(
@@ -20,6 +18,7 @@ def analyze_frame_cpp(
     guests: list[Guest],
     config: dict[str, Any],
     *,
+    pair_edges: list[tuple[int, int]] | None = None,
     cage_report_types: tuple[str, ...] | None = None,
     ring_report_sizes: tuple[int, ...] = (),
 ) -> FrameResult:
@@ -32,17 +31,11 @@ def analyze_frame_cpp(
         normalize_cpp_order_parameters(config.get("order", {}).get("parameters"))
     )
 
-    pair_edges: list[tuple[int, int]] = []
-    if str(graph_config.get("bond_mode", "auto")) == "pairs":
-        pair_path = graph_config.get("pair_file")
-        if not pair_path:
-            raise ValueError("engine cpp with bond_mode=pairs requires --pair or graph.pair_file.")
-        pair_edges = read_pair_edges(
-            Path(pair_path),
-            frame.atoms,
-            waters,
-            str(graph_config.get("pair_id", "resid")),
-        )
+    graph_mode = str(
+        graph_config.get("effective_bond_mode", graph_config.get("bond_mode", "auto"))
+    )
+    if graph_mode == "pairs" and pair_edges is None:
+        raise ValueError("engine cpp with bond_mode=pairs requires normalized oxygen pair edges.")
 
     native_frame = {
         "positions": [tuple(float(value) for value in atom.xyz) for atom in frame.atoms],
@@ -63,10 +56,10 @@ def analyze_frame_cpp(
             for guest in guests
         ],
         "box": _native_box(frame.box),
-        "pair_edges": pair_edges,
+        "pair_edges": [] if pair_edges is None else pair_edges,
     }
     native_options = {
-        "bond_mode": str(graph_config.get("effective_bond_mode", graph_config.get("bond_mode", "auto"))),
+        "bond_mode": graph_mode,
         "oo_cutoff_nm": float(graph_config.get("oo_cutoff_nm", 0.35)),
         "hbond_distance_nm": float(graph_config.get("hbond_distance_nm", 0.35)),
         "hbond_angle_deg": float(graph_config.get("hbond_angle_deg", 30.0)),
