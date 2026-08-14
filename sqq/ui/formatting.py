@@ -13,7 +13,13 @@ TERMINAL_LABEL_WIDTH = 24
 def write_terminal_block(lines: list[str], *, stream: Any | None = None) -> None:
     """Write one complete terminal block without cross-stream interleaving."""
     target = sys.stdout if stream is None else stream
-    target.write("\n".join(lines) + "\n")
+    text = "\n".join(lines) + "\n"
+    encoding = getattr(target, "encoding", None) or "utf-8"
+    safe_text = text.encode(encoding, errors="replace").decode(
+        encoding,
+        errors="replace",
+    )
+    target.write(safe_text)
     target.flush()
 
 

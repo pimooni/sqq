@@ -4,7 +4,7 @@
 
 ### Short Summary
 
-Version 0.5.2 reorganizes SQQ into explicit configuration, model, scientific-core, workflow, runtime, reporting, rendering, and UI layers. Analyze and Track now share one typed execution plan and runner; Track state is independent of optional VMD output; reporting and render publication have single owners; and the supported Python API is explicit. Confirmed compatibility, worker-shutdown, configuration, pair-identity, and packaging problems are fixed. Python, configuration schema, CMake, and native-core metadata are synchronized at `0.5.2`, dated Aug 10, 2026.
+Version 0.5.2 reorganizes SQQ into explicit configuration, model, scientific-core, workflow, runtime, reporting, rendering, and UI layers. Analyze and Track now share one typed execution plan and runner; Track state is independent of optional VMD output; reporting and render publication have single owners; and the supported Python API is explicit. Confirmed compatibility, worker-shutdown, configuration, pair-identity, and packaging problems are fixed. Python, configuration schema, CMake, and native-core metadata are synchronized at `0.5.2`, dated Aug 13, 2026.
 
 ### Main Changes
 

@@ -36,6 +36,18 @@ ENGINE_CHOICES = ("00", "py", "99", "cpp")
 class DescriptionFirstArgumentParser(argparse.ArgumentParser):
     """Place the root description before argparse's usage line."""
 
+    def _print_message(self, message: str, file=None) -> None:
+        """Write help safely on legacy Windows code pages."""
+        if not message:
+            return
+        target = file or sys.stderr
+        encoding = getattr(target, "encoding", None) or "utf-8"
+        safe_message = message.encode(encoding, errors="replace").decode(
+            encoding,
+            errors="replace",
+        )
+        target.write(safe_message)
+
     def parse_args(
         self,
         args: list[str] | None = None,

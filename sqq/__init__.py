@@ -17,4 +17,4 @@ __all__ = [
 ]
 
 __version__ = "0.5.2"
-__release_date__ = "Aug 10, 2026"
+__release_date__ = "Aug 13, 2026"
