@@ -1,6 +1,6 @@
-from __future__ import annotations
-
 """Spawn-safe worker context with one private trajectory reader per process."""
+
+from __future__ import annotations
 
 import atexit
 from dataclasses import dataclass, replace
@@ -36,6 +36,7 @@ class WorkerContext:
     lammps_config: LammpsInputConfig | None = None
 
     def open(self) -> None:
+        self.close()
         trajectory = self.run_context.trajectory
         topology = self.run_context.topology
         if trajectory is None:
@@ -43,32 +44,47 @@ class WorkerContext:
         if topology is None:
             raise ValueError("Trajectory workers require a topology path.")
         trajectory = Path(trajectory)
-        if trajectory.suffix.lower() in LAMMPS_TRAJECTORY_SUFFIXES:
-            raw = self.run_context.config.get("input", {}).get("lammps")
-            self.lammps_config = normalize_lammps_config(raw)
-            self.universe = open_lammps_universe(
-                trajectory,
-                Path(topology),
-                self.lammps_config,
-            )
-            self.trajectory_metadata = lammps_atom_metadata(
-                self.universe,
-                self.lammps_config,
-            )
-        else:
-            self.universe = open_mdanalysis_universe(trajectory, Path(topology))
-            self.trajectory_metadata = trajectory_atom_metadata(self.universe)
+        universe = None
+        lammps_config = None
+        try:
+            if trajectory.suffix.lower() in LAMMPS_TRAJECTORY_SUFFIXES:
+                raw = self.run_context.config.get("input", {}).get("lammps")
+                lammps_config = normalize_lammps_config(raw)
+                universe = open_lammps_universe(
+                    trajectory,
+                    Path(topology),
+                    lammps_config,
+                )
+                metadata = lammps_atom_metadata(universe, lammps_config)
+            else:
+                universe = open_mdanalysis_universe(trajectory, Path(topology))
+                metadata = trajectory_atom_metadata(universe)
+        except BaseException:
+            if universe is not None:
+                try:
+                    if lammps_config is None:
+                        close_mdanalysis_universe(universe)
+                    else:
+                        close_lammps_universe(universe)
+                except Exception:
+                    pass
+            raise
+        self.universe = universe
+        self.lammps_config = lammps_config
+        self.trajectory_metadata = metadata
 
     def close(self) -> None:
         if self.universe is None:
             return
-        if self.lammps_config is None:
-            close_mdanalysis_universe(self.universe)
-        else:
-            close_lammps_universe(self.universe)
+        universe = self.universe
+        lammps_config = self.lammps_config
         self.universe = None
         self.trajectory_metadata = None
         self.lammps_config = None
+        if lammps_config is None:
+            close_mdanalysis_universe(universe)
+        else:
+            close_lammps_universe(universe)
 
     def load_frame(self, task: FrameTask):
         if task.frame is not None:

@@ -1,6 +1,6 @@
-from __future__ import annotations
-
 """Ordered serial/thread/process execution with deterministic failure cleanup."""
+
+from __future__ import annotations
 
 from collections.abc import Callable, Iterable
 from concurrent.futures import (
@@ -84,9 +84,9 @@ def _execute_serial(
 ) -> list[TaskOutcome]:
     outcomes: list[TaskOutcome] = []
     local_context = WorkerContext(plan.context) if handler is None else None
-    if local_context is not None:
-        local_context.open()
     try:
+        if local_context is not None:
+            local_context.open()
         for task in tasks:
             _safe_emit(event_sink, StageEventKind.START, task.task_index, task.display_name)
             try:
@@ -221,6 +221,8 @@ def _execute_concurrent(
                 except BaseException as exc:
                     fatal = exc
                     break
+            if fatal is not None:
+                break
             _submit_until_limit(
                 executor,
                 active_handler,
@@ -231,23 +233,31 @@ def _execute_concurrent(
             )
 
         if fatal is not None:
-            for future, task in pending.items():
-                if future.cancel():
-                    _safe_emit(
-                        event_sink,
-                        StageEventKind.CANCELLED,
-                        task.task_index,
-                        "cancelled",
-                    )
-            _drain_workers_while_exiting(pending, stage_queue, event_sink)
-            _cleanup_failed_plan(plan)
             raise fatal
+    except BaseException:
+        for future, task in pending.items():
+            if future.cancel():
+                _safe_emit(
+                    event_sink,
+                    StageEventKind.CANCELLED,
+                    task.task_index,
+                    "cancelled",
+                )
+        _drain_workers_while_exiting(pending, stage_queue, event_sink)
+        _cleanup_failed_plan(plan)
+        raise
     finally:
         executor.shutdown(wait=True, cancel_futures=True)
         if stage_queue is not None:
             drain_stage_events(stage_queue, event_sink)
-            stage_queue.close()
-            stage_queue.join_thread()
+            try:
+                stage_queue.close()
+            except (AttributeError, EOFError, OSError, ValueError):
+                pass
+            try:
+                stage_queue.join_thread()
+            except (AttributeError, EOFError, OSError, ValueError):
+                pass
 
     if plan.context.stream_results and waiting:
         raise RuntimeError("Concurrent streaming left unpublished frame results.")
@@ -268,8 +278,9 @@ def _submit_until_limit(
             task = next(iterator)
         except StopIteration:
             return
+        future = executor.submit(handler, task)
+        pending[future] = task
         _safe_emit(event_sink, StageEventKind.START, task.task_index, task.display_name)
-        pending[executor.submit(handler, task)] = task
 
 
 class _LocalTaskHandler:

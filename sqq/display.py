@@ -1,6 +1,6 @@
-from __future__ import annotations
-
 """Shared human-facing display helpers for terminal, Markdown, and summary output."""
+
+from __future__ import annotations
 
 from typing import Any, Iterable
 

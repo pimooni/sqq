@@ -1,15 +1,10 @@
-from __future__ import annotations
-
 """Shared guest-occupancy labels for cage summaries and GRO output."""
+
+from __future__ import annotations
 
 from collections import Counter
 
-from ..models import Cage, Guest
-
-
-def guest_id(guest: Guest) -> str:
-    """Use the same guest identifier as the cage assignment code."""
-    return f"{guest.resname}{guest.resid}"
+from ..models import Cage, Guest, guest_id
 
 
 def guest_lookup(guests: list[Guest]) -> dict[str, Guest]:

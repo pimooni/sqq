@@ -1,6 +1,6 @@
-from __future__ import annotations
-
 """Strict orthorhombic LAMMPS trajectory input for SQQ."""
+
+from __future__ import annotations
 
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass

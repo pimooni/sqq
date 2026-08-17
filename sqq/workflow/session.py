@@ -1,6 +1,6 @@
-from __future__ import annotations
-
 """Workflow-level lifecycle facade over the shared runtime runner."""
+
+from __future__ import annotations
 
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass

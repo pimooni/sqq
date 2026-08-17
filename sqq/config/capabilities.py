@@ -27,6 +27,30 @@ def _explicit(config: dict[str, Any] | None, section: str) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
 
 
+def _explicitly_enabled(value: Any) -> bool:
+    if value is None or (isinstance(value, str) and value.strip().lower() == "auto"):
+        return False
+    return legacy_enabled(value)
+
+
+def _section_customized(
+    explicit: dict[str, Any], defaults: dict[str, Any]
+) -> bool:
+    for key, value in explicit.items():
+        default = defaults.get(key)
+        if key == "enabled":
+            if isinstance(value, str) and value.strip().lower() == "auto":
+                continue
+            try:
+                if legacy_enabled(value) == legacy_enabled(default):
+                    continue
+            except ValueError:
+                pass
+        if value != default:
+            return True
+    return False
+
+
 def _record(adjustments: list[Any], message: str, emit: bool) -> None:
     if message not in adjustments:
         adjustments.append(message)
@@ -70,13 +94,13 @@ def normalize_engine_capabilities(
     if cpp:
         explicit_half = _explicit(user_config, "half_cage")
         explicit_quasi = _explicit(user_config, "quasi_cage")
-        if explicit_half.get("enabled") not in (None, "auto", False, "off"):
+        if _explicitly_enabled(explicit_half.get("enabled")):
             _record(adjustments, "half_cage disabled by SQQ-CPP", emit_warnings)
         customized = any(
             key != "enabled" and value != DEFAULT_CONFIG["quasi_cage"].get(key)
             for key, value in explicit_quasi.items()
         )
-        if explicit_quasi.get("enabled") not in (None, "auto", False, "off") or customized:
+        if _explicitly_enabled(explicit_quasi.get("enabled")) or customized:
             _record(
                 adjustments,
                 "quasi_cage disabled by SQQ-CPP; quasi settings ignored",
@@ -89,9 +113,8 @@ def normalize_engine_capabilities(
                 quasi[key] = deepcopy(value)
         cluster = config.setdefault("hydrate_cluster", {})
         explicit_cluster = _explicit(user_config, "hydrate_cluster")
-        if explicit_cluster and any(
-            value != DEFAULT_CONFIG["hydrate_cluster"].get(key)
-            for key, value in explicit_cluster.items()
+        if explicit_cluster and _section_customized(
+            explicit_cluster, DEFAULT_CONFIG["hydrate_cluster"]
         ):
             _record(
                 adjustments,
@@ -104,9 +127,8 @@ def normalize_engine_capabilities(
 
         ice = config.setdefault("ice", {})
         explicit_ice = _explicit(user_config, "ice")
-        if explicit_ice and any(
-            value != DEFAULT_CONFIG["ice"].get(key)
-            for key, value in explicit_ice.items()
+        if explicit_ice and _section_customized(
+            explicit_ice, DEFAULT_CONFIG["ice"]
         ):
             _record(
                 adjustments,

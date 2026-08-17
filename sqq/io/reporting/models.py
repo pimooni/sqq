@@ -1,6 +1,6 @@
-from __future__ import annotations
-
 """Data objects and stable schemas used by all report writers."""
+
+from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Any

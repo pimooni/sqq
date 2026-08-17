@@ -1,6 +1,6 @@
-from __future__ import annotations
-
 """Per-frame render selection, membership, and fragment generation."""
+
+from __future__ import annotations
 
 import json
 import os

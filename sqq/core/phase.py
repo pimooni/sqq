@@ -1,6 +1,6 @@
-from __future__ import annotations
-
 """Face-graph classification of hydrate phases and domains."""
+
+from __future__ import annotations
 
 from collections import Counter, defaultdict, deque
 from dataclasses import dataclass, replace
@@ -10,6 +10,7 @@ import re
 import numpy as np
 
 from ..models import Cage, Frame, HydrateCluster, HydrateDomain, HydrateMotif, Ring
+from .components import connected_components as induced_component_list
 from .geometry import unwrap_connected_nodes
 from .pbc import minimum_image
 
@@ -572,8 +573,8 @@ def find_spatial_phase_cores(
                 PhaseSeed(
                     hydrate_type=phase,
                     anchor_indexes=anchors,
-                    cage_indexes=anchors,
-                    shared_face_ids=internal_shared_faces(anchors, shared_faces),
+                    cage_indexes=members,
+                    shared_face_ids=internal_shared_faces(members, shared_faces),
                     cluster_id=cluster_id,
                     source="spatial_core",
                 )
@@ -1046,7 +1047,7 @@ def internal_shared_faces(
 
 def connected_components(adjacency: dict[int, set[int]]) -> list[tuple[int, ...]]:
     """Return deterministic connected components from an undirected graph."""
-    return list(induced_components(adjacency, set(adjacency)))
+    return induced_component_list(set(adjacency), adjacency)
 
 
 def induced_components(
@@ -1054,27 +1055,7 @@ def induced_components(
     nodes: set[int],
 ) -> tuple[tuple[int, ...], ...]:
     """Return components of the graph induced by a selected node set."""
-    seen: set[int] = set()
-    components: list[tuple[int, ...]] = []
-    for start in sorted(nodes):
-        if start in seen:
-            continue
-        stack = [start]
-        component: set[int] = set()
-        seen.add(start)
-        while stack:
-            current = stack.pop()
-            component.add(current)
-            for neighbor in sorted(
-                adjacency.get(current, set()).intersection(nodes),
-                reverse=True,
-            ):
-                if neighbor in seen:
-                    continue
-                seen.add(neighbor)
-                stack.append(neighbor)
-        components.append(tuple(sorted(component)))
-    return tuple(components)
+    return tuple(induced_component_list(nodes, adjacency))
 
 
 def build_cluster(

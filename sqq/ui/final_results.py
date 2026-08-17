@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 """Build the final SQQ terminal results screen.
 
 This module deliberately has no dependency on the Analyze workflow, pandas, or
@@ -7,6 +5,8 @@ the output writers.  Callers pass the resolved run metadata, resolved
 configuration, and a small mapping of final statistics.  Values in
 ``statistics`` take precedence over their legacy ``run_info`` equivalents.
 """
+
+from __future__ import annotations
 
 import math
 import re

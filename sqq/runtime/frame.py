@@ -1,11 +1,16 @@
-from __future__ import annotations
-
 """Worker-safe analysis dispatch for one already loaded frame."""
+
+from __future__ import annotations
 
 from collections.abc import Callable, Mapping
 from typing import Any
 
-from ..config import is_cpp_mode, resolve_cage_report_types, resolve_size_list
+from ..config import (
+    is_cpp_mode,
+    resolve_cage_report_types,
+    resolve_graph_mode,
+    resolve_size_list,
+)
 from ..core.selection import select_guests, select_waters
 from ..core.sqq_cpp import analyze_frame_cpp
 from ..core.sqq_py import analyze_frame as analyze_frame_py
@@ -22,7 +27,8 @@ def analyze_frame(
     stage_callback: StageCallback | None = None,
 ) -> FrameResult:
     """Analyze one frame without output or reporting side effects."""
-    config = resolved_config
+    config = dict(resolved_config)
+    config["graph"] = dict(resolved_config["graph"])
     _report_stage(stage_callback, "resolving settings")
     ring_sizes = resolve_size_list(config["ring"]["sizes"], fallback=[], key="ring.sizes")
     ring_report_sizes = resolve_size_list(
@@ -59,6 +65,14 @@ def analyze_frame(
         center_atoms=config["guest"].get("center_atoms", {}),
         center_mode=str(config["guest"].get("center_mode", "center_atom")),
     )
+    graph = config["graph"]
+    graph_resolution = resolve_graph_mode(
+        str(graph.get("bond_mode", "auto")),
+        waters,
+        graph.get("pair_file"),
+    )
+    graph["effective_bond_mode"] = graph_resolution.effective
+    graph["effective_bond_mode_reason"] = graph_resolution.reason
     pair_edges = _read_pair_edges(frame, waters, guests, config)
 
     if is_cpp_mode(config.get("mode")):

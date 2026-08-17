@@ -1,6 +1,6 @@
-from __future__ import annotations
-
 """Acquire, analyze, and transactionally publish one frame task."""
+
+from __future__ import annotations
 
 from collections.abc import Callable, Mapping
 import os
@@ -216,6 +216,7 @@ def write_frame_outputs(
 
     layout = str(output.get("structure_layout", "grouped"))
     write_empty = bool(output.get("write_empty_files", False))
+    center_resname = str(output.get("center_resname", "CNT"))
     for parameter in ("f3", "f4"):
         _remove_water_order_gro_output(result, frame_dir, parameter, layout)
         if output_enabled(config, f"{parameter}-gro"):
@@ -230,13 +231,26 @@ def write_frame_outputs(
             write_empty=write_empty,
             layout=layout,
             sizes=set(result.ring_report_sizes),
+            center_resname=center_resname,
         )
     _remove_generated_gro_outputs(result, frame_dir, "half-gro", layout)
     if not cpp_mode and output_enabled(config, "half-gro"):
-        write_half_cage_gro_files(result, frame_dir, write_empty=write_empty, layout=layout)
+        write_half_cage_gro_files(
+            result,
+            frame_dir,
+            write_empty=write_empty,
+            layout=layout,
+            center_resname=center_resname,
+        )
     _remove_generated_gro_outputs(result, frame_dir, "quasi-gro", layout)
     if not cpp_mode and output_enabled(config, "quasi-gro"):
-        write_quasi_cage_gro_files(result, frame_dir, write_empty=write_empty, layout=layout)
+        write_quasi_cage_gro_files(
+            result,
+            frame_dir,
+            write_empty=write_empty,
+            layout=layout,
+            center_resname=center_resname,
+        )
     _remove_generated_gro_outputs(result, frame_dir, "cage-gro", layout)
     if output_enabled(config, "cage-gro"):
         write_cage_gro_files(
@@ -245,6 +259,7 @@ def write_frame_outputs(
             write_empty=write_empty,
             layout=layout,
             include_centers=not cpp_mode,
+            center_resname=center_resname,
         )
     _remove_generated_gro_outputs(result, frame_dir, "cluster-gro", layout)
     if not cpp_mode and result.hydrate_cluster_enabled and output_enabled(config, "cluster-gro"):

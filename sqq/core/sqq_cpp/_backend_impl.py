@@ -1,6 +1,6 @@
-from __future__ import annotations
-
 """Python adapter for the optional C++17 analysis core."""
+
+from __future__ import annotations
 
 from collections import defaultdict
 from typing import Any
@@ -9,7 +9,7 @@ import numpy as np
 
 from ... import __version__
 from ...config import normalize_cpp_order_parameters
-from ...models import Cage, F3F4Result, Frame, FrameResult, GraphResult, Guest, Ring, Water, WaterOrder
+from ...models import Cage, F3F4Result, Frame, FrameResult, GraphResult, Guest, Ring, Water, WaterOrder, guest_id
 
 
 def analyze_frame_cpp(
@@ -222,7 +222,7 @@ def _guest_ids(record: dict[str, Any], guests: list[Guest]) -> tuple[str, ...]:
     indexes = record.get("guest_indices")
     if indexes is not None:
         return tuple(
-            f"{guests[int(index)].resname}{guests[int(index)].resid}"
+            guest_id(guests[int(index)])
             for index in indexes
             if 0 <= int(index) < len(guests)
         )

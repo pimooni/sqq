@@ -196,7 +196,7 @@ py::tuple vector_tuple(const Vec3& value) {
     return py::make_tuple(value.x, value.y, value.z);
 }
 
-py::dict result_dict(const AnalysisResult& result, const FrameInput& frame) {
+py::dict result_dict(const AnalysisResult& result) {
     py::dict output;
     output["core_version"] = core_version();
     output["effective_bond_mode"] = result.effective_bond_mode;
@@ -225,13 +225,6 @@ py::dict result_dict(const AnalysisResult& result, const FrameInput& frame) {
         row["waters"] = cage.waters;
         row["center"] = vector_tuple(cage.center);
         row["guest_indices"] = cage.guest_indices;
-        std::vector<std::string> guest_ids;
-        guest_ids.reserve(cage.guest_indices.size());
-        for (const int guest_index : cage.guest_indices) {
-            const auto& guest = frame.guests.at(static_cast<std::size_t>(guest_index));
-            guest_ids.push_back(guest.resname + std::to_string(guest.resid));
-        }
-        row["guest_ids"] = std::move(guest_ids);
         row["isomer"] = cage.isomer.empty() ? py::none() : py::cast(cage.isomer);
         cages.append(std::move(row));
     }
@@ -266,7 +259,7 @@ py::dict analyze_python(const py::dict& frame_object, const py::dict& option_obj
         py::gil_scoped_release release;
         result = analyze_frame(frame, options);
     }
-    return result_dict(result, frame);
+    return result_dict(result);
 }
 
 }  // namespace

@@ -1,6 +1,6 @@
-from __future__ import annotations
-
 """Build one typed execution plan for every Analyze input form."""
+
+from __future__ import annotations
 
 from collections import Counter
 from collections.abc import Mapping, Sequence
@@ -296,28 +296,19 @@ def _resolve_graph_for_source(
             try:
                 frame = read_gro(source)
             except ValueError:
-                frame = next(
-                    iter(
-                        read_frames(
-                            [source],
-                            topology=topology,
-                            frame_indexes=[0],
-                            lammps_config=config.get("input", {}).get("lammps", {}),
-                        )
-                    )
+                frame = _read_representative_frame(
+                    source,
+                    topology,
+                    config,
+                    frame_indexes=[0],
                 )
         else:
             indexes = None if raw_frame_index is None else [raw_frame_index]
-            frame = next(
-                iter(
-                    read_frames(
-                        [source],
-                        topology=topology,
-                        xyz_scale=float(config.get("input", {}).get("xyz_scale", 0.1)),
-                        frame_indexes=indexes,
-                        lammps_config=config.get("input", {}).get("lammps", {}),
-                    )
-                )
+            frame = _read_representative_frame(
+                source,
+                topology,
+                config,
+                frame_indexes=indexes,
             )
         water = config.get("water", {})
         waters = select_waters(
@@ -332,6 +323,29 @@ def _resolve_graph_for_source(
     graph["effective_bond_mode"] = resolution.effective
     graph["effective_bond_mode_reason"] = resolution.reason
     return requested, resolution.effective
+
+
+def _read_representative_frame(
+    source: Path,
+    topology: Path | None,
+    config: Mapping[str, Any],
+    *,
+    frame_indexes: Sequence[int] | None,
+):
+    """Read one frame and deterministically close the trajectory generator."""
+    frames = read_frames(
+        [source],
+        topology=topology,
+        xyz_scale=float(config.get("input", {}).get("xyz_scale", 0.1)),
+        frame_indexes=frame_indexes,
+        lammps_config=config.get("input", {}).get("lammps", {}),
+    )
+    try:
+        return next(frames)
+    finally:
+        close = getattr(frames, "close", None)
+        if callable(close):
+            close()
 
 
 def _execution_policy(

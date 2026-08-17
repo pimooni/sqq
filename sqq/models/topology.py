@@ -1,6 +1,6 @@
-from __future__ import annotations
-
 """Ring, patch, cage, and graph data contracts."""
+
+from __future__ import annotations
 
 from dataclasses import dataclass
 from functools import cached_property

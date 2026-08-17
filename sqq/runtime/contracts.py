@@ -1,6 +1,6 @@
-from __future__ import annotations
-
 """Typed contracts shared by Analyze, Track, and parallel workers."""
+
+from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass, field

@@ -6,7 +6,7 @@ from copy import deepcopy
 from typing import Any
 
 DEFAULT_MODE = "py"
-CONFIG_SCHEMA_VERSION = "0.5.2"
+CONFIG_SCHEMA_VERSION = "0.5.3"
 DEFAULT_ORDER_PARAMETERS = ("f3", "f4")
 CPP_MODE = "cpp"
 CPP_MODES = frozenset({"99", CPP_MODE})
@@ -254,8 +254,6 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "cage_isomer_rows": "nonzero",
         "write_empty_files": False,
         "structure_layout": "grouped",
-        "gro_atom_mode": "cage_oxygen_guest",
-        "context_roles": [],
         "center_resname": "CNT",
     },
     "render": {"atom_scope": "full"},

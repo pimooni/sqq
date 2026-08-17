@@ -1,5 +1,65 @@
 # SQQ Update Notes
 
+## Version 0.5.3
+
+### Short Summary
+
+Version 0.5.3 aligns automatic graph resolution and scientific cage validation across SQQ-Py and SQQ-CPP, corrects hydrate spatial-core seeding and guest identity, and reduces native time and memory without relaxing any scientific cutoff or topology rule. It also makes output cleanup ownership-based, hardens configuration/API/runtime failure paths, and consolidates release metadata. The release is dated Aug 17, 2026.
+
+### Main Changes
+
+1. Python/C++ scientific parity
+   - Uses one three-branch `auto` graph resolver before backend dispatch: all waters with at least two hydrogens select `hbond`, all waters with no hydrogen select `oo`, and mixed or incomplete hydrogen topology is rejected.
+   - Makes native scientific validation unwrap each ring face through its own cyclic edges before face planarity, edge variation, and projected-area checks; whole-shell unwrapping remains responsible for cage volume and centroid.
+   - Preserves the phase-specific anchors of each hydrate spatial core, but includes every validated core member and its internal shared-face evidence in the initial seed used for expansion.
+   - Replaces `resname + resid` guest labels with one topology-stable `g########` identifier shared by Python occupancy, the native adapter, rendering, and Track guest residence.
+   - Excludes zero-length bond vectors from the Q_l normalization divisor. For `nearest` or `lammps` fixed-neighbor modes, widespread cutoff shortfalls now produce one count-based warning without changing their established zero-value rule.
+
+2. Exact native performance and memory
+   - Uses deterministic cell-list candidate generation for periodic and non-periodic native graph construction instead of materializing all global water pairs.
+   - Retains exact double-precision minimum-image distance and hydrogen-bond angle rechecks after candidate generation; no cutoff, candidate cap, topology requirement, or floating-point acceptance threshold is weakened.
+   - Reuses frame-local ring adjacency and O-O/O-H vectors needed by repeated ring and F3/F4 operations, then releases those caches with the frame.
+   - Clamps computed boundary-cell indexes in the shared Python candidate paths so a coordinate on a numerical upper boundary cannot address a cell outside the valid range.
+
+3. Configuration and public API correctness
+   - Makes an explicit `cluster-gro` or `cluster-detail` request a configuration error when cluster search is off. The broad `all` selector continues to mean all outputs applicable to the resolved engine/search scope.
+   - Activates `output.center_resname` for synthetic center records and validates it as a 1-5 character non-whitespace ASCII GRO residue name.
+   - Removes inactive `output.gro_atom_mode` and `output.context_role`/`context_roles` during legacy migration, emitting a warning and recording the adjustment instead of accepting dead settings silently.
+   - Makes `ResolvedConfig` recursively read-only and provides an explicit isolated mutable-copy boundary for analysis.
+   - Applies the same SQQ-CPP capability validator to API and CLI configuration. Textual false values such as `false`, `no`, and `off` no longer generate spurious unsupported-feature adjustments.
+
+4. Output ownership and preflight safety
+   - Writes `sqq_output_manifest.json` at the requested result root after a run and uses its validated relative paths for the next cleanup. Unchanged or unrelated user files are not claimed or removed.
+   - Uses only conservative fixed-path cleanup for pre-manifest results; broad filename-pattern deletion is removed.
+   - Completes configuration, input, topology/group, LAMMPS, and execution-plan checks before creating or cleaning the output directory.
+   - Keeps publication atomic and validates that every ownership path remains inside the locked result root.
+
+5. Runtime and command-line hardening
+   - Treats closed or broken progress queues as a lost diagnostics channel rather than masking a worker failure; queue close/join paths are also guarded.
+   - Closes partially opened and completed trajectory readers deterministically, stops task refill immediately after a fatal future, and records a task only after submission succeeds.
+   - Serializes process-global numerical thread-limit changes across concurrent API calls and applies optional limits to already loaded numerical libraries.
+   - Decodes platform CPU-probe output defensively. Expected configuration, input, I/O, lock, and analysis failures now end with one `Error: ...` line and status 2; `SQQ_DEBUG=1` restores a traceback for development.
+
+6. Stable VMD representations across frames
+   - Keeps each SQQ display and pick-highlight layer in one stable VMD representation while the trajectory frame changes; frame callbacks update only its atom selection with `mol modselect` and use `none` for an empty layer.
+   - Preserves DynamicBonds radius, color, and material changes made in VMD's Graphics Representations window when moving to both earlier and later frames. Explicit SQQ view/style changes, reset, or re-sourcing can still rebuild or reset SQQ-owned layers, and user-created representations remain untouched.
+
+7. Release and module metadata
+   - Uses `sqq/_version.py` as the authoritative source for Python package metadata, scikit-build-core, CMake, the compiled extension, CLI output, and release-wheel consistency checks.
+   - Synchronizes version `0.5.3` and release date `Aug 17, 2026` across the package.
+   - Restores valid Python module-docstring placement before future imports so runtime introspection receives the intended module documentation.
+   - Centralizes deterministic connected-component traversal and adds shared Ruff and mypy development configuration.
+
+### Compatibility and Result Impact
+
+- Ordinary valid-input graph, ring, cage, occupancy, F3/F4, and output definitions are unchanged; native acceleration still applies exact scientific checks.
+- Enabling scientific cage validation can change SQQ-CPP acceptance for a PBC-crossing face that was previously unwrapped through an unrelated cage-wide image. This is a parity correction with SQQ-Py.
+- Hydrate phase/domain assignment can change when a validated spatial-core member was previously omitted because it was not itself an anchor. Anchors still remain mandatory phase evidence.
+- Q_l can change only for a water whose selected vector list contains a zero-length vector; the divisor now counts the vectors that actually enter the spherical-harmonic sum.
+- Guest identifiers intentionally change to topology-stable values. Aggregate occupancy and residence quantities are unchanged when the former labels were unique; former residue-label collisions are corrected.
+- Reused result directories gain `sqq_output_manifest.json`. Explicit cluster outputs with cluster search off now fail instead of disappearing silently, and expected CLI errors no longer print a traceback unless debug mode is enabled.
+- VMD frame navigation now retains each active SQQ representation and changes only its current selection, so GUI-edited DynamicBonds styles apply on both sides of the frame where they were changed.
+
 ## Version 0.5.2
 
 ### Short Summary

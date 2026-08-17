@@ -1,6 +1,6 @@
-from __future__ import annotations
-
 """Low-level atomic publication shared by reporting sinks."""
+
+from __future__ import annotations
 
 import os
 from pathlib import Path

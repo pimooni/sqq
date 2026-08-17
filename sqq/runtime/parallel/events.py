@@ -1,6 +1,6 @@
-from __future__ import annotations
-
 """Small progress events that never carry scientific results."""
+
+from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -56,10 +56,10 @@ class QueueStageEmitter:
         )
         try:
             self._queue.put_nowait(event)
-        except (Full, AttributeError):
+        except (Full, AttributeError, EOFError, OSError, ValueError):
             try:
                 self._queue.put(event, block=False)
-            except Full:
+            except (Full, AttributeError, EOFError, OSError, ValueError):
                 self.dropped += 1
 
 
@@ -74,7 +74,7 @@ def drain_stage_events(
     while limit is None or drained < limit:
         try:
             event = queue.get_nowait()
-        except (Empty, AttributeError):
+        except (Empty, AttributeError, EOFError, OSError, ValueError):
             break
         if sink is not None:
             try:

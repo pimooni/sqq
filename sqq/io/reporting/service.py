@@ -1,6 +1,6 @@
-from __future__ import annotations
-
 """Coordinate report selection, staging, atomic publication, and rollback."""
+
+from __future__ import annotations
 
 from copy import deepcopy
 import os

@@ -1,12 +1,12 @@
-from __future__ import annotations
-
 """Cross-frame cage tracking workflow for ``sqq track``."""
+
+from __future__ import annotations
 
 from argparse import Namespace
 from collections import defaultdict
 from copy import deepcopy
 import csv
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from datetime import datetime
 import os
 from pathlib import Path
@@ -239,22 +239,64 @@ def _section_enabled(config: Mapping[str, Any], name: str) -> bool:
 def track(args: Namespace) -> None:
     """Run Track while exclusively owning the output root."""
     print_run_banner(getattr(args, "engine", None))
-    output = Path(args.output)
-    output.mkdir(parents=True, exist_ok=True)
-    with output_lock(output):
-        diagnostics = RunDiagnostics()
-        with capture_run_warnings(diagnostics):
-            try:
-                _track_locked(args, diagnostics)
-            finally:
-                diagnostics.emit()
-
-
-def _track_locked(args: Namespace, diagnostics: RunDiagnostics) -> None:
     started_wall = datetime.now().astimezone()
     started = perf_counter()
+    diagnostics = RunDiagnostics()
+    try:
+        with capture_run_warnings(diagnostics):
+            _preflight_track_paths(args)
+            prepared = _prepare_track(args)
+            output = Path(args.output)
+            output.mkdir(parents=True, exist_ok=True)
+            with output_lock(output):
+                _track_locked(
+                    args,
+                    diagnostics,
+                    prepared,
+                    started_wall=started_wall,
+                    started=started,
+                )
+    except BaseException:
+        diagnostics.consume()
+        raise
+    finally:
+        diagnostics.emit()
+
+
+def _preflight_track_paths(args: Namespace) -> None:
+    """Reject missing explicit paths before creating the output root."""
+    for attribute, label in (
+        ("config", "Configuration file"),
+        ("input", "Input"),
+        ("topology", "Topology file"),
+        ("pair", "Pair file"),
+        ("source", "Analyze result"),
+    ):
+        raw = getattr(args, attribute, None)
+        if not raw:
+            continue
+        path = Path(raw)
+        if attribute in {"input", "source"}:
+            exists = path.exists()
+        else:
+            exists = path.is_file()
+        if not exists:
+            raise FileNotFoundError(f"{label} does not exist: {path}")
     output = Path(args.output)
-    output.mkdir(parents=True, exist_ok=True)
+    if output.exists() and not output.is_dir():
+        raise NotADirectoryError(f"Output path is not a directory: {output}")
+
+
+@dataclass(frozen=True, slots=True)
+class _TrackPreparation:
+    config: dict[str, Any]
+    targets: tuple[TargetSpec, ...]
+    source_state_path: Path | None
+    requested_tracking: TrackingConfig
+
+
+def _prepare_track(args: Namespace) -> _TrackPreparation:
+    """Resolve Track configuration and sources without creating outputs."""
     config = load_config(
         Path(args.config) if getattr(args, "config", None) else None,
         mode=getattr(args, "engine", None),
@@ -279,6 +321,27 @@ def _track_locked(args: Namespace, diagnostics: RunDiagnostics) -> None:
     normalize_analysis_scopes(config)
     refresh_resolution_report(config)
     requested_tracking = _tracking_config(config)
+    return _TrackPreparation(
+        config=config,
+        targets=tuple(targets),
+        source_state_path=source_state_path,
+        requested_tracking=requested_tracking,
+    )
+
+
+def _track_locked(
+    args: Namespace,
+    diagnostics: RunDiagnostics,
+    prepared: _TrackPreparation,
+    *,
+    started_wall: datetime,
+    started: float,
+) -> None:
+    output = Path(args.output)
+    config = prepared.config
+    targets = prepared.targets
+    source_state_path = prepared.source_state_path
+    requested_tracking = prepared.requested_tracking
 
     try:
         with TemporaryDirectory(

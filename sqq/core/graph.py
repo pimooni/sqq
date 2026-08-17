@@ -1,6 +1,6 @@
-from __future__ import annotations
-
 """Build the water graph used by rings, open cage patches, cages, and order metrics."""
+
+from __future__ import annotations
 
 from collections import defaultdict
 from collections.abc import Iterable
@@ -148,7 +148,9 @@ def cell_list_water_pairs(atoms: list[Atom], waters: list[Water], box: np.ndarra
     cells: dict[tuple[int, int, int], list[Water]] = defaultdict(list)
     for water in waters:
         coord = atoms[water.oxygen].xyz % lengths
-        key = tuple(np.floor(coord / lengths * n_cells).astype(int))
+        cell = np.floor(coord / lengths * n_cells).astype(int)
+        cell = np.minimum(np.maximum(cell, 0), n_cells - 1)
+        key = tuple(cell)
         cells[key].append(water)
 
     visited: set[tuple[int, int]] = set()

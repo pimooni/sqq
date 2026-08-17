@@ -1,5 +1,6 @@
 """SQQ: Shell Quant Qualifier."""
 
+from ._version import __release_date__, __version__
 from .api import analyze_frame, load_config, read_frames
 from .exceptions import AnalysisError, ConfigurationError, InputError, SQQError
 
@@ -15,6 +16,3 @@ __all__ = [
     "__release_date__",
     "__version__",
 ]
-
-__version__ = "0.5.2"
-__release_date__ = "Aug 13, 2026"

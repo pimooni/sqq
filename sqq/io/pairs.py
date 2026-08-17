@@ -1,6 +1,6 @@
-from __future__ import annotations
-
 """Parse pair files into canonical selected-water oxygen atom indices."""
+
+from __future__ import annotations
 
 from collections.abc import Iterable
 from pathlib import Path

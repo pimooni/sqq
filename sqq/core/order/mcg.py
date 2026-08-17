@@ -7,7 +7,7 @@ from typing import Any
 
 import numpy as np
 
-from .common import connected_components
+from ..components import connected_components
 from ..geometry import pbc_aware_centroid
 from ..pbc import minimum_image
 from ..spatial import cross_cutoff_pairs, self_cutoff_pairs

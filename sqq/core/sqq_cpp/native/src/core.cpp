@@ -16,6 +16,10 @@
 #include <unordered_map>
 #include <unordered_set>
 
+#ifndef SQQ_VERSION
+#define SQQ_VERSION "0.5.3"
+#endif
+
 namespace sqq_cpp {
 namespace {
 
@@ -120,10 +124,6 @@ struct GraphInternal {
     std::map<int, std::set<int>> adjacency;
 };
 
-bool fully_periodic(const std::optional<Box>& box) {
-    return box && box->periodic[0] && box->periodic[1] && box->periodic[2];
-}
-
 std::vector<std::pair<int, int>> water_candidate_pairs(
     const FrameInput& frame,
     double cutoff
@@ -133,20 +133,35 @@ std::vector<std::pair<int, int>> water_candidate_pairs(
     if (count < 2) {
         return result;
     }
-    if (!fully_periodic(frame.box)) {
-        result.reserve(static_cast<std::size_t>(count) * static_cast<std::size_t>(count - 1) / 2);
-        for (int left = 0; left < count; ++left) {
-            for (int right = left + 1; right < count; ++right) {
-                result.emplace_back(left, right);
-            }
-        }
-        return result;
-    }
-
-    const auto& box = *frame.box;
+    const bool has_box = frame.box.has_value();
     std::array<int, 3> shape{};
+    std::array<double, 3> origin{};
+    std::array<double, 3> span{};
+    const Vec3 first = frame.positions[frame.waters.front().oxygen];
+    origin = {first.x, first.y, first.z};
+    std::array<double, 3> maximum = origin;
+    for (const auto& water : frame.waters) {
+        const Vec3 coordinate = frame.positions[water.oxygen];
+        const double raw[3] = {coordinate.x, coordinate.y, coordinate.z};
+        for (int axis = 0; axis < 3; ++axis) {
+            origin[axis] = std::min(origin[axis], raw[axis]);
+            maximum[axis] = std::max(maximum[axis], raw[axis]);
+        }
+    }
     for (int axis = 0; axis < 3; ++axis) {
-        shape[axis] = std::max(1, static_cast<int>(std::floor(box.lengths[axis] / cutoff)));
+        const bool periodic = has_box && frame.box->periodic[axis];
+        if (periodic) {
+            const double length = frame.box->lengths[axis];
+            if (!(std::isfinite(length) && length > 0.0)) {
+                throw std::invalid_argument("periodic box lengths must be positive and finite");
+            }
+            origin[axis] = 0.0;
+            span[axis] = length;
+            shape[axis] = std::max(1, static_cast<int>(std::floor(length / cutoff)));
+        } else {
+            span[axis] = std::max(0.0, maximum[axis] - origin[axis]);
+            shape[axis] = std::max(1, static_cast<int>(std::floor(span[axis] / cutoff)) + 1);
+        }
     }
     using Cell = std::array<int, 3>;
     std::map<Cell, std::vector<int>> cells;
@@ -155,20 +170,25 @@ std::vector<std::pair<int, int>> water_candidate_pairs(
         const double raw[3] = {coordinate.x, coordinate.y, coordinate.z};
         Cell key{};
         for (int axis = 0; axis < 3; ++axis) {
-            const double length = box.lengths[axis];
-            double wrapped = raw[axis] - std::floor(raw[axis] / length) * length;
-            if (wrapped >= length) {
-                wrapped = 0.0;
+            const bool periodic = has_box && frame.box->periodic[axis];
+            if (periodic) {
+                const double length = span[axis];
+                double wrapped = raw[axis] - std::floor(raw[axis] / length) * length;
+                if (wrapped >= length) wrapped = 0.0;
+                key[axis] = std::min(
+                    shape[axis] - 1,
+                    std::max(0, static_cast<int>(std::floor(wrapped / length * shape[axis])))
+                );
+            } else {
+                key[axis] = std::min(
+                    shape[axis] - 1,
+                    std::max(0, static_cast<int>(std::floor((raw[axis] - origin[axis]) / cutoff)))
+                );
             }
-            key[axis] = std::min(
-                shape[axis] - 1,
-                std::max(0, static_cast<int>(std::floor(wrapped / length * shape[axis])))
-            );
         }
         cells[key].push_back(index);
     }
 
-    std::set<std::pair<int, int>> visited;
     for (const auto& cell_entry : cells) {
         const Cell& key = cell_entry.first;
         std::set<Cell> neighbor_keys;
@@ -177,14 +197,20 @@ std::vector<std::pair<int, int>> water_candidate_pairs(
                 for (int dz = -1; dz <= 1; ++dz) {
                     const int offsets[3] = {dx, dy, dz};
                     Cell other{};
+                    bool valid = true;
                     for (int axis = 0; axis < 3; ++axis) {
-                        int value = (key[axis] + offsets[axis]) % shape[axis];
-                        if (value < 0) {
-                            value += shape[axis];
+                        int value = key[axis] + offsets[axis];
+                        const bool periodic = has_box && frame.box->periodic[axis];
+                        if (periodic) {
+                            value %= shape[axis];
+                            if (value < 0) value += shape[axis];
+                        } else if (value < 0 || value >= shape[axis]) {
+                            valid = false;
+                            break;
                         }
                         other[axis] = value;
                     }
-                    neighbor_keys.insert(other);
+                    if (valid && !(other < key)) neighbor_keys.insert(other);
                 }
             }
         }
@@ -193,14 +219,16 @@ std::vector<std::pair<int, int>> water_candidate_pairs(
             if (found == cells.end()) {
                 continue;
             }
-            for (const int left : cell_entry.second) {
-                for (const int right : found->second) {
-                    if (left == right) {
-                        continue;
+            if (other_key == key) {
+                for (std::size_t left = 0; left < cell_entry.second.size(); ++left) {
+                    for (std::size_t right = left + 1; right < cell_entry.second.size(); ++right) {
+                        result.emplace_back(cell_entry.second[left], cell_entry.second[right]);
                     }
-                    const auto pair = std::minmax(left, right);
-                    if (visited.insert(pair).second) {
-                        result.push_back(pair);
+                }
+            } else {
+                for (const int left : cell_entry.second) {
+                    for (const int right : found->second) {
+                        result.push_back(std::minmax(left, right));
                     }
                 }
             }
@@ -236,11 +264,29 @@ GraphInternal build_graph(const FrameInput& frame, const AnalyzeOptions& options
     GraphInternal graph;
     graph.mode = lower_ascii(options.bond_mode);
     if (graph.mode == "auto") {
-        const bool complete_hydrogens = !frame.waters.empty() &&
-            std::all_of(frame.waters.begin(), frame.waters.end(), [](const WaterInput& water) {
-                return !water.hydrogens.empty();
-            });
-        graph.mode = complete_hydrogens ? "hbond" : "oo";
+        if (frame.waters.empty()) {
+            throw std::invalid_argument(
+                "graph.mode=auto cannot be resolved because no water molecules were selected"
+            );
+        }
+        const bool complete_hydrogens = std::all_of(
+            frame.waters.begin(), frame.waters.end(),
+            [](const WaterInput& water) { return water.hydrogens.size() >= 2; }
+        );
+        const bool oxygen_only = std::all_of(
+            frame.waters.begin(), frame.waters.end(),
+            [](const WaterInput& water) { return water.hydrogens.empty(); }
+        );
+        if (complete_hydrogens) {
+            graph.mode = "hbond";
+        } else if (oxygen_only) {
+            graph.mode = "oo";
+        } else {
+            throw std::invalid_argument(
+                "graph.mode=auto found mixed or incomplete water hydrogen topology; "
+                "use a consistent topology or choose graph.mode explicitly"
+            );
+        }
     }
     if (graph.mode != "hbond" && graph.mode != "oo" && graph.mode != "pairs") {
         throw std::invalid_argument("bond_mode must be auto, hbond, oo, or pairs");
@@ -359,13 +405,16 @@ std::vector<RingRecord> find_rings(
                 if (neighbor <= start || visited.count(neighbor)) {
                     continue;
                 }
+                const auto neighbor_it = adjacency.find(neighbor);
+                if (neighbor_it == adjacency.end()) {
+                    continue;
+                }
                 bool closes_cycle = false;
                 bool has_internal_chord = false;
                 if (chordless) {
                     for (std::size_t index = 0; index + 1 < path.size(); ++index) {
                         const int earlier = path[index];
-                        const auto earlier_it = adjacency.find(neighbor);
-                        if (earlier_it != adjacency.end() && earlier_it->second.count(earlier)) {
+                        if (neighbor_it->second.count(earlier)) {
                             if (earlier == start && path.size() >= 2) {
                                 closes_cycle = true;
                             } else {
@@ -377,8 +426,7 @@ std::vector<RingRecord> find_rings(
                         continue;
                     }
                 } else {
-                    const auto neighbor_it = adjacency.find(neighbor);
-                    closes_cycle = neighbor_it != adjacency.end() && neighbor_it->second.count(start);
+                    closes_cycle = neighbor_it->second.count(start);
                 }
 
                 path.push_back(neighbor);
@@ -967,7 +1015,6 @@ std::optional<Vec3> cage_geometry(
     const std::vector<int>& faces,
     const std::map<int, Vec3>& unwrapped
 ) {
-    (void)frame;
     std::vector<Vec3> coordinates;
     for (const auto& item : unwrapped) {
         coordinates.push_back(item.second);
@@ -977,7 +1024,11 @@ std::optional<Vec3> cage_geometry(
         return mean_center;
     }
     for (const int face : faces) {
-        const auto quality = measure_face_quality(rings[face], unwrapped).first;
+        const auto& ring = rings[face];
+        const auto face_unwrapped = unwrap_connected_nodes(
+            frame, ring.nodes, ring.edges
+        );
+        const auto quality = measure_face_quality(ring, face_unwrapped).first;
         if (quality.projected_area <= kEpsilon ||
             quality.planarity_rms > options.max_face_planarity_rms_nm ||
             quality.edge_cv > options.max_face_edge_cv) {
@@ -1566,22 +1617,19 @@ std::optional<double> mean_or_none(const std::vector<double>& values) {
 }
 
 std::optional<double> f3_for_water(
-    const FrameInput& frame,
-    int oxygen,
-    const std::vector<int>& neighbors
+    const std::vector<Vec3>& neighbor_vectors
 ) {
-    if (neighbors.size() < 2) return std::nullopt;
+    if (neighbor_vectors.size() < 2) return std::nullopt;
     const double tetrahedral_cos2 = std::pow(std::cos(109.47 * kPi / 180.0), 2.0);
+    std::vector<double> neighbor_lengths;
+    neighbor_lengths.reserve(neighbor_vectors.size());
+    for (const auto& vector : neighbor_vectors) neighbor_lengths.push_back(norm(vector));
     std::vector<double> terms;
-    for (std::size_t left = 0; left < neighbors.size(); ++left) {
-        const Vec3 left_vector = minimum_image(
-            frame.positions[neighbors[left]] - frame.positions[oxygen], frame.box
-        );
-        for (std::size_t right = left + 1; right < neighbors.size(); ++right) {
-            const Vec3 right_vector = minimum_image(
-                frame.positions[neighbors[right]] - frame.positions[oxygen], frame.box
-            );
-            const double denominator = norm(left_vector) * norm(right_vector);
+    for (std::size_t left = 0; left < neighbor_vectors.size(); ++left) {
+        const Vec3& left_vector = neighbor_vectors[left];
+        for (std::size_t right = left + 1; right < neighbor_vectors.size(); ++right) {
+            const Vec3& right_vector = neighbor_vectors[right];
+            const double denominator = neighbor_lengths[left] * neighbor_lengths[right];
             if (denominator <= kEpsilon) continue;
             const double cosine = dot(left_vector, right_vector) / denominator;
             const double value = cosine * std::abs(cosine) + tetrahedral_cos2;
@@ -1627,21 +1675,27 @@ double dihedral_from_vectors(Vec3 first_h, Vec3 oo, Vec3 second_h) {
 std::optional<double> f4_for_water(
     const FrameInput& frame,
     const WaterInput& water,
-    const std::vector<const WaterInput*>& neighbors
+    const std::vector<const WaterInput*>& neighbors,
+    const std::vector<Vec3>& neighbor_vectors,
+    const std::unordered_map<std::uint64_t, Vec3>& hydrogen_vectors
 ) {
     if (water.hydrogens.size() < 2) return std::nullopt;
+    if (neighbors.size() != neighbor_vectors.size()) {
+        throw std::logic_error("F4 neighbor/vector cache size mismatch");
+    }
     std::vector<double> terms;
-    for (const WaterInput* neighbor : neighbors) {
+    for (std::size_t index = 0; index < neighbors.size(); ++index) {
+        const WaterInput* neighbor = neighbors[index];
         if (neighbor->hydrogens.size() < 2) continue;
         const auto hydrogens = farthest_hydrogen_pair(frame, water, *neighbor);
-        const Vec3 first_h = minimum_image(
-            frame.positions[hydrogens.first] - frame.positions[water.oxygen], frame.box
-        );
-        const Vec3 oo = minimum_image(
-            frame.positions[neighbor->oxygen] - frame.positions[water.oxygen], frame.box
-        );
-        const Vec3 second_h = minimum_image(
-            frame.positions[hydrogens.second] - frame.positions[neighbor->oxygen], frame.box
+        const auto vector_key = [](int oxygen, int hydrogen) {
+            return (static_cast<std::uint64_t>(static_cast<std::uint32_t>(oxygen)) << 32U) |
+                static_cast<std::uint32_t>(hydrogen);
+        };
+        const Vec3& first_h = hydrogen_vectors.at(vector_key(water.oxygen, hydrogens.first));
+        const Vec3& oo = neighbor_vectors[index];
+        const Vec3& second_h = hydrogen_vectors.at(
+            vector_key(neighbor->oxygen, hydrogens.second)
         );
         terms.push_back(std::cos(3.0 * dihedral_from_vectors(first_h, oo, second_h)));
     }
@@ -1657,27 +1711,58 @@ OrderResult compute_order(
     OrderResult result;
     std::map<int, const WaterInput*> water_by_oxygen;
     for (const auto& water : frame.waters) water_by_oxygen[water.oxygen] = &water;
+    std::unordered_map<std::uint64_t, Vec3> hydrogen_vectors;
+    if (options.compute_f4) {
+        hydrogen_vectors.reserve(frame.waters.size() * 2U);
+        for (const auto& water : frame.waters) {
+            for (std::size_t index = 0;
+                 index < std::min<std::size_t>(2, water.hydrogens.size()); ++index) {
+                const int hydrogen = water.hydrogens[index];
+                const std::uint64_t key =
+                    (static_cast<std::uint64_t>(static_cast<std::uint32_t>(water.oxygen)) << 32U) |
+                    static_cast<std::uint32_t>(hydrogen);
+                hydrogen_vectors.emplace(
+                    key,
+                    minimum_image(
+                        frame.positions[hydrogen] - frame.positions[water.oxygen], frame.box
+                    )
+                );
+            }
+        }
+    }
     std::vector<double> f3_values;
     std::vector<double> f4_values;
     for (int water_index = 0; water_index < static_cast<int>(frame.waters.size()); ++water_index) {
         const auto& water = frame.waters[water_index];
-        std::vector<int> neighbor_oxygens;
         std::vector<const WaterInput*> neighbor_waters;
+        std::vector<Vec3> neighbor_vectors;
         const auto found = graph.adjacency.find(water.oxygen);
         if (found != graph.adjacency.end()) {
+            if (options.compute_f4) neighbor_waters.reserve(found->second.size());
+            if (options.compute_f3 || options.compute_f4) {
+                neighbor_vectors.reserve(found->second.size());
+            }
             for (const int oxygen : found->second) {
                 const auto neighbor = water_by_oxygen.find(oxygen);
                 if (neighbor != water_by_oxygen.end()) {
-                    neighbor_oxygens.push_back(oxygen);
-                    neighbor_waters.push_back(neighbor->second);
+                    if (options.compute_f4) neighbor_waters.push_back(neighbor->second);
+                    if (options.compute_f3 || options.compute_f4) {
+                        neighbor_vectors.push_back(minimum_image(
+                            frame.positions[oxygen] - frame.positions[water.oxygen], frame.box
+                        ));
+                    }
                 }
             }
         }
         WaterOrderRecord row;
         row.water_index = water_index;
         row.oxygen = water.oxygen;
-        if (options.compute_f3) row.f3 = f3_for_water(frame, water.oxygen, neighbor_oxygens);
-        if (options.compute_f4) row.f4 = f4_for_water(frame, water, neighbor_waters);
+        if (options.compute_f3) row.f3 = f3_for_water(neighbor_vectors);
+        if (options.compute_f4) {
+            row.f4 = f4_for_water(
+                frame, water, neighbor_waters, neighbor_vectors, hydrogen_vectors
+            );
+        }
         if (row.f3) f3_values.push_back(*row.f3);
         if (row.f4) f4_values.push_back(*row.f4);
         result.per_water.push_back(std::move(row));
@@ -1728,6 +1813,6 @@ AnalysisResult analyze_frame(const FrameInput& frame, const AnalyzeOptions& opti
     return result;
 }
 
-const char* core_version() noexcept { return "0.5.2"; }
+const char* core_version() noexcept { return SQQ_VERSION; }
 
 }  // namespace sqq_cpp

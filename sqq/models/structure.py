@@ -1,6 +1,6 @@
-from __future__ import annotations
-
 """Atomic, molecular, and frame data contracts."""
+
+from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
@@ -46,4 +46,11 @@ class Guest:
     center_atom: int | None = None
 
 
-__all__ = ["Atom", "Frame", "Water", "Guest"]
+def guest_id(guest: Guest) -> str:
+    """Return an unambiguous topology-stable guest identifier."""
+    if not guest.atoms:
+        raise ValueError("A guest molecule must contain at least one atom.")
+    return f"g{min(int(index) for index in guest.atoms):08d}"
+
+
+__all__ = ["Atom", "Frame", "Water", "Guest", "guest_id"]

@@ -1,6 +1,6 @@
-from __future__ import annotations
-
 """Atomic terminal text formatting shared by headers and progress views."""
+
+from __future__ import annotations
 
 from datetime import datetime
 import sys

@@ -1,6 +1,6 @@
-from __future__ import annotations
-
 """XLSX publication and formatting for shared report tables."""
+
+from __future__ import annotations
 
 from time import perf_counter
 from typing import Any

@@ -1,6 +1,6 @@
-from __future__ import annotations
-
 """Convert scientific frame results into shared report tables."""
+
+from __future__ import annotations
 
 from collections import Counter, defaultdict
 from datetime import datetime

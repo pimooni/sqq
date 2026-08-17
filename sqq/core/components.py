@@ -1,20 +1,26 @@
+"""Deterministic connected-component helpers shared by scientific modules."""
+
 from __future__ import annotations
 
-from collections.abc import Mapping, Set
+from collections.abc import Hashable, Mapping, Set
+from typing import TypeVar
+
+
+NodeT = TypeVar("NodeT", bound=Hashable)
 
 
 def connected_components(
-    nodes: Set[int],
-    adjacency: Mapping[int, Set[int]],
-) -> list[tuple[int, ...]]:
-    """Return deterministic connected components induced by ``nodes``."""
+    nodes: Set[NodeT],
+    adjacency: Mapping[NodeT, Set[NodeT]],
+) -> list[tuple[NodeT, ...]]:
+    """Return deterministic components of the graph induced by ``nodes``."""
     remaining = set(nodes)
-    components: list[tuple[int, ...]] = []
+    components: list[tuple[NodeT, ...]] = []
     while remaining:
         root = min(remaining)
         stack = [root]
         remaining.remove(root)
-        component: list[int] = []
+        component: list[NodeT] = []
         while stack:
             node = stack.pop()
             component.append(node)
@@ -23,3 +29,6 @@ def connected_components(
                 stack.append(neighbor)
         components.append(tuple(sorted(component)))
     return components
+
+
+__all__ = ["connected_components"]

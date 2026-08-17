@@ -1,10 +1,10 @@
-from __future__ import annotations
-
 """Analyze workflow built on the shared typed runtime."""
+
+from __future__ import annotations
 
 from argparse import Namespace
 from copy import deepcopy
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from datetime import datetime
 from pathlib import Path
 from time import perf_counter
@@ -27,7 +27,10 @@ from ..io.gro_grouping import (
     scan_and_group_gro_inputs,
 )
 from ..io.lammps import inspect_lammps_topology_mapping
-from ..io.output_cleanup import cleanup_previous_analyze_outputs
+from ..io.output_cleanup import (
+    OutputOwnershipSession,
+    cleanup_previous_analyze_outputs,
+)
 from ..io.tracking import write_tracking_result, write_tracking_tables
 from ..io.render import (
     RenderSession,
@@ -65,20 +68,53 @@ from .session import AnalysisEvent, AnalysisRunner, AnalysisSink
 def analyze(args: Namespace) -> None:
     """Run Analyze while exclusively owning its output root."""
     print_run_banner(getattr(args, "engine", None))
-    outdir = Path(args.output)
-    outdir.mkdir(parents=True, exist_ok=True)
-    with output_lock(outdir):
-        diagnostics = RunDiagnostics()
-        with capture_run_warnings(diagnostics):
-            try:
-                _analyze_locked(args, diagnostics)
-            finally:
-                diagnostics.emit()
-
-
-def _analyze_locked(args: Namespace, diagnostics: RunDiagnostics) -> None:
     run_started_at = datetime.now().astimezone()
     started_at = perf_counter()
+    outdir = Path(args.output)
+    if outdir.exists() and not outdir.is_dir():
+        raise NotADirectoryError(f"Output path is not a directory: {outdir}")
+    diagnostics = RunDiagnostics()
+    try:
+        with capture_run_warnings(diagnostics):
+            prepared = _prepare_analyze(args)
+            outdir.mkdir(parents=True, exist_ok=True)
+            with output_lock(outdir):
+                cleanup_previous_analyze_outputs(
+                    outdir,
+                    prepared.execution_config,
+                )
+                with OutputOwnershipSession(outdir):
+                    for root in prepared.plan.output_roots:
+                        root.mkdir(parents=True, exist_ok=True)
+                    _analyze_locked(
+                        args,
+                        diagnostics,
+                        prepared,
+                        run_started_at=run_started_at,
+                        started_at=started_at,
+                    )
+    except BaseException:
+        diagnostics.consume()
+        raise
+    finally:
+        diagnostics.emit()
+
+
+@dataclass(frozen=True, slots=True)
+class _AnalyzePreparation:
+    input_path: Path
+    paths: tuple[Path, ...]
+    topology: Path | None
+    grouping: GroGroupingResult | None
+    requested_output_types: tuple[str, ...]
+    grouping_warnings: tuple[str, ...]
+    plan: RunPlan
+    execution_config: dict[str, Any]
+    group_configs: dict[int, dict[str, Any]]
+
+
+def _prepare_analyze(args: Namespace) -> _AnalyzePreparation:
+    """Resolve all read-only inputs before creating the output directory."""
     config = load_config(
         Path(args.config) if args.config else None,
         mode=getattr(args, "engine", None),
@@ -89,12 +125,17 @@ def _analyze_locked(args: Namespace, diagnostics: RunDiagnostics) -> None:
     refresh_resolution_report(config)
 
     input_path = Path(args.input)
-    paths = expand_inputs(
-        input_path,
-        pattern=str(config["input"]["pattern"]),
-        recursive=bool(config["input"]["recursive"]),
+    paths = tuple(
+        Path(item)
+        for item in expand_inputs(
+            input_path,
+            pattern=str(config["input"]["pattern"]),
+            recursive=bool(config["input"]["recursive"]),
+        )
     )
     topology = Path(args.topology) if args.topology else None
+    if topology is not None and not topology.is_file():
+        raise FileNotFoundError(f"Topology file does not exist: {topology}")
     config["input"]["format"] = input_format_label(paths)
     config["input"]["topology"] = str(topology.resolve()) if topology else None
     _resolve_lammps_mapping(config, args, topology)
@@ -107,9 +148,8 @@ def _analyze_locked(args: Namespace, diagnostics: RunDiagnostics) -> None:
     )
     if grouping is not None:
         _validate_shared_gro_topology(topology, grouping)
-    requested_output_types = list(config.get("output", {}).get("types", ()))
-    grouping_warnings = _grouping_warnings(grouping)
-
+    requested_output_types = tuple(config.get("output", {}).get("types", ()))
+    grouping_warnings = tuple(_grouping_warnings(grouping))
     plan = build_run_plan(
         paths,
         config,
@@ -118,9 +158,36 @@ def _analyze_locked(args: Namespace, diagnostics: RunDiagnostics) -> None:
         grouping=grouping,
     )
     plan, execution_config, group_configs = _resolve_plan_metadata(plan, grouping)
-    cleanup_previous_analyze_outputs(Path(args.output), execution_config)
-    for root in plan.output_roots:
-        root.mkdir(parents=True, exist_ok=True)
+    return _AnalyzePreparation(
+        input_path=input_path,
+        paths=paths,
+        topology=topology,
+        grouping=grouping,
+        requested_output_types=requested_output_types,
+        grouping_warnings=grouping_warnings,
+        plan=plan,
+        execution_config=execution_config,
+        group_configs=group_configs,
+    )
+
+
+def _analyze_locked(
+    args: Namespace,
+    diagnostics: RunDiagnostics,
+    prepared: _AnalyzePreparation,
+    *,
+    run_started_at: datetime,
+    started_at: float,
+) -> None:
+    input_path = prepared.input_path
+    paths = prepared.paths
+    topology = prepared.topology
+    grouping = prepared.grouping
+    requested_output_types = list(prepared.requested_output_types)
+    grouping_warnings = list(prepared.grouping_warnings)
+    plan = prepared.plan
+    execution_config = prepared.execution_config
+    group_configs = prepared.group_configs
 
     render_sessions, plan = _prepare_render_sessions(plan, execution_config, group_configs)
     tracking_sink, plan = _prepare_tracking_sink(
@@ -191,6 +258,7 @@ def _analyze_locked(args: Namespace, diagnostics: RunDiagnostics) -> None:
         run_started_at,
     )
 
+    rows_by_index: dict[int, dict[str, Any]] = {}
     progress = _ProgressBridge(plan, execution_config, group_configs, started_at)
     try:
         outcomes = AnalysisRunner(
@@ -228,7 +296,7 @@ def _analyze_locked(args: Namespace, diagnostics: RunDiagnostics) -> None:
             group_configs,
             requested_output_types,
             grouping_warnings,
-            locals().get("rows_by_index", {}),
+            rows_by_index,
             exc,
         )
         raise
@@ -462,7 +530,6 @@ def _prepare_render_sessions(
     if group_configs:
         for key, group_config in group_configs.items():
             root = Path(plan.context.group_output_roots[key])
-            RenderSession.cleanup_output(root)
             if not output_enabled(group_config, "sqq-render"):
                 continue
             graph = group_config["graph"]
@@ -480,7 +547,6 @@ def _prepare_render_sessions(
         context = replace(plan.context, group_fragment_dirs=group_fragment_dirs)
     else:
         root = plan.context.output_root
-        RenderSession.cleanup_output(root)
         if output_enabled(config, "sqq-render"):
             graph = config["graph"]
             session = RenderSession.create(

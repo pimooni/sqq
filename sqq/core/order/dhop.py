@@ -7,7 +7,7 @@ from typing import Any
 
 import numpy as np
 
-from .common import connected_components
+from ..components import connected_components
 from ..pbc import minimum_image
 from ..spatial import self_cutoff_pairs
 from ...models import ClusterOrderValue, Frame, Water

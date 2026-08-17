@@ -1,6 +1,6 @@
-from __future__ import annotations
-
 """Normalize complete analysis scopes independently of CLI workflows."""
+
+from __future__ import annotations
 
 import math
 from pathlib import Path
@@ -324,6 +324,43 @@ def normalize_analysis_scopes(config: dict[str, Any]) -> None:
     )
     output_types = list(output_normalizer(raw_output_types))
     if not hydrate_cluster["enabled"]:
+        if isinstance(raw_output_types, str):
+            requested_output_types = {
+                item.strip().lower()
+                for item in raw_output_types.split(",")
+                if item.strip()
+            }
+        elif raw_output_types is None:
+            requested_output_types = set()
+        else:
+            try:
+                requested_output_types = {
+                    str(item).strip().lower()
+                    for item in raw_output_types
+                    if str(item).strip()
+                }
+            except TypeError:
+                requested_output_types = set()
+        explicit_cluster_outputs = {
+            "cluster-gro", "cluster-detail"
+        }.intersection(requested_output_types)
+        if explicit_cluster_outputs and "all" not in requested_output_types:
+            names = ", ".join(sorted(explicit_cluster_outputs))
+            raise ValueError(
+                f"Output type(s) {names} require hydrate_cluster.enabled: on "
+                "or --find-cluster on."
+            )
+        if "all" in requested_output_types and not is_cpp_mode(
+            config.get("mode", DEFAULT_MODE)
+        ):
+            message = (
+                "output.type=all omitted cluster-gro and cluster-detail because "
+                "hydrate_cluster.enabled is off"
+            )
+            adjustments = config.setdefault("adjustments", [])
+            if message not in adjustments:
+                adjustments.append(message)
+                python_warnings.warn(message, UserWarning, stacklevel=2)
         output_types = [
             output_type
             for output_type in output_types
@@ -356,6 +393,17 @@ def normalize_analysis_scopes(config: dict[str, Any]) -> None:
     if structure_layout not in {"grouped", "flat"}:
         raise ValueError("output.structure_layout must be grouped or flat.")
     output["structure_layout"] = structure_layout
+    center_resname = str(output.get("center_resname", "CNT")).strip()
+    if (
+        not center_resname
+        or len(center_resname) > 5
+        or not center_resname.isascii()
+        or any(character.isspace() for character in center_resname)
+    ):
+        raise ValueError(
+            "output.center_resname must be 1-5 non-whitespace ASCII characters."
+        )
+    output["center_resname"] = center_resname
     render = config.setdefault("render", {})
     atom_scope = str(render.get("atom_scope", "full")).strip().lower()
     if atom_scope not in {"full", "compact"}:

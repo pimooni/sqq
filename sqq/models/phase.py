@@ -1,6 +1,6 @@
-from __future__ import annotations
-
 """Hydrate motif, domain, and cluster data contracts."""
+
+from __future__ import annotations
 
 from dataclasses import dataclass
 

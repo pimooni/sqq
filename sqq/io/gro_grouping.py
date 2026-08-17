@@ -1,6 +1,6 @@
-from __future__ import annotations
-
 """Coordinate-independent topology grouping for standalone GRO inputs."""
+
+from __future__ import annotations
 
 from collections.abc import Iterable
 from dataclasses import dataclass

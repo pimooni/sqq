@@ -1,6 +1,6 @@
-from __future__ import annotations
-
 """Shared geometric helpers for local topology objects."""
+
+from __future__ import annotations
 
 import numpy as np
 

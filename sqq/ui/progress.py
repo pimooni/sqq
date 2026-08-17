@@ -1,6 +1,6 @@
-from __future__ import annotations
-
 """Serial and parallel terminal progress displays."""
+
+from __future__ import annotations
 
 from collections import Counter
 import sys

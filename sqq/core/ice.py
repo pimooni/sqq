@@ -1,6 +1,6 @@
-from __future__ import annotations
-
 """CHILL-style ice classification on the shared water graph."""
+
+from __future__ import annotations
 
 from dataclasses import dataclass
 

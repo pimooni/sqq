@@ -1,6 +1,6 @@
-from __future__ import annotations
-
 """SQQ-Py frame-analysis backend."""
+
+from __future__ import annotations
 
 from typing import Any, Callable
 
@@ -14,7 +14,12 @@ from ..cage import find_cages
 from ..graph import build_water_graph
 from ..phase import analyze_hydrate_clusters
 from ..ice import classify_ice_waters
-from ..order import compute_dhop_order, compute_mcg_order, compute_order_parameters
+from ..order import (
+    compute_dhop_order,
+    compute_mcg_order,
+    compute_order_parameters,
+    fixed_neighbor_shortfall_warning,
+)
 from ..half_quasi import find_cage_patches
 from ..ring import find_rings
 from ..ring_topology import build_ring_topology_index
@@ -160,6 +165,15 @@ def analyze_frame(
         )
     else:
         f3f4 = None
+    if f3f4 is not None:
+        q_warning = fixed_neighbor_shortfall_warning(
+            (row.q_neighbors for row in f3f4.per_water),
+            mode=f3f4.q_neighbor_mode,
+            n_neighbor=f3f4.q_n_neighbor,
+            cutoff_nm=f3f4.q_cutoff_nm,
+        )
+        if q_warning is not None:
+            warnings.append(q_warning)
 
     hydrate_parameters = selected_order_parameters & {
         "mcg1",

@@ -1,6 +1,6 @@
-from __future__ import annotations
-
 """Ring search on the water-network graph."""
+
+from __future__ import annotations
 
 from collections import defaultdict
 

@@ -1,6 +1,6 @@
-from __future__ import annotations
-
 """Discovery and validation of existing SQQ render packages."""
+
+from __future__ import annotations
 
 import os
 from pathlib import Path

@@ -1,6 +1,6 @@
-from __future__ import annotations
-
 """Layered half-cage and quasi-cage search."""
+
+from __future__ import annotations
 
 from collections import Counter, defaultdict, deque
 import numpy as np

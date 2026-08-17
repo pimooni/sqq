@@ -3,7 +3,7 @@
 from .order import ClusterOrderValue, F3F4Result, HydrateOrderResult, WaterOrder
 from .phase import HydrateCluster, HydrateDomain, HydrateMotif
 from .result import FrameResult
-from .structure import Atom, Frame, Guest, Water
+from .structure import Atom, Frame, Guest, Water, guest_id
 from .topology import Cage, CagePatch, GraphResult, Ring
 from .tracking import (
     CageObservation,
@@ -51,4 +51,5 @@ __all__ = [
     "EventKind",
     "Row",
     "TargetKind",
+    "guest_id",
 ]

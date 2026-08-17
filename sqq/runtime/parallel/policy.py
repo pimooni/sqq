@@ -1,11 +1,12 @@
-from __future__ import annotations
-
 """CPU, worker-count, and numeric-thread policy."""
+
+from __future__ import annotations
 
 import math
 import os
 import subprocess
 import sys
+from threading import RLock
 from contextlib import contextmanager
 from functools import lru_cache
 from pathlib import Path
@@ -17,6 +18,9 @@ from ...config import (
     mode_worker_fraction,
     normalize_parallel_backend,
 )
+
+
+_MATH_THREAD_LOCK = RLock()
 
 
 def effective_cpu_count() -> int:
@@ -69,7 +73,12 @@ def _detect_physical_cpu_count() -> int | None:
 def _detect_command_int(command: list[str]) -> int | None:
     try:
         completed = subprocess.run(
-            command, capture_output=True, text=True, timeout=2, check=False
+            command,
+            capture_output=True,
+            text=True,
+            errors="replace",
+            timeout=2,
+            check=False,
         )
     except (OSError, subprocess.SubprocessError):
         return None
@@ -88,7 +97,7 @@ def _detect_linux_cpuinfo_physical_cores() -> int | None:
     if not cpuinfo.exists():
         return None
     try:
-        blocks = cpuinfo.read_text(encoding="utf-8", errors="ignore").strip().split("\n\n")
+        blocks = cpuinfo.read_text(encoding="utf-8", errors="replace").strip().split("\n\n")
     except OSError:
         return None
     seen_cores: set[tuple[str, str]] = set()
@@ -136,17 +145,28 @@ def limited_math_threads(value: int) -> Iterator[None]:
         "NUMEXPR_NUM_THREADS",
         "BLIS_NUM_THREADS",
     )
-    previous = {name: os.environ.get(name) for name in names}
-    try:
-        for name in names:
-            os.environ[name] = str(thread_count)
-        yield
-    finally:
-        for name, old_value in previous.items():
-            if old_value is None:
-                os.environ.pop(name, None)
+    # Environment variables are process-global. Serialize independent API
+    # calls so nested/concurrent runs cannot restore one another's snapshot.
+    with _MATH_THREAD_LOCK:
+        previous = {name: os.environ.get(name) for name in names}
+        try:
+            for name in names:
+                os.environ[name] = str(thread_count)
+            try:
+                from threadpoolctl import threadpool_limits
+            except Exception:
+                yield
             else:
-                os.environ[name] = old_value
+                # threadpoolctl also affects BLAS libraries already imported
+                # by NumPy. It remains optional and has a safe env-only fallback.
+                with threadpool_limits(limits=thread_count):
+                    yield
+        finally:
+            for name, old_value in previous.items():
+                if old_value is None:
+                    os.environ.pop(name, None)
+                else:
+                    os.environ[name] = old_value
 
 
 def process_in_flight_limit(workers: int) -> int:

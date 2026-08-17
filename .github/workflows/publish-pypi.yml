@@ -15,12 +15,13 @@ env:
   CIBW_BUILD: "cp310-* cp311-* cp312-* cp313-* cp314-*"
   CIBW_SKIP: "*-musllinux_*"
   CIBW_TEST_COMMAND: >-
-    python -c "from importlib.metadata import version; import subprocess; import sqq; import sqq.cli;
+    python -c "from importlib.metadata import version; import os; import subprocess; import sqq; import sqq.cli;
     from sqq.core.sqq_cpp import _sqq_cpp as native;
-    assert version('sqq') == sqq.__version__ == native.core_version() == '0.5.2';
-    cli_version = subprocess.run(['sqq', '--version'], check=True, capture_output=True, text=True);
+    assert version('sqq') == sqq.__version__ == native.core_version();
+    cli_env = dict(os.environ, PYTHONIOENCODING='utf-8', PYTHONUTF8='1');
+    cli_version = subprocess.run(['sqq', '--version'], check=True, capture_output=True, encoding='utf-8', env=cli_env);
     assert cli_version.stdout.strip() == sqq.cli.VERSION_LINE;
-    cli_help = subprocess.run(['sqq', '-h'], check=True, capture_output=True, text=True);
+    cli_help = subprocess.run(['sqq', '-h'], check=True, capture_output=True, encoding='utf-8', env=cli_env);
     assert 'usage: sqq' in cli_help.stdout;
     assert all(command in cli_help.stdout for command in ('init', 'analyze', 'track', 'vmd'))"
 

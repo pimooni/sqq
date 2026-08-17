@@ -1,6 +1,6 @@
-from __future__ import annotations
-
 """Complete per-frame analysis result contract."""
+
+from __future__ import annotations
 
 from dataclasses import dataclass, field
 

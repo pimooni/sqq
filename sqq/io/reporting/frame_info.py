@@ -1,6 +1,6 @@
-from __future__ import annotations
-
 """Per-frame Markdown and auxiliary machine-readable outputs."""
+
+from __future__ import annotations
 
 from collections import Counter, defaultdict
 from datetime import datetime

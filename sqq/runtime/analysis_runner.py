@@ -1,6 +1,6 @@
-from __future__ import annotations
-
 """Common Analyze/Track runner over the typed runtime contracts."""
+
+from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass

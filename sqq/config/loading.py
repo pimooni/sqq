@@ -99,11 +99,11 @@ def _preset_adjustments(selector: str, config: dict[str, Any]) -> list[dict[str,
         {
             "parameter": parameter,
             "requested": selector,
-            "effective": effective,
+            "effective": current_value,
             "reason": f"forced by compatibility profile {selector}",
         }
-        for parameter, effective, expected in candidates
-        if effective == expected
+        for parameter, current_value, preset_value in candidates
+        if current_value == preset_value
     ]
     worker = config.get("parallel", {}).get("workers", "auto")
     if worker in (None, "", "auto"):
@@ -124,16 +124,18 @@ def refresh_resolution_report(config: dict[str, Any]) -> None:
     adjustments = _preset_adjustments(selector, config)
     for message in config.get("adjustments", ()):
         reason = str(message)
-        legacy_fast_closure = reason.startswith("Legacy cage.fast_closure")
+        legacy_migration = reason.startswith("Legacy ")
+        if reason.startswith("Legacy cage.fast_closure"):
+            parameter = "cage.fast_closure"
+        elif reason.startswith("Legacy inactive setting(s) output."):
+            parameter = "output.legacy_inactive"
+        else:
+            parameter = "engine.capability"
         adjustments.append(
             {
-                "parameter": (
-                    "cage.fast_closure"
-                    if legacy_fast_closure
-                    else "engine.capability"
-                ),
-                "requested": "legacy setting" if legacy_fast_closure else selector,
-                "effective": "ignored" if legacy_fast_closure else None,
+                "parameter": parameter,
+                "requested": "legacy setting" if legacy_migration else selector,
+                "effective": "ignored" if legacy_migration else None,
                 "reason": reason,
             }
         )

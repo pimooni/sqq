@@ -1,14 +1,16 @@
-from __future__ import annotations
-
 """Command-line interface for SQQ."""
 
+from __future__ import annotations
+
 import argparse
+import os
 import sys
 from pathlib import Path
 
 from . import __release_date__, __version__
 from .banner import HELP_BANNER
 from .config import ORDER_PARAMETER_CHOICES
+from .exceptions import SQQError
 from .workflow.analyze import analyze
 from .workflow.init import initialize_config
 from .workflow.track import track
@@ -312,11 +314,45 @@ def main(argv: list[str] | None = None) -> int:
         print(f"Wrote default SQQ config: {out}")
         return 0
     if args.command == "analyze":
-        analyze(args)
-        return 0
+        return _run_user_command(analyze, args)
     if args.command == "track":
-        track(args)
-        return 0
+        return _run_user_command(track, args)
     if args.command == "vmd":
         return run_vmd_command(args.path)
     raise AssertionError(f"Unhandled command: {args.command}")
+
+
+def _run_user_command(command, args: argparse.Namespace) -> int:
+    """Render expected user errors as one line unless debugging is enabled."""
+    try:
+        command(args)
+    except (
+        SQQError,
+        OSError,
+        ValueError,
+        RuntimeError,
+    ) as exc:
+        if _debug_enabled():
+            raise
+        message = " ".join(str(exc).split()) or type(exc).__name__
+        _write_cli_error(f"Error: {message}\n")
+        return 2
+    return 0
+
+
+def _debug_enabled() -> bool:
+    return os.environ.get("SQQ_DEBUG", "").strip().casefold() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
+def _write_cli_error(message: str) -> None:
+    encoding = getattr(sys.stderr, "encoding", None) or "utf-8"
+    safe = message.encode(encoding, errors="replace").decode(
+        encoding,
+        errors="replace",
+    )
+    sys.stderr.write(safe)

@@ -1,6 +1,6 @@
-from __future__ import annotations
-
 """Deterministic cutoff-pair searches for orthorhombic coordinate sets."""
+
+from __future__ import annotations
 
 from itertools import product
 from math import ceil
@@ -265,6 +265,7 @@ def _cell_keys(
         shape_array = np.maximum(1, np.floor(lengths / cutoff).astype(int))
         wrapped = np.mod(coords, lengths)
         scaled = np.floor(wrapped / (lengths / shape_array)).astype(int)
+        scaled = np.minimum(np.maximum(scaled, 0), shape_array - 1)
         shape = tuple(int(value) for value in shape_array)
         return [tuple(int(value) for value in row) for row in scaled], shape
     origin = np.min(coords, axis=0)

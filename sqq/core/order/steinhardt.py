@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from functools import lru_cache
 from math import atan2, cos, factorial, pi, sin, sqrt
 from typing import Any
@@ -53,6 +54,31 @@ def resolve_q_neighbor_count(mode: str, value: int | str | None) -> int | None:
     if count < 1:
         raise ValueError("order.q_n_neighbor must be at least 1 when set.")
     return count
+
+
+def fixed_neighbor_shortfall_warning(
+    neighbor_counts: Iterable[int],
+    *,
+    mode: str,
+    n_neighbor: int | None,
+    cutoff_nm: float | None,
+    threshold_fraction: float = 0.5,
+) -> str | None:
+    """Summarize widespread fixed-neighbor shortfalls without changing Q_l."""
+    if mode not in {"nearest", "lammps"} or n_neighbor is None:
+        return None
+    counts = tuple(int(value) for value in neighbor_counts)
+    if not counts:
+        return None
+    shortfall = sum(value < n_neighbor for value in counts)
+    if shortfall == 0 or shortfall / len(counts) < threshold_fraction:
+        return None
+    cutoff_text = "the configured cutoff" if cutoff_nm is None else f"{cutoff_nm:g} nm"
+    return (
+        f"Q_l {mode} mode found fewer than {n_neighbor} neighbors within "
+        f"{cutoff_text} for {shortfall}/{len(counts)} waters; their Q_l values "
+        "follow the configured fixed-neighbor rule and are reported as 0."
+    )
 
 
 def q_values_for_water(
@@ -212,10 +238,12 @@ def q_values_from_vectors(vectors: list[np.ndarray], degrees: tuple[int, ...]) -
     if not vectors:
         return {degree: 0.0 for degree in degrees}
     totals = {degree: [0j for _ in range(2 * degree + 1)] for degree in degrees}
+    valid_vector_count = 0
     for vector in vectors:
         norm = float(np.linalg.norm(vector))
         if norm <= 1e-12:
             continue
+        valid_vector_count += 1
         x, y, z = (float(value) / norm for value in vector)
         theta_cos = max(-1.0, min(1.0, z))
         phi = atan2(y, x)
@@ -226,7 +254,9 @@ def q_values_from_vectors(vectors: list[np.ndarray], degrees: tuple[int, ...]) -
                 degree_totals[degree + order] += positive
                 if order:
                     degree_totals[degree - order] += ((-1) ** order) * positive.conjugate()
-    divisor = len(vectors)
+    if valid_vector_count == 0:
+        return {degree: 0.0 for degree in degrees}
+    divisor = valid_vector_count
     values: dict[int, float] = {}
     for degree in degrees:
         total_norm = sum(abs(value / divisor) ** 2 for value in totals[degree])
@@ -291,6 +321,7 @@ def associated_legendre(degree: int, order: int, x: float) -> float:
 __all__ = [
     "build_graph_neighbor_vector_cache",
     "build_q_candidate_cache",
+    "fixed_neighbor_shortfall_warning",
     "normalize_q_degree",
     "normalize_q_neighbor_mode",
     "q_l_from_vectors",

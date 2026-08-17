@@ -281,15 +281,27 @@ def validate_cpp_cli(args: Any, config: dict[str, Any]) -> None:
     Only current public CLI fields are inspected. Removed options are handled by
     the CLI migration guard and are deliberately absent here.
     """
+    errors: list[str] = []
+    if is_cpp_mode(config.get("mode", DEFAULT_MODE)):
+        if getattr(args, "find_half", None) not in (None, False, "off"):
+            errors.append("--find-half on is not supported by SQQ-CPP")
+        if getattr(args, "find_quasi", None) not in (None, False, "off"):
+            errors.append("--find-quasi on is not supported by SQQ-CPP")
+        if getattr(args, "find_cluster", None) not in (None, False, "off"):
+            errors.append("--find-cluster on is not supported by SQQ-CPP")
+    try:
+        validate_cpp_config(config)
+    except ValueError as exc:
+        errors.append(str(exc))
+    if errors:
+        raise ValueError("; ".join(dict.fromkeys(errors)))
+
+
+def validate_cpp_config(config: dict[str, Any]) -> None:
+    """Validate the normalized C++ capability subset for CLI and API use."""
     if not is_cpp_mode(config.get("mode", DEFAULT_MODE)):
         return
     errors: list[str] = []
-    if getattr(args, "find_half", None) not in (None, False, "off"):
-        errors.append("--find-half on is not supported by SQQ-CPP")
-    if getattr(args, "find_quasi", None) not in (None, False, "off"):
-        errors.append("--find-quasi on is not supported by SQQ-CPP")
-    if getattr(args, "find_cluster", None) not in (None, False, "off"):
-        errors.append("--find-cluster on is not supported by SQQ-CPP")
 
     ring = config.setdefault("ring", {})
     if str(ring.get("definition", "chordless")).strip().lower() != "chordless":
@@ -324,9 +336,7 @@ def validate_cpp_cli(args: Any, config: dict[str, Any]) -> None:
         errors.append("cage.seed_mode must be ring in engine cpp")
 
     order = config.setdefault("order", {})
-    source = getattr(args, "order_parameter", None)
-    if source is None:
-        source = order.get("parameters", DEFAULT_ORDER_PARAMETERS)
+    source = order.get("parameters", DEFAULT_ORDER_PARAMETERS)
     try:
         order["parameters"] = list(normalize_cpp_order_parameters(source))
     except ValueError as exc:
@@ -340,9 +350,7 @@ def validate_cpp_cli(args: Any, config: dict[str, Any]) -> None:
             errors.append(f"hydrate_order.{key} is not supported in engine cpp")
 
     output = config.setdefault("output", {})
-    source = getattr(args, "output_type", None)
-    if source is None:
-        source = output.get("types", CPP_DEFAULT_OUTPUT_TYPES)
+    source = output.get("types", CPP_DEFAULT_OUTPUT_TYPES)
     try:
         output["types"] = list(normalize_cpp_output_types(source))
     except ValueError as exc:
@@ -358,5 +366,5 @@ __all__ = [
     "normalize_order_parameters", "normalize_output_types", "normalize_parallel_backend",
     "order_parameter_display",
     "order_parameter_sort_key", "output_enabled", "output_type_display",
-    "q_degrees_from_order_parameters", "validate_cpp_cli", "validate_user_config_keys",
+    "q_degrees_from_order_parameters", "validate_cpp_cli", "validate_cpp_config", "validate_user_config_keys",
 ]

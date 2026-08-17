@@ -1,6 +1,6 @@
-from __future__ import annotations
-
 """Run banner, configuration header, and normalized run metadata."""
+
+from __future__ import annotations
 
 from argparse import Namespace
 from datetime import datetime

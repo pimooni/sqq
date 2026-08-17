@@ -1,6 +1,6 @@
-from __future__ import annotations
-
 """Closed cage search by ring-face growth and polyhedron validation."""
+
+from __future__ import annotations
 
 from bisect import bisect_left
 from collections import defaultdict
@@ -9,7 +9,7 @@ from itertools import combinations
 
 import numpy as np
 
-from ..models import Cage, CagePatch, Frame, Guest, Ring
+from ..models import Cage, CagePatch, Frame, Guest, Ring, guest_id
 from .geometry import pbc_aware_centroid, unwrap_connected_nodes
 from .pbc import minimum_image
 from .spatial import PointSpatialIndex
@@ -1052,8 +1052,7 @@ def assigned_guests(
             or (mode == "center" and bool(center_hit))
             or (mode == "auto" and (bool(poly_hit) or bool(center_hit)))
         ):
-            guest = guests[index]
-            assigned.append(f"{guest.resname}{guest.resid}")
+            assigned.append(guest_id(guests[index]))
     return tuple(assigned)
 
 

@@ -1,6 +1,6 @@
-from __future__ import annotations
-
 """State, normalized tables, and target membership data for cage tracking."""
+
+from __future__ import annotations
 
 from collections import Counter
 import csv

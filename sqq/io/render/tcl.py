@@ -1,6 +1,6 @@
-from __future__ import annotations
-
 """Shared Tcl renderer generation for Analyze and Track."""
+
+from __future__ import annotations
 
 from .manifest import render_manifest_block
 from .models import (

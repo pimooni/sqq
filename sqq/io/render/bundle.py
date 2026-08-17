@@ -1,6 +1,6 @@
-from __future__ import annotations
-
 """Atomic assembly and publication of complete SQQ render packages."""
+
+from __future__ import annotations
 
 import errno
 import json

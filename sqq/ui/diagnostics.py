@@ -1,6 +1,6 @@
-from __future__ import annotations
-
 """Run-level warning capture isolated from live progress rendering."""
+
+from __future__ import annotations
 
 from contextlib import contextmanager
 import sys

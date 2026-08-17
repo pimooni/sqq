@@ -1,6 +1,6 @@
-from __future__ import annotations
-
 """Cross-process lock for one SQQ output root."""
+
+from __future__ import annotations
 
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -11,6 +11,8 @@ from pathlib import Path
 import socket
 from typing import BinaryIO, Iterator
 from uuid import uuid4
+
+from ..exceptions import OutputLockError
 
 
 OUTPUT_LOCK_NAME = ".sqq.lock"
@@ -73,7 +75,7 @@ def acquire_output_lock(root: Path) -> OutputLock:
         handle.close()
         owner = output_lock_owner(path)
         detail = f" ({owner})" if owner else ""
-        raise RuntimeError(
+        raise OutputLockError(
             f"SQQ output directory is already in use: {root}{detail}. "
             "Wait for the active run or choose another --output directory."
         ) from exc

@@ -1,6 +1,6 @@
-from __future__ import annotations
-
 """Discovery and publication of render packages for Track targets."""
+
+from __future__ import annotations
 
 import csv
 import os

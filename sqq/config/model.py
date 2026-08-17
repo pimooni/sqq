@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterator, Mapping
+from copy import deepcopy
 from dataclasses import dataclass, field
 from types import MappingProxyType
 from typing import Any
@@ -37,7 +38,9 @@ class ResolvedConfig(Mapping[str, Any]):
     _view: Mapping[str, Any] = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
-        object.__setattr__(self, "_view", MappingProxyType(dict(self.data)))
+        frozen = _freeze(deepcopy(dict(self.data)))
+        object.__setattr__(self, "data", frozen)
+        object.__setattr__(self, "_view", frozen)
 
     def __getitem__(self, key: str) -> Any:
         return self._view[key]
@@ -47,6 +50,30 @@ class ResolvedConfig(Mapping[str, Any]):
 
     def __len__(self) -> int:
         return len(self._view)
+
+    def to_mutable_dict(self) -> dict[str, Any]:
+        """Return an isolated mutable copy for an analysis invocation."""
+        return _thaw(self._view)
+
+
+def _freeze(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        return MappingProxyType({str(key): _freeze(item) for key, item in value.items()})
+    if isinstance(value, (list, tuple)):
+        return tuple(_freeze(item) for item in value)
+    if isinstance(value, (set, frozenset)):
+        return frozenset(_freeze(item) for item in value)
+    return value
+
+
+def _thaw(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        return {str(key): _thaw(item) for key, item in value.items()}
+    if isinstance(value, tuple):
+        return [_thaw(item) for item in value]
+    if isinstance(value, frozenset):
+        return {_thaw(item) for item in value}
+    return deepcopy(value)
 
 
 __all__ = ["ResolutionAdjustment", "ResolutionReport", "ResolvedConfig"]

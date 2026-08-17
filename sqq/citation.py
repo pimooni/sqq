@@ -1,6 +1,6 @@
-from __future__ import annotations
-
 """Feature-derived citation recommendations shared by all output surfaces."""
+
+from __future__ import annotations
 
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass

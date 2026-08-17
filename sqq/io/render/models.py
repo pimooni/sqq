@@ -1,6 +1,6 @@
-from __future__ import annotations
-
 """Data contracts for SQQ render packages."""
+
+from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path

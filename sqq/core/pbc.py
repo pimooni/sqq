@@ -1,6 +1,6 @@
-from __future__ import annotations
-
 """Orthorhombic PBC helpers."""
+
+from __future__ import annotations
 
 import numpy as np
 

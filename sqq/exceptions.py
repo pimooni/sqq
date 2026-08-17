@@ -17,4 +17,14 @@ class AnalysisError(SQQError, RuntimeError):
     """A valid frame could not be analyzed."""
 
 
-__all__ = ["AnalysisError", "ConfigurationError", "InputError", "SQQError"]
+class OutputLockError(SQQError, RuntimeError):
+    """Another process currently owns the selected output directory."""
+
+
+__all__ = [
+    "AnalysisError",
+    "ConfigurationError",
+    "InputError",
+    "OutputLockError",
+    "SQQError",
+]

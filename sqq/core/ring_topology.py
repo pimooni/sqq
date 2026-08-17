@@ -1,6 +1,6 @@
-from __future__ import annotations
-
 """Frame-local indexes and geometry shared by ring-face analyses."""
+
+from __future__ import annotations
 
 from collections import defaultdict
 from dataclasses import dataclass, field

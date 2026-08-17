@@ -1,13 +1,13 @@
-from __future__ import annotations
-
 """Stable, typed Python entry points for SQQ configuration and analysis."""
+
+from __future__ import annotations
 
 from collections.abc import Iterable, Iterator, Mapping, Sequence
 from copy import deepcopy
 from pathlib import Path
 from typing import Any, Callable
 
-from .config import normalize_analysis_scopes, refresh_resolution_report
+from .config import normalize_analysis_scopes, refresh_resolution_report, validate_cpp_config
 from .config.model import (
     ResolvedConfig,
     ResolutionAdjustment,
@@ -35,6 +35,7 @@ def load_config(
         from .config.loading import resolve_config
 
         data = resolve_config(source, mode=engine)
+        validate_cpp_config(data)
         normalize_analysis_scopes(data)
         refresh_resolution_report(data)
         return _resolved_config(data)
@@ -90,7 +91,7 @@ def analyze_frame(
         raise InputError("analyze_frame requires an sqq.models.Frame instance.")
     try:
         resolved = _coerce_config(config, engine=engine)
-        mutable_config = deepcopy(dict(resolved))
+        mutable_config = resolved.to_mutable_dict()
         from .runtime.frame import analyze_frame as analyze_input_frame
 
         result = analyze_input_frame(

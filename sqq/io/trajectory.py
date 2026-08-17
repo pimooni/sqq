@@ -1,6 +1,6 @@
-from __future__ import annotations
-
 """Trajectory and coordinate readers."""
+
+from __future__ import annotations
 
 import re
 from collections.abc import Iterable, Mapping

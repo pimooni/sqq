@@ -25,6 +25,13 @@ namespace eval ::SQQ {
     variable custom_show_active 0
     variable active_targets
     variable representation_names {}
+    variable representation_keys {}
+    variable representation_atoms
+    variable representation_kind
+    variable representation_color
+    variable representation_material
+    variable representation_radius_tier
+    variable representation_name_by_key
     variable frame_after_id ""
     variable displayed_graph_mode "__unset__"
     variable label_visible 0
@@ -53,7 +60,7 @@ namespace eval ::SQQ {
     variable atom_guest
     variable component_atom_role
     variable component_resname_role
-    foreach name {group_keys group_atoms graph_mode color_overrides known_objects object_aliases cage_types cage_ids cage_centers track_types graphics_targets guest_keys guest_atoms guest_types atom_guest component_atom_role component_resname_role active_targets} {
+    foreach name {group_keys group_atoms graph_mode color_overrides known_objects object_aliases cage_types cage_ids cage_centers track_types graphics_targets guest_keys guest_atoms guest_types atom_guest component_atom_role component_resname_role active_targets representation_atoms representation_kind representation_color representation_material representation_radius_tier representation_name_by_key} {
         catch {array unset $name}
         array set $name {}
     }
@@ -893,7 +900,7 @@ proc ::SQQ::set_label {values} {
     } else {
         error "Usage: sqq show label ?on|off?"
     }
-    ::SQQ::render_current
+    ::SQQ::update_current
     puts "SQQ label: [expr {$label_visible ? "on" : "off"}]"
 }
 
@@ -994,7 +1001,14 @@ proc ::SQQ::clear_representations {} {
     variable molid
     variable pick_cage_rep_name
     variable pick_guest_rep_name
+    variable representation_atoms
+    variable representation_color
+    variable representation_keys
+    variable representation_kind
+    variable representation_material
+    variable representation_name_by_key
     variable representation_names
+    variable representation_radius_tier
     if {$molid < 0} { return }
     set indexes {}
     foreach name $representation_names {
@@ -1003,6 +1017,11 @@ proc ::SQQ::clear_representations {} {
     }
     foreach rep [lsort -integer -decreasing -unique $indexes] { mol delrep $rep $molid }
     set representation_names {}
+    set representation_keys {}
+    foreach name {representation_atoms representation_color representation_kind representation_material representation_name_by_key representation_radius_tier} {
+        array unset $name
+        array set $name {}
+    }
     set pick_cage_rep_name ""
     set pick_guest_rep_name ""
 }
@@ -1046,40 +1065,93 @@ proc ::SQQ::compare_render_keys {left right} {
     return [expr {$left_color < $right_color ? -1 : ($left_color > $right_color)}]
 }
 
-proc ::SQQ::add_dynamic_bonds_representation {indexes color_id radius {material Opaque}} {
-    variable molid
+proc ::SQQ::register_stable_representation {frame rep_key kind indexes color_id material {radius_tier ""}} {
+    variable representation_atoms
+    variable representation_color
+    variable representation_keys
+    variable representation_kind
+    variable representation_material
+    variable representation_radius_tier
+    set indexes [lsort -integer -unique $indexes]
     if {[llength $indexes] == 0} { return 0 }
-    mol representation DynamicBonds 3.5 $radius 12.0
-    mol color ColorID $color_id
-    mol selection "index [join $indexes { }]"
-    mol material $material
-    mol addrep $molid
-    ::SQQ::track_representation [expr {[molinfo $molid get numreps] - 1}]
+    if {$rep_key ni $representation_keys} {
+        lappend representation_keys $rep_key
+        set representation_kind($rep_key) $kind
+        set representation_color($rep_key) $color_id
+        set representation_material($rep_key) $material
+        set representation_radius_tier($rep_key) $radius_tier
+    } elseif {$representation_kind($rep_key) ne $kind ||
+              $representation_color($rep_key) != $color_id ||
+              $representation_material($rep_key) ne $material ||
+              $representation_radius_tier($rep_key) ne $radius_tier} {
+        error "Conflicting SQQ representation definition for '$rep_key'"
+    }
+    set atom_key "$frame,$rep_key"
+    if {[info exists representation_atoms($atom_key)]} {
+        set indexes [lsort -integer -unique [concat $representation_atoms($atom_key) $indexes]]
+    }
+    set representation_atoms($atom_key) $indexes
     return 1
 }
 
-proc ::SQQ::add_guest_representation {indexes color_id {material Opaque}} {
+proc ::SQQ::create_stable_representations {} {
     variable molid
-    if {[llength $indexes] == 0} { return 0 }
-    mol representation CPK 1.0 0.3 12.0 12.0
-    mol color ColorID $color_id
-    mol selection "index [join $indexes { }]"
-    mol material $material
-    mol addrep $molid
-    ::SQQ::track_representation [expr {[molinfo $molid get numreps] - 1}]
-    return 1
+    variable representation_color
+    variable representation_keys
+    variable representation_kind
+    variable representation_material
+    variable representation_name_by_key
+    variable representation_radius_tier
+    set cage_tiers {}
+    foreach rep_key $representation_keys {
+        if {$representation_kind($rep_key) eq "cage"} {
+            lappend cage_tiers $representation_radius_tier($rep_key)
+        }
+    }
+    set cage_tiers [lsort -integer -unique $cage_tiers]
+    foreach rep_key $representation_keys {
+        set kind $representation_kind($rep_key)
+        if {$kind eq "cage"} {
+            set radius [::SQQ::cage_layer_radius $representation_radius_tier($rep_key) $cage_tiers]
+            mol representation DynamicBonds 3.5 $radius 12.0
+        } elseif {$kind eq "bonds"} {
+            mol representation DynamicBonds 3.5 0.125 12.0
+        } elseif {$kind eq "guest"} {
+            mol representation CPK 1.0 0.3 12.0 12.0
+        } elseif {$kind eq "component"} {
+            mol representation CPK 0.7 0.2 12.0 12.0
+        } else {
+            error "Unknown SQQ representation kind '$kind'"
+        }
+        mol color ColorID $representation_color($rep_key)
+        mol selection "none"
+        mol material $representation_material($rep_key)
+        mol addrep $molid
+        set rep [expr {[molinfo $molid get numreps] - 1}]
+        ::SQQ::track_representation $rep
+        set representation_name_by_key($rep_key) [mol repname $molid $rep]
+    }
 }
 
-proc ::SQQ::add_component_representation {indexes color_id {material Opaque}} {
+proc ::SQQ::update_representation_selections {frame} {
     variable molid
-    if {[llength $indexes] == 0} { return 0 }
-    mol representation CPK 0.7 0.2 12.0 12.0
-    mol color ColorID $color_id
-    mol selection "index [join $indexes { }]"
-    mol material $material
-    mol addrep $molid
-    ::SQQ::track_representation [expr {[molinfo $molid get numreps] - 1}]
-    return 1
+    variable representation_atoms
+    variable representation_keys
+    variable representation_name_by_key
+    foreach rep_key $representation_keys {
+        if {![info exists representation_name_by_key($rep_key)]} { continue }
+        set rep_name $representation_name_by_key($rep_key)
+        if {[catch {mol repindex $molid $rep_name} rep] || $rep < 0} { continue }
+        set atom_key "$frame,$rep_key"
+        if {[info exists representation_atoms($atom_key)]} {
+            set indexes $representation_atoms($atom_key)
+        } else {
+            set indexes {}
+        }
+        set selection [expr {[llength $indexes] == 0 ?
+            "none" : "index [join $indexes { }]"}]
+        mol modselect $rep $molid $selection
+    }
 }
 
 proc ::SQQ::clear_graphics {} {
@@ -1267,7 +1339,8 @@ proc ::SQQ::render_guest_pick_context {frame} {
         }
     }
     foreach color_id [lsort -integer [array names color_atoms]] {
-        ::SQQ::add_guest_representation \
+        set rep_key [list pick-context guest $color_id]
+        ::SQQ::register_stable_representation $frame $rep_key guest \
             [lsort -integer -unique $color_atoms($color_id)] \
             $color_id Transparent
     }
@@ -1420,18 +1493,19 @@ proc ::SQQ::render_family {frame family targets} {
         }
         set layer_keys [lsort -command ::SQQ::compare_object_render_keys $layer_keys]
         if {$family eq "cage"} {
-            set radius_tiers {}
-            foreach layer_key $layer_keys { lappend radius_tiers [::SQQ::cage_radius_tier $layer_key] }
-            set radius_tiers [lsort -integer -unique $radius_tiers]
             foreach layer_key $layer_keys {
                 set indexes [lsort -integer -unique $layer_atoms($layer_key)]
-                set radius [::SQQ::cage_layer_radius [::SQQ::cage_radius_tier $layer_key] $radius_tiers]
-                incr representation_count [::SQQ::add_dynamic_bonds_representation $indexes [lindex $layer_key 6] $radius $material]
+                set rep_key [list main $family $layer_key]
+                incr representation_count [::SQQ::register_stable_representation \
+                    $frame $rep_key cage $indexes [lindex $layer_key 6] $material \
+                    [::SQQ::cage_radius_tier $layer_key]]
             }
         } else {
             foreach layer_key $layer_keys {
                 set indexes [lsort -integer -unique $layer_atoms($layer_key)]
-                incr representation_count [::SQQ::add_guest_representation $indexes [lindex $layer_key 6] $material]
+                set rep_key [list main $family $layer_key]
+                incr representation_count [::SQQ::register_stable_representation \
+                    $frame $rep_key guest $indexes [lindex $layer_key 6] $material]
             }
         }
     } elseif {$family eq "component"} {
@@ -1453,7 +1527,9 @@ proc ::SQQ::render_family {frame family targets} {
         foreach render_key [lsort -command ::SQQ::compare_render_keys $render_keys] {
             lassign $render_key priority color_id
             set indexes [lsort -integer -unique $color_atoms($priority,$color_id)]
-            incr representation_count [::SQQ::add_component_representation $indexes $color_id $material]
+            set rep_key [list main $family $render_key]
+            incr representation_count [::SQQ::register_stable_representation \
+                $frame $rep_key component $indexes $color_id $material]
         }
     } else {
         array set color_atoms {}
@@ -1470,7 +1546,9 @@ proc ::SQQ::render_family {frame family targets} {
         foreach render_key [lsort -command ::SQQ::compare_render_keys $render_keys] {
             lassign $render_key priority color_id
             set indexes [lsort -integer -unique $color_atoms($priority,$color_id)]
-            incr representation_count [::SQQ::add_dynamic_bonds_representation $indexes $color_id 0.125 $material]
+            set rep_key [list main $family $render_key]
+            incr representation_count [::SQQ::register_stable_representation \
+                $frame $rep_key bonds $indexes $color_id $material]
         }
     }
     return $representation_count
@@ -1487,13 +1565,28 @@ proc ::SQQ::render_current {{announce 0}} {
     ::SQQ::announce_graph_mode $frame
     ::SQQ::clear_representations
     ::SQQ::clear_graphics
-    foreach family [::SQQ::ordered_active_families] {
-        if {$pick_mode eq "guest" && $family eq "guest"} { continue }
-        set targets $active_targets($family)
-        set representation_count [::SQQ::render_family $frame $family $targets]
-        set labels {}
-        foreach target $targets { lappend labels [::SQQ::target_label $family $target] }
-        if {$announce} {
+    array set current_counts {}
+    set numframes [molinfo $molid get numframes]
+    for {set build_frame 0} {$build_frame < $numframes} {incr build_frame} {
+        foreach family [::SQQ::ordered_active_families] {
+            if {$pick_mode eq "guest" && $family eq "guest"} { continue }
+            set targets $active_targets($family)
+            set representation_count [::SQQ::render_family $build_frame $family $targets]
+            if {$build_frame == $frame} { set current_counts($family) $representation_count }
+        }
+        if {$pick_mode eq "guest"} {
+            ::SQQ::render_guest_pick_context $build_frame
+        }
+    }
+    ::SQQ::create_stable_representations
+    if {$announce} {
+        foreach family [::SQQ::ordered_active_families] {
+            if {$pick_mode eq "guest" && $family eq "guest"} { continue }
+            set targets $active_targets($family)
+            set labels {}
+            foreach target $targets { lappend labels [::SQQ::target_label $family $target] }
+            set representation_count [expr {[info exists current_counts($family)] ?
+                $current_counts($family) : 0}]
             if {$representation_count == 0} {
                 puts "SQQ show $family: no memberships for [join $labels { }] in frame $frame"
             } else {
@@ -1501,10 +1594,21 @@ proc ::SQQ::render_current {{announce 0}} {
             }
         }
     }
-    if {$pick_mode eq "guest"} {
-        ::SQQ::render_guest_pick_context $frame
-    }
     ::SQQ::create_pick_highlight_representations
+    ::SQQ::update_representation_selections $frame
+    ::SQQ::render_selected $frame
+    ::SQQ::render_overlays $frame
+    display update
+}
+
+proc ::SQQ::update_current {} {
+    ::SQQ::cancel_pending_render
+    variable molid
+    if {$molid < 0 || $molid ni [molinfo list]} { return }
+    set frame [molinfo $molid get frame]
+    ::SQQ::announce_graph_mode $frame
+    ::SQQ::update_representation_selections $frame
+    ::SQQ::clear_graphics
     ::SQQ::render_selected $frame
     ::SQQ::render_overlays $frame
     display update
@@ -1521,7 +1625,7 @@ proc ::SQQ::cancel_pending_render {} {
 proc ::SQQ::render_pending {} {
     variable frame_after_id
     set frame_after_id ""
-    ::SQQ::render_current
+    ::SQQ::update_current
 }
 
 proc ::SQQ::frame_changed {name1 name2 operation} {

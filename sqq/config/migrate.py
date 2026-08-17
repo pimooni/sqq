@@ -45,7 +45,7 @@ YAML_KEY_ALIASES: dict[tuple[str, ...], dict[str, str]] = {
     },
     ("output",): {
         "type": "types", "cage_isomer_row": "cage_isomer_rows",
-        "write_empty_file": "write_empty_files", "context_role": "context_roles",
+        "write_empty_file": "write_empty_files",
     },
     ("parallel",): {"worker": "workers", "math_thread": "math_threads"},
     ("track",): {"min_shared_water": "min_shared_waters"},
@@ -134,6 +134,28 @@ def _remove_fast_closure(config: dict[str, Any]) -> None:
         )
 
 
+def _remove_dead_output_settings(config: dict[str, Any]) -> None:
+    output = config.get("output")
+    if not isinstance(output, dict):
+        return
+    removed: list[str] = []
+    for key in ("gro_atom_mode", "context_role", "context_roles"):
+        if key in output:
+            output.pop(key)
+            removed.append(key)
+    if not removed:
+        return
+    names = ", ".join(f"output.{key}" for key in sorted(removed))
+    message = f"Legacy inactive setting(s) {names} ignored."
+    adjustments = config.setdefault("adjustments", [])
+    if not isinstance(adjustments, list):
+        adjustments = list(adjustments) if adjustments else []
+        config["adjustments"] = adjustments
+    if message not in adjustments:
+        adjustments.append(message)
+    warnings.warn(message, UserWarning, stacklevel=3)
+
+
 def migrate_yaml_keys(config: dict[str, Any]) -> dict[str, Any]:
     """Convert canonical and supported legacy YAML keys to runtime keys."""
     config.pop("schema_version", None)
@@ -163,6 +185,7 @@ def migrate_yaml_keys(config: dict[str, Any]) -> dict[str, Any]:
             raise ValueError("Use graph.pair_file only; legacy graph.pairs_file is duplicated.")
         graph["pair_file"] = graph.pop("pairs_file")
     _remove_fast_closure(config)
+    _remove_dead_output_settings(config)
     for path, aliases in YAML_KEY_ALIASES.items():
         section = nested_mapping(config, path)
         if section is None:

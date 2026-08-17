@@ -1,6 +1,6 @@
-from __future__ import annotations
-
 """Deterministic, streaming cage tracking across analyzed frames."""
+
+from __future__ import annotations
 
 from collections import Counter, defaultdict
 from dataclasses import dataclass, replace

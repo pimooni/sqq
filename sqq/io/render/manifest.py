@@ -1,6 +1,6 @@
-from __future__ import annotations
-
 """Embedded manifest support for SQQ VMD packages."""
+
+from __future__ import annotations
 
 import json
 from typing import Iterable

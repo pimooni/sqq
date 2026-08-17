@@ -31,7 +31,8 @@ from .validation import (
     normalize_order_parameters, normalize_output_types, normalize_parallel_backend,
     order_parameter_display,
     order_parameter_sort_key, output_enabled, output_type_display,
-    q_degrees_from_order_parameters, validate_cpp_cli, validate_user_config_keys,
+    q_degrees_from_order_parameters, validate_cpp_cli, validate_cpp_config,
+    validate_user_config_keys,
 )
 
 __all__ = [
@@ -53,5 +54,6 @@ __all__ = [
     "positive_integer", "profile_name", "refresh_resolution_report",
     "q_degrees_from_order_parameters", "resolve_config", "resolve_graph_mode", "strip_legacy_selection_keys",
     "resolve_cage_report_types", "resolve_size_list", "string_list", "validate_cpp_cli",
+    "validate_cpp_config",
     "validate_user_config_keys", "write_default_config",
 ]

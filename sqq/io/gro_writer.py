@@ -1,6 +1,6 @@
-from __future__ import annotations
-
 """GRO writers for SQQ visualization outputs."""
+
+from __future__ import annotations
 
 from pathlib import Path
 import re
@@ -30,6 +30,7 @@ def write_ring_gro_files(
     write_empty: bool = False,
     layout: str = "grouped",
     sizes: set[int] | None = None,
+    center_resname: str = "CNT",
 ) -> None:
     """Write reported free-ring GRO files after topology-wide filtering."""
     water_lookup = water_by_oxygen(result.waters)
@@ -42,7 +43,13 @@ def write_ring_gro_files(
         rings = [ring for ring in rings if ring.object_id not in used_ring_ids]
         if not rings and not write_empty:
             continue
-        atoms = aggregate_ring_atoms(result.frame, rings, water_lookup, result.frame.box)
+        atoms = aggregate_ring_atoms(
+            result.frame,
+            rings,
+            water_lookup,
+            result.frame.box,
+            center_resname=center_resname,
+        )
         if atoms or write_empty:
             grouped_name = f"{result.frame.name}_ring_{size}.gro"
             flat_name = grouped_name
@@ -50,7 +57,14 @@ def write_ring_gro_files(
             write_gro(path, f"{result.frame.name} free ring{size}", atoms, result.frame.box)
 
 
-def aggregate_ring_atoms(frame: Frame, rings: list[Ring], water_lookup: dict[int, Water], box: np.ndarray | None) -> list[Atom]:
+def aggregate_ring_atoms(
+    frame: Frame,
+    rings: list[Ring],
+    water_lookup: dict[int, Water],
+    box: np.ndarray | None,
+    *,
+    center_resname: str = "CNT",
+) -> list[Atom]:
     """Collect full water molecules and one CNT atom per ring."""
     atom_indices: dict[int, Atom] = {}
     centers: list[Atom] = []
@@ -68,7 +82,7 @@ def aggregate_ring_atoms(frame: Frame, rings: list[Ring], water_lookup: dict[int
             Atom(
                 index=-serial,
                 resid=90000 + serial,
-                resname="CNT",
+                resname=center_resname,
                 atomname=RING_CENTER_NAMES.get(ring.size, "CNT"),
                 atomid=90000 + serial,
                 xyz=center,
@@ -77,14 +91,42 @@ def aggregate_ring_atoms(frame: Frame, rings: list[Ring], water_lookup: dict[int
     return [atom_indices[idx] for idx in sorted(atom_indices)] + centers
 
 
-def write_half_cage_gro_files(result: FrameResult, frame_dir: Path, write_empty: bool = False, layout: str = "grouped") -> None:
+def write_half_cage_gro_files(
+    result: FrameResult,
+    frame_dir: Path,
+    write_empty: bool = False,
+    layout: str = "grouped",
+    center_resname: str = "CNT",
+) -> None:
     """Write one GRO file per half_cage type."""
-    write_patch_gro_files(result, result.half_cages, frame_dir, "half_cage", write_empty, layout)
+    write_patch_gro_files(
+        result,
+        result.half_cages,
+        frame_dir,
+        "half_cage",
+        write_empty,
+        layout,
+        center_resname=center_resname,
+    )
 
 
-def write_quasi_cage_gro_files(result: FrameResult, frame_dir: Path, write_empty: bool = False, layout: str = "grouped") -> None:
+def write_quasi_cage_gro_files(
+    result: FrameResult,
+    frame_dir: Path,
+    write_empty: bool = False,
+    layout: str = "grouped",
+    center_resname: str = "CNT",
+) -> None:
     """Write one GRO file per quasi_cage type."""
-    write_patch_gro_files(result, result.quasi_cages, frame_dir, "quasi_cage", write_empty, layout)
+    write_patch_gro_files(
+        result,
+        result.quasi_cages,
+        frame_dir,
+        "quasi_cage",
+        write_empty,
+        layout,
+        center_resname=center_resname,
+    )
 
 
 def write_patch_gro_files(
@@ -94,6 +136,8 @@ def write_patch_gro_files(
     category: str,
     write_empty: bool = False,
     layout: str = "grouped",
+    *,
+    center_resname: str = "CNT",
 ) -> None:
     """Write one GRO file per open cage-patch type."""
     if not patches and not write_empty:
@@ -103,7 +147,12 @@ def write_patch_gro_files(
     for patch in patches:
         by_type.setdefault(patch.patch_type, []).append(patch)
     for patch_type, group in sorted(by_type.items()):
-        atoms = aggregate_patch_atoms(result.frame, group, water_lookup)
+        atoms = aggregate_patch_atoms(
+            result.frame,
+            group,
+            water_lookup,
+            center_resname=center_resname,
+        )
         if atoms or write_empty:
             file_label = ascii_gro_text(patch_type)
             grouped_name = f"{result.frame.name}_{file_label}.gro"
@@ -112,7 +161,13 @@ def write_patch_gro_files(
             write_gro(path, f"{result.frame.name} {patch_type}", atoms, result.frame.box)
 
 
-def aggregate_patch_atoms(frame: Frame, patches: list[CagePatch], water_lookup: dict[int, Water]) -> list[Atom]:
+def aggregate_patch_atoms(
+    frame: Frame,
+    patches: list[CagePatch],
+    water_lookup: dict[int, Water],
+    *,
+    center_resname: str = "CNT",
+) -> list[Atom]:
     """Collect full water molecules and one CNT atom per open patch."""
     atom_indices: dict[int, Atom] = {}
     centers: list[Atom] = []
@@ -128,7 +183,7 @@ def aggregate_patch_atoms(frame: Frame, patches: list[CagePatch], water_lookup: 
             Atom(
                 index=-100000 - serial,
                 resid=91000 + serial,
-                resname="CNT",
+                resname=center_resname,
                 atomname=atomname,
                 atomid=91000 + serial,
                 xyz=patch.center,
@@ -143,6 +198,7 @@ def write_cage_gro_files(
     write_empty: bool = False,
     layout: str = "grouped",
     include_centers: bool = True,
+    center_resname: str = "CNT",
 ) -> None:
     """Write cage GRO files by type and occupancy state."""
     if not result.cages and not write_empty:
@@ -168,6 +224,7 @@ def write_cage_gro_files(
             water_lookup,
             guests_by_id,
             include_centers=include_centers,
+            center_resname=center_resname,
         )
         if atoms or write_empty:
             grouped_label = ascii_gro_text(cage_file_label(cage_type))
@@ -186,6 +243,7 @@ def aggregate_cage_atoms(
     guest_lookup: dict[str, Guest],
     *,
     include_centers: bool = True,
+    center_resname: str = "CNT",
 ) -> list[Atom]:
     """Collect cage waters, assigned guests, and optional center atoms."""
     atom_indices: dict[int, Atom] = {}
@@ -207,7 +265,7 @@ def aggregate_cage_atoms(
             Atom(
                 index=-200000 - serial,
                 resid=92000 + serial,
-                resname="CNT",
+                resname=center_resname,
                 atomname=CAGE_CENTER_NAMES.get(cage.cage_type, "CAGE")[:5],
                 atomid=92000 + serial,
                 xyz=cage.center,
