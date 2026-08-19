@@ -45,23 +45,19 @@ def build_citation_recommendation(
     _require_mapping("statistics", statistics)
 
     completed = _successful_frames(run_info, statistics) > 0
-    features: list[str] = []
-
-    if _feature_ran(
+    water_network = _feature_ran(
         "water_network",
         run_info,
         statistics,
         default=completed and _configured_enabled(config, "graph", True),
-    ):
-        features.append("water-network analysis")
-    if _feature_ran(
+    )
+    ring_topology = _feature_ran(
         "ring_topology",
         run_info,
         statistics,
         aliases=("ring", "rings"),
         default=completed and _configured_enabled(config, "ring", True),
-    ):
-        features.append("ring-topology analysis")
+    )
 
     cage_ran = _feature_ran(
         "cage_topology",
@@ -70,83 +66,132 @@ def build_citation_recommendation(
         aliases=("cage", "cages"),
         default=completed and _configured_enabled(config, "cage", True),
     )
-    if cage_ran:
-        features.append("cage-topology analysis")
-    if _feature_ran(
+    half_ran = _feature_ran(
         "half_cage",
         run_info,
         statistics,
         default=completed and _effective_enabled(run_info, config, "find_half", "half_cage"),
-    ):
-        features.append("half-cage analysis")
-    if _feature_ran(
+    )
+    quasi_ran = _feature_ran(
         "quasi_cage",
         run_info,
         statistics,
         default=completed and _effective_enabled(run_info, config, "find_quasi", "quasi_cage"),
-    ):
-        features.append("quasi-cage analysis")
-    if _feature_ran(
+    )
+    isomer_ran = _feature_ran(
         "cage_isomer",
         run_info,
         statistics,
         aliases=("isomer", "cage_isomers"),
         default=cage_ran,
-    ):
-        features.append("cage-isomer analysis")
-    if _feature_ran(
+    )
+    occupancy_ran = _feature_ran(
         "cage_occupancy",
         run_info,
         statistics,
         aliases=("occupancy",),
         default=completed and _occupancy_evaluated(run_info, statistics),
-    ):
-        features.append("cage-occupancy analysis")
+    )
 
     parameters = _executed_order_parameters(run_info, config, statistics)
-    if completed and parameters:
-        features.append(f"{_slash_join(parameters)} order-parameter analysis")
-    if _feature_ran(
+    phase_ran = _feature_ran(
         "hydrate_phase_domain",
         run_info,
         statistics,
         aliases=("hydrate_cluster", "cluster", "phase_domain"),
         default=completed
         and _effective_enabled(run_info, config, "find_cluster", "hydrate_cluster"),
-    ):
-        features.append("hydrate phase/domain analysis")
-    if _feature_ran(
+    )
+    render_ran = _feature_ran(
         "vmd_rendering",
         run_info,
         statistics,
         aliases=("sqq_render", "render", "vmd"),
         default=_completed_render_output(run_info, config, statistics),
-    ):
-        features.append("VMD rendering")
-    if _feature_ran(
+    )
+    tracking_ran = _feature_ran(
         "cage_tracking",
         run_info,
         statistics,
         aliases=("tracking", "track"),
         default=completed and _track_enabled(config),
-    ):
-        features.append("cage-tracking analysis")
-    if _feature_ran(
+    )
+    transition_ran = _feature_ran(
+        "cage_transition",
+        run_info,
+        statistics,
+        aliases=("transition", "type_transition", "type_transitions"),
+        default=False,
+    )
+    lifetime_ran = _feature_ran(
         "cage_lifetime",
         run_info,
         statistics,
         aliases=("lifetime", "lifetimes"),
         default=completed and _lifetime_enabled(config),
-    ):
-        features.append("cage-lifetime analysis")
+    )
+    guest_residence_ran = _feature_ran(
+        "guest_residence",
+        run_info,
+        statistics,
+        aliases=("residence", "guest_residence_time"),
+        default=(tracking_ran or lifetime_ran)
+        and _guest_residence_evaluated(run_info, statistics),
+    )
 
-    if features:
-        sentence = (
-            "Please cite SQQ when using results from this run, including "
-            f"{_natural_join(features)}."
+    analysis_items: list[str] = []
+    if ring_topology:
+        analysis_items.append("water-ring topology")
+    elif water_network:
+        analysis_items.append("water-network topology")
+    if half_ran and quasi_ran:
+        analysis_items.append("half- and quasi-cage structures")
+    elif half_ran:
+        analysis_items.append("half-cage structures")
+    elif quasi_ran:
+        analysis_items.append("quasi-cage structures")
+    if cage_ran:
+        analysis_items.append("cage types and populations")
+    if isomer_ran:
+        analysis_items.append("cage isomers")
+    if occupancy_ran:
+        analysis_items.append("guest occupancies")
+    if phase_ran:
+        analysis_items.append("hydrate phases and domains")
+    if completed and parameters:
+        analysis_items.append(f"{_slash_join(parameters)} order parameters")
+
+    sentences: list[str] = []
+    if analysis_items:
+        if analysis_items == ["cage types and populations", "guest occupancies"]:
+            sentence = (
+                "Cage types, populations, and guest occupancies were analyzed "
+                "using SQQ."
+            )
+        else:
+            verb = "was" if len(analysis_items) == 1 and analysis_items[0] in {
+                "water-ring topology",
+                "water-network topology",
+            } else "were"
+            sentence = f"{_natural_join(analysis_items)} {verb} analyzed using SQQ."
+            sentence = sentence[0].upper() + sentence[1:]
+        sentences.append(sentence)
+    if render_ran:
+        sentences.append("VMD visualization files were generated using SQQ.")
+    if transition_ran or lifetime_ran or guest_residence_ran:
+        tracking_items = ["cage evolution"]
+        if transition_ran:
+            tracking_items.append("type transitions")
+        if lifetime_ran:
+            tracking_items.append("lifetimes")
+        if guest_residence_ran:
+            tracking_items.append("guest residence")
+        sentences.append(
+            f"{_natural_join(tracking_items).capitalize()} were tracked using SQQ."
         )
-    else:
-        sentence = "Please cite SQQ when using results from this run."
+    elif tracking_ran:
+        sentences.append("Cage tracks were generated using SQQ.")
+    sentence = " ".join(sentences) or "SQQ was used for this analysis."
     return CitationRecommendation(sentence=sentence)
 
 
@@ -165,11 +210,15 @@ def completed_citation_evidence(
     successful_frames: int,
     completed_outputs: Iterable[Any] = (),
     track: bool = False,
+    occupancy_evaluated: bool | None = None,
+    guest_residence_evaluated: bool = False,
 ) -> dict[str, Any]:
     """Return authoritative feature evidence for a completed workflow."""
     successful = max(0, int(successful_frames))
     ran = successful > 0
+    temporal_ran = successful >= 2
     outputs = _tokens(completed_outputs)
+    cpp_mode = str(config.get("mode", "py")).strip().lower() in {"cpp", "99"}
     order_parameters = _tokens(
         _first(
             _nested(config, "order_parameter", "enabled"),
@@ -177,24 +226,34 @@ def completed_citation_evidence(
             _nested(config, "order", "parameter"),
         )
     )
+    occupancy_ran = ran and (
+        True if occupancy_evaluated is None else bool(occupancy_evaluated)
+    )
+    residence_ran = (
+        temporal_ran and bool(track) and bool(guest_residence_evaluated)
+    )
     return {
         "successful_frames": successful,
         "executed_features": {
-            "water_network": ran,
-            "ring_topology": ran,
+            "water_network": ran and not cpp_mode,
+            "ring_topology": ran and not cpp_mode,
             "cage_topology": ran,
             "half_cage": ran and _as_bool(_nested(config, "half_cage", "enabled"), False),
             "quasi_cage": ran and _as_bool(_nested(config, "quasi_cage", "enabled"), False),
             "cage_isomer": ran,
-            "cage_occupancy": ran,
+            "cage_occupancy": occupancy_ran,
             "hydrate_phase_domain": ran
             and _as_bool(_nested(config, "hydrate_cluster", "enabled"), False),
             "vmd_rendering": "sqq-render" in outputs,
             "cage_tracking": ran and bool(track),
-            "cage_lifetime": ran and bool(track),
+            "cage_transition": temporal_ran and bool(track),
+            "cage_lifetime": temporal_ran and bool(track),
+            "guest_residence": residence_ran,
         },
         "executed_order_parameters": order_parameters if ran else (),
         "completed_outputs": outputs,
+        "occupancy_evaluated": occupancy_ran,
+        "guest_residence_evaluated": residence_ran,
     }
 
 
@@ -321,6 +380,18 @@ def _occupancy_evaluated(
         return guests is not _MISSING and float(guests) > 0
     except (TypeError, ValueError):
         return _as_bool(guests, False)
+
+
+def _guest_residence_evaluated(
+    run_info: Mapping[str, Any], statistics: Mapping[str, Any]
+) -> bool:
+    explicit = _first(
+        statistics.get("guest_residence_evaluated", _MISSING),
+        run_info.get("guest_residence_evaluated", _MISSING),
+    )
+    if explicit is not _MISSING:
+        return _as_bool(explicit, False)
+    return False
 
 
 def _effective_enabled(

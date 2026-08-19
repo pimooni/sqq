@@ -1,5 +1,42 @@
 # SQQ Update Notes
 
+## Version 0.5.4
+
+### Short Summary
+
+Version 0.5.4 removes the generated VMD renderer's redundant all-frame startup pass, keeps Tcl help responsive while render data are loading, and replaces the verbose terminal dashboard with one compact page shared by running and completed analyses. Citation recommendations are now copy-ready manuscript sentences derived only from features and outputs that completed successfully. The release is dated Aug 19, 2026 and is designated the Qixi Festival release.
+
+### Main Changes
+
+1. Responsive VMD rendering
+   - Sources only the current render frame and creates each semantic VMD representation lazily when that family/type/color layer is first needed.
+   - Reuses stable SQQ representation identities and changes only their current-frame selections, so a user-edited DynamicBonds radius, color, or material remains effective on earlier and later frames; compatible layers first created after an edit inherit the matching family/type/radius-tier style.
+   - Removes the redundant unbounded frame-by-representation cache and avoids complete-trajectory rescans from `show`, `color`, `pick`, and `clear`.
+   - Keeps `sqq help`, `sqq -h`, and `sqq --help` available independently of render readiness; commands that require unfinished data return one concise loading message.
+   - Uses one ownership-aware disposal path for repeated sourcing and failed initialization, cancelling callbacks, closing the membership handle, removing SQQ traces/graphics/representations, and deleting only the molecule owned by the script. Renderer state becomes `ready` only after the default view and traces initialize successfully.
+   - Writes fixed component `P` metadata only for render frame 0 after validating an identical component signature in later frames; the Tcl reader remains compatible with older files containing redundant later-frame `P` rows.
+   - Merges all generated Track target IDs before one default view update, eliminating repeated complete redraws for large target sets.
+
+2. One-page terminal interface
+   - Combines time metadata, input provenance, SQQ engine/version, graph resolution, ring scope, and optional HALF/QUASI/CLUSTER settings into compact fields.
+   - Moves multi-file execution policy into `Analysis Progress`, removes repeated worker/completion counters, and displays at most five active files in one table.
+   - Omits the execution row and one-item progress bar whenever the resolved plan contains exactly one task, including a directory containing one file, showing only its stage flow and timing.
+   - Replaces the live area in place with compact results after publication; successful runs do not repeat status or output-directory fields already present above.
+   - Keeps the normal successful completed page within a 35-line design target; no separate 80-column by 24-row final layout is introduced.
+   - Requires automatic graph selection to resolve before the header and result metadata are shown, so the public display is only `auto -> hbond` or `auto -> oo`, never pending or omitted.
+
+3. Feature-derived citation recommendation
+   - Produces a copy-ready Methods/caption sentence from analyses that actually completed, including only applicable ring, half/quasi, cage, isomer, occupancy, phase/domain, order-parameter, rendering, or tracking work.
+   - Builds one completed-feature evidence record per topology group before summary writing, merges actual group evidence for the root result, and makes the terminal and summary consume the stored record instead of inferring features independently.
+   - Mentions VMD visualization only when the render package was successfully published and occupancy only when guests were actually available for evaluation.
+   - Uses `Cage tracks were generated using SQQ.` for a one-frame Track result. Type transitions and lifetimes require at least two frames, while guest residence additionally requires actual guest membership in the selected observations.
+   - Ends the recommendation with the provisional publication line and full GitHub URL.
+
+4. Release metadata
+   - Updates the package, configuration-schema, native fallback, help, and documentation version to `0.5.4`, released Aug 19, 2026 (`Qixi Festival`).
+
+These changes affect renderer lifecycle, metadata volume, terminal presentation, and citation wording. They do not change water-graph, ring, cage, occupancy, phase/domain, order-parameter, or Track-matching scientific definitions.
+
 ## Version 0.5.3
 
 ### Short Summary

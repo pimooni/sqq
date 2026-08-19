@@ -752,20 +752,33 @@ def summary_dashboard_table(data: pd.DataFrame, run_info: dict[str, Any], config
         rows.append(["Ice-like waters", min_mean_max_column(data, "ice_like_waters")])
 
     completed_outputs = run_info.get("completed_outputs", run_info.get("output_types", ()))
-    citation_statistics: dict[str, Any] = {
-        **completed_citation_evidence(
+    if "executed_features" in run_info:
+        citation_evidence = {
+            key: run_info[key]
+            for key in (
+                "successful_frames",
+                "executed_features",
+                "executed_order_parameters",
+                "completed_outputs",
+                "occupancy_evaluated",
+                "guest_residence_evaluated",
+            )
+            if key in run_info
+        }
+    else:
+        citation_evidence = completed_citation_evidence(
             config,
             successful_frames=frames_ok_count(data),
             completed_outputs=completed_outputs,
             track=bool(run_info.get("track", False)),
-        ),
+            occupancy_evaluated=has_selected_guests(data),
+        )
+    citation_statistics: dict[str, Any] = {
+        **citation_evidence,
         "failed_frames": frames_failed_count(data),
         "status": run_info.get("status", "completed"),
         "guest_molecules": sum_numeric_column(data, "n_guests"),
     }
-    for key in ("executed_features", "executed_order_parameters", "occupancy_evaluated"):
-        if key in run_info:
-            citation_statistics[key] = run_info[key]
     citation = build_citation_recommendation(run_info, config, citation_statistics)
     rows.extend(
         [

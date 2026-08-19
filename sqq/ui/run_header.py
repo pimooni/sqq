@@ -25,7 +25,12 @@ from ..display import graph_mode_display, ordered_unique_graph_modes
 from ..io.reporting.tables import dashboard_cage_targets
 from ..io.trajectory import TrajectorySelection
 from ..runtime.parallel.policy import worker_policy_text
-from .formatting import format_time_zone, terminal_field_line, write_terminal_block
+from .formatting import (
+    format_started,
+    format_time_zone,
+    terminal_field_line,
+    write_terminal_block,
+)
 
 
 BOND_MODE_DISPLAY_NAMES = {
@@ -149,6 +154,19 @@ def build_run_info(
             else [configured_graph_mode]
         )
     unique_effective_modes = ordered_unique_graph_modes(effective_graph_modes)
+    if requested_graph_mode == "auto":
+        if not unique_effective_modes:
+            raise RuntimeError(
+                "Graph mode auto was not resolved before run information was built."
+            )
+        invalid_modes = [
+            mode for mode in unique_effective_modes if mode not in {"hbond", "oo"}
+        ]
+        if invalid_modes:
+            raise RuntimeError(
+                "Graph mode auto resolved to an unsupported effective mode: "
+                + ", ".join(invalid_modes)
+            )
     graph_mode_by_group = {
         label: graph_mode_display(requested_graph_mode, [mode])
         for label, mode in configured_group_modes.items()
@@ -178,6 +196,12 @@ def build_run_info(
         for row in result_rows
         if str(row.get("status", "")).lower() == "failed"
     ]
+    successful_rows = [
+        row for row in result_rows if str(row.get("status", "")).lower() == "ok"
+    ]
+    guest_molecules = sum(
+        int(row.get("n_guests", 0) or 0) for row in successful_rows
+    )
     input_format = input_format_label(paths)
     info: dict[str, Any] = {
         "working_dir": str(Path.cwd()),
@@ -213,6 +237,8 @@ def build_run_info(
         "frames_ok": sum(str(row.get("status", "")).lower() == "ok" for row in result_rows),
         "frames_failed": len(failures),
         "failures": failures,
+        "guest_molecules": guest_molecules,
+        "occupancy_evaluated": guest_molecules > 0,
         "elapsed_seconds": round(elapsed_seconds, 3),
         "graph_mode": requested_graph_mode,
         "effective_graph_modes": ", ".join(unique_effective_modes),
@@ -281,6 +307,139 @@ def _summary_csv_path(outdir: Path, config: dict[str, Any]) -> str:
     return str((outdir / directory).resolve())
 
 
+def compact_sqq_display(selector: Any, *, version: str = __version__) -> str:
+    """Return one combined engine, selector, and version label."""
+    mode = str(selector or DEFAULT_MODE).strip().lower()
+    engine = "sqq-cpp" if is_cpp_mode(mode) else "sqq-py"
+    if mode in {"00", "99"}:
+        engine = f"{engine}-{mode}"
+    return f"{engine} ({version})"
+
+
+def compact_graph_reason(reason: Any) -> str:
+    """Reduce graph preflight explanations to one stable terminal phrase."""
+    text = " ".join(str(reason or "").split())
+    normalized = text.casefold()
+    if normalized == "complete water hydrogen topology":
+        return "all waters have >=2 H"
+    if normalized == "oxygen-only water topology":
+        return "waters only have O"
+    if normalized == "explicit graph mode":
+        return "explicit"
+    if normalized == "explicit pair map":
+        return "pair map"
+    return text
+
+
+def compact_graph_display(mode: Any, reason: Any = "") -> str:
+    """Join requested/effective graph mode and its concise reason."""
+    display = str(mode or "").strip()
+    concise = compact_graph_reason(reason)
+    return f"{display} [{concise}]" if display and concise else display
+
+
+def compact_group_graph_display(
+    requested: Any,
+    modes: dict[Any, Any],
+    reasons: dict[Any, Any] | None = None,
+) -> str:
+    """Group topology labels that resolved to the same graph mode/reason."""
+    grouped: dict[tuple[str, str], list[str]] = {}
+    reason_map = reasons or {}
+    for label, mode in modes.items():
+        reason = compact_graph_reason(reason_map.get(label, ""))
+        key = (str(mode), reason)
+        grouped.setdefault(key, []).append(str(label))
+    parts: list[str] = []
+    for (mode, reason), labels in grouped.items():
+        base_display = (
+            mode
+            if "->" in mode
+            else graph_mode_display(requested, [mode])
+        )
+        display = compact_graph_display(
+            base_display, reason
+        )
+        parts.append(f"{'/'.join(labels)}: {display}")
+    return "; ".join(parts)
+
+
+def compact_input_display(path: Any, input_format: Any) -> str:
+    """Join a resolved input path and human-facing format label."""
+    raw = str(path or "").strip()
+    try:
+        resolved = str(Path(raw).expanduser().resolve()) if raw else ""
+    except (OSError, RuntimeError):
+        resolved = raw
+    format_text = human_input_format(input_format)
+    return f"{resolved} [{format_text}]" if format_text else resolved
+
+
+def human_input_format(value: Any) -> str:
+    """Return a compact display form for normalized input-format identifiers."""
+    text = str(value or "").strip()
+    mapping = {
+        "gromacs-gro": "GROMACS GRO",
+        "gromacs-xtc": "GROMACS XTC",
+        "gromacs-trr": "GROMACS TRR",
+        "lammps-dump": "LAMMPS trajectory",
+        "lammps-dcd": "LAMMPS DCD",
+        "track-state": "SQQ Analyze result",
+        "xyz": "XYZ",
+    }
+    return mapping.get(text.casefold(), text)
+
+
+def compact_ring_scope(config: dict[str, Any]) -> str:
+    """Combine ring search and report sizes on one terminal row."""
+    ring = config.get("ring", {})
+    search = _size_scope_text(ring.get("sizes", ()))
+    report_value = ring.get("report_sizes", ring.get("sizes", ()))
+    if report_value in (None, "", "auto"):
+        report_value = ring.get("sizes", ())
+    report = _size_scope_text(report_value)
+    if search == report:
+        return f"{search} [search and report]"
+    return f"search {search}; report {report}"
+
+
+def compact_additional_search(config: dict[str, Any]) -> str:
+    """Render HALF, QUASI, and CLUSTER as one compact feature line."""
+    half = bool(config.get("half_cage", {}).get("enabled", False))
+    quasi = bool(config.get("quasi_cage", {}).get("enabled", False))
+    cluster = bool(config.get("hydrate_cluster", {}).get("enabled", False))
+    half_text = f"HALF {'on' if half else 'off'}"
+    quasi_text = f"QUASI {'on' if quasi else 'off'}"
+    if quasi:
+        quasi_text += f" (L{config.get('quasi_cage', {}).get('max_layers', 1)})"
+    cluster_text = f"CLUSTER {'on' if cluster else 'off'}"
+    if cluster:
+        cluster_text += (
+            f" (>={config.get('hydrate_cluster', {}).get('min_cage', 2)} cages)"
+        )
+    return "; ".join((half_text, quasi_text, cluster_text))
+
+
+def _size_scope_text(value: Any) -> str:
+    if isinstance(value, str):
+        parts = [item.strip() for item in value.replace("/", ",").split(",") if item.strip()]
+    elif isinstance(value, (list, tuple, set)):
+        parts = [str(item) for item in value]
+    elif value in (None, ""):
+        parts = []
+    else:
+        parts = [str(value)]
+    return "/".join(parts) if parts else "none"
+
+
+def _explicit_cage_report(config: dict[str, Any]) -> str:
+    raw = config.get("cage", {}).get("report_types", "auto")
+    if raw in (None, "", (), [], "auto", "all"):
+        return ""
+    value = dashboard_cage_targets(config)
+    return "" if value.startswith("all detected") else value
+
+
 def print_run_header(
     args: Namespace,
     config: dict[str, Any],
@@ -294,160 +453,174 @@ def print_run_header(
     *,
     extra_configuration_fields: list[tuple[str, Any]] | None = None,
 ) -> None:
-    """Print one atomic block of static run information."""
+    """Print the compact static Analyze header used above the live panel."""
     lines = ["Basic Information"]
 
     def add_field(label: str, value: Any) -> None:
         lines.append(terminal_field_line(label, value))
 
-    add_field("date", started_at_wall.strftime("%Y-%m-%d"))
-    add_field("start_time", started_at_wall.strftime("%H:%M:%S"))
-    add_field("time_zone", format_time_zone(started_at_wall))
-    add_field("working_dir", Path.cwd())
-    add_field("input", input_path)
-    add_field("input_format", input_format_label(paths))
-    add_field("matched_files", len(paths))
-    add_field("output", outdir)
+    input_format = input_format_label(paths)
+    add_field("Started", format_started(started_at_wall))
+    add_field("Input", compact_input_display(input_path, input_format))
+    add_field("Output", outdir.resolve())
     lines.extend(["", "Configuration"])
-    add_field("SQQ version", __version__)
-    add_field(
-        "SQQ engine",
-        "sqq-cpp" if is_cpp_mode(config.get("mode", DEFAULT_MODE)) else "sqq-py",
-    )
-    add_field("Engine selector", config.get("mode", DEFAULT_MODE))
-    add_field("Profile", profile_name(config.get("mode", DEFAULT_MODE)))
+    add_field("SQQ", compact_sqq_display(config.get("mode", DEFAULT_MODE)))
     add_field("Config file", args.config or "<built-in defaults>")
     add_field("Topology", topology or "<none>")
     if config["input"].get("sampling"):
         add_field("Sampling Interval", sampling_interval_display(config))
-    if input_format_label(paths).startswith("lammps-"):
+    if input_format.startswith("lammps-"):
         lammps = config["input"].get("lammps", {})
-        add_field("LAMMPS units", lammps.get("units", "real"))
-        add_field("LAMMPS timestep", lammps.get("timestep", 1.0))
-        add_field("LAMMPS atom style", lammps.get("atom_style", "full"))
-        add_field("LAMMPS type map", lammps.get("type_map_source", "<configuration>"))
+        add_field(
+            "LAMMPS",
+            (
+                f"units {lammps.get('units', 'real')}; "
+                f"timestep {lammps.get('timestep', 1.0)}; "
+                f"style {lammps.get('atom_style', 'full')}; "
+                f"type map {lammps.get('type_map_source', '<configuration>')}"
+            ),
+        )
     requested_graph_mode = config["graph"]["bond_mode"]
     effective_graph_mode = config["graph"].get("effective_bond_mode", "")
     effective_graph_reason = config["graph"].get("effective_bond_mode_reason", "")
     group_graph_modes = config["graph"].get("effective_bond_mode_by_group", {})
     group_graph_reasons = config["graph"].get("effective_bond_mode_reason_by_group", {})
     if requested_graph_mode != "auto" or effective_graph_mode:
-        add_field(
-            "Graph mode",
+        add_field("Graph", compact_graph_display(
             graph_mode_display(requested_graph_mode, [effective_graph_mode]),
-        )
-        if effective_graph_reason:
-            add_field("Graph mode reason", effective_graph_reason)
+            effective_graph_reason,
+        ))
     elif isinstance(group_graph_modes, dict) and group_graph_modes:
-        for label, mode in group_graph_modes.items():
-            add_field(
-                f"Graph mode ({label})",
-                graph_mode_display(requested_graph_mode, [mode]),
-            )
-            reason = (
-                group_graph_reasons.get(label, "")
-                if isinstance(group_graph_reasons, dict)
-                else ""
-            )
-            if reason:
-                add_field(f"Graph reason ({label})", reason)
+        add_field(
+            "Graph",
+            compact_group_graph_display(
+                requested_graph_mode,
+                group_graph_modes,
+                group_graph_reasons if isinstance(group_graph_reasons, dict) else {},
+            ),
+        )
     else:
-        graph_mode_display(requested_graph_mode, [])
-    add_field("Search sizes", config["ring"]["sizes"])
+        raise RuntimeError(
+            "Graph mode auto was not resolved before the run header was printed."
+        )
+    add_field("Ring sizes", compact_ring_scope(config))
     add_field("Ring definition", config["ring"].get("definition", "chordless"))
-    if not is_cpp_mode(config.get("mode")):
-        add_field("Ring report sizes", config["ring"]["report_sizes"])
-        add_field("Find half", on_off_text(config.get("half_cage", {}).get("enabled", False)))
-        add_field("Find quasi", on_off_text(config.get("quasi_cage", {}).get("enabled", False)))
-        if config.get("quasi_cage", {}).get("enabled", False):
-            add_field(
-                "Quasi-cage sizes",
-                f"{config['quasi_cage'].get('base_sizes', 'auto')} / "
-                f"{config['quasi_cage'].get('side_sizes', 'auto')}",
-            )
-            add_field("Quasi max layer", config["quasi_cage"].get("max_layers", ""))
-            add_field(
-                "Quasi search policy",
-                config["quasi_cage"].get("search_policy", "bounded"),
-            )
-    add_field("Cage report types", dashboard_cage_targets(config))
+    add_field("Additional search", compact_additional_search(config))
+    explicit_cages = _explicit_cage_report(config)
+    if explicit_cages:
+        add_field("Cage report", explicit_cages)
     add_field("Maximum cage face", config["cage"].get("max_faces", 20))
     add_field(
-        "Scientific validation",
+        "Cage validation",
         on_off_text(config["cage"].get("scientific_validation", False)),
     )
-    if not is_cpp_mode(config.get("mode")):
-        add_field(
-            "Find cluster",
-            on_off_text(config.get("hydrate_cluster", {}).get("enabled", False)),
-        )
-        add_field("Cluster min cage", config.get("hydrate_cluster", {}).get("min_cage", 2))
     add_field("Order parameters", order_parameter_config_text(config))
     if q_degrees_from_order_parameters(config.get("order", {}).get("parameters")):
         add_field("Q_l settings", q_config_text(config))
     add_field(
-        "Output types",
+        "Output",
         output_type_display(
             config.get("output", {}).get("types"),
             cpp_mode=is_cpp_mode(config.get("mode", DEFAULT_MODE)),
         ),
     )
-    add_field("Output layout", config["output"].get("structure_layout", "grouped"))
-    add_field("Worker policy", worker_policy_text(config))
-    add_field("Parallel backend", parallel_backend)
-    add_field("Math threads per worker", config.get("parallel", {}).get("math_threads", 1))
-    add_field("Workers", workers)
+    adjustment_values: list[str] = []
     for adjustment in config.get("resolution_report", {}).get("adjustments", ()):
         if not isinstance(adjustment, dict):
             continue
         parameter = adjustment.get("parameter", "parameter")
         effective = adjustment.get("effective")
-        reason = adjustment.get("reason", "automatic adjustment")
         value = f"{parameter}"
         if effective is not None:
             value += f" -> {effective}"
-        value += f" [{reason}]"
-        add_field("Adjustment", value)
+        adjustment_values.append(value)
+    if adjustment_values:
+        add_field("Adjustments", "; ".join(adjustment_values))
     for label, value in extra_configuration_fields or []:
         add_field(label, value)
     lines.append("")
     write_terminal_block(lines)
 
 
+def print_track_header(
+    args: Namespace,
+    config: dict[str, Any],
+    targets: list[Any] | tuple[Any, ...],
+    started_at_wall: datetime,
+) -> None:
+    """Print the compact static Track header before raw/source processing."""
+    raw_input = getattr(args, "input", None)
+    raw_source = getattr(args, "source", None)
+    input_value = raw_input or raw_source or Path.cwd()
+    if raw_input:
+        input_format = input_format_label([Path(raw_input)])
+    else:
+        input_format = "track-state"
+    target_text = ",".join(str(getattr(item, "raw", item)) for item in targets)
+    lines = [
+        "Basic Information",
+        terminal_field_line("Started", format_started(started_at_wall)),
+        terminal_field_line("Input", compact_input_display(input_value, input_format)),
+        terminal_field_line("Output", Path(args.output).resolve()),
+        "",
+        "Configuration",
+        terminal_field_line("SQQ", compact_sqq_display(config.get("mode", DEFAULT_MODE))),
+        terminal_field_line("Config file", getattr(args, "config", None) or "<built-in defaults>"),
+        terminal_field_line("Topology", getattr(args, "topology", None) or "<none>"),
+        terminal_field_line("Target", target_text or "all"),
+    ]
+    if raw_input and config.get("input", {}).get("delta_time_ps") is not None:
+        lines.append(terminal_field_line(
+            "Sampling interval",
+            f"{format_ps(config['input']['delta_time_ps'])} ps",
+        ))
+    lines.append("")
+    write_terminal_block(lines)
+
+
 def print_run_summary(run_info: dict[str, Any]) -> None:
-    """Print final effective run metadata as one terminal block."""
+    """Print a compact compatibility summary for legacy API callers."""
     lines = ["Run Summary"]
 
     def add_field(label: str, value: Any) -> None:
         lines.append(terminal_field_line(label, value))
 
-    add_field("Finish time", run_info.get("finish_time", ""))
-    add_field("Duration (s)", run_info.get("elapsed_seconds", ""))
-    add_field("SQQ version", run_info.get("sqq_version", __version__))
-    add_field("SQQ engine", run_info.get("sqq_engine", ""))
-    add_field("Engine selector", run_info.get("engine_selector", ""))
-    add_field("Profile", run_info.get("profile", ""))
+    add_field(
+        "SQQ",
+        compact_sqq_display(
+            run_info.get("engine_selector", DEFAULT_MODE),
+            version=str(run_info.get("sqq_version", __version__)),
+        ),
+    )
     graph_mode_by_group = run_info.get("graph_mode_by_group", {})
     if isinstance(graph_mode_by_group, dict) and len(graph_mode_by_group) > 1:
-        for label, mode in graph_mode_by_group.items():
-            add_field(f"Graph mode ({label})", mode)
+        add_field(
+            "Graph",
+            compact_group_graph_display(
+                run_info.get("graph_mode", "auto"),
+                graph_mode_by_group,
+                run_info.get("graph_mode_reason_by_group", {}),
+            ),
+        )
     else:
         add_field(
-            "Graph mode",
-            run_info.get("graph_mode_display", run_info.get("graph_mode", "")),
+            "Graph",
+            compact_graph_display(
+                run_info.get("graph_mode_display", run_info.get("graph_mode", "")),
+                run_info.get("graph_mode_reason", ""),
+            ),
         )
-        if run_info.get("graph_mode_reason"):
-            add_field("Graph mode reason", run_info.get("graph_mode_reason", ""))
     add_field("Order parameters", run_info.get("order_parameters", ""))
-    if run_info.get("sqq_engine") != "sqq-cpp":
-        add_field("Find cluster", run_info.get("find_cluster", "off"))
-    add_field("Output types", run_info.get("output_types", "none"))
-    add_field("Worker policy", run_info.get("worker_policy", ""))
-    add_field("Parallel backend", run_info.get("parallel_backend", "serial"))
-    add_field("Workers", run_info.get("workers", ""))
-    summary_write = run_info.get("summary_write", {})
-    if isinstance(summary_write, dict) and "total_seconds" in summary_write:
-        add_field("Summary write (s)", summary_write.get("total_seconds", ""))
+    add_field("Output", run_info.get("output_types", "none"))
+    add_field(
+        "Frames",
+        (
+            f"analyzed {run_info.get('frames_total', 0)}; "
+            f"ok {run_info.get('frames_ok', 0)}; "
+            f"failed {run_info.get('frames_failed', 0)}"
+        ),
+    )
+    add_field("Time", f"total {run_info.get('elapsed_seconds', 0)} s")
     lines.append("")
     write_terminal_block(lines)
 
@@ -546,6 +719,13 @@ __all__ = [
     "BOND_MODE_DISPLAY_NAMES",
     "bond_mode_display_name",
     "build_run_info",
+    "compact_additional_search",
+    "compact_graph_display",
+    "compact_group_graph_display",
+    "compact_graph_reason",
+    "compact_input_display",
+    "compact_ring_scope",
+    "compact_sqq_display",
     "format_ps",
     "frame_input_metadata",
     "hydrate_order_config_text",
@@ -555,6 +735,7 @@ __all__ = [
     "print_run_banner",
     "print_run_header",
     "print_run_summary",
+    "print_track_header",
     "q_config_text",
     "row_effective_graph_modes",
     "sampling_interval_display",

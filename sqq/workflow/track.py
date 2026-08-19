@@ -19,6 +19,7 @@ import numpy as np
 import yaml
 
 from .. import __release_date__, __version__
+from ..citation import completed_citation_evidence
 from ..config import (
     DEFAULT_MODE,
     apply_cli_overrides,
@@ -75,7 +76,7 @@ from ..runtime.output_lock import output_lock
 from ..ui.diagnostics import RunDiagnostics, capture_run_warnings
 from ..ui.formatting import format_time_zone
 from ..ui.progress import RunProgressDisplay
-from ..ui.run_header import input_format_label, print_run_banner
+from ..ui.run_header import input_format_label, print_run_banner, print_track_header
 from ..ui import completed_run_statistics, print_final_results, refresh_terminal
 from .analyze_plan import build_run_plan
 from .session import AnalysisEvent, AnalysisRunner, AnalysisSink
@@ -196,9 +197,11 @@ def _track_executed_features(
     *,
     frames: int,
     raw_mode: bool,
+    has_guest_observations: bool,
 ) -> dict[str, bool]:
     """Describe work that this Track invocation actually executed."""
     ran = int(frames) > 0
+    temporal_ran = int(frames) >= 2
     features = {
         "water_network": False,
         "ring_topology": False,
@@ -206,11 +209,13 @@ def _track_executed_features(
         "half_cage": False,
         "quasi_cage": False,
         "cage_isomer": False,
-        "cage_occupancy": False,
+        "cage_occupancy": ran and has_guest_observations,
         "hydrate_phase_domain": False,
         "vmd_rendering": ran,
         "cage_tracking": ran,
-        "cage_lifetime": ran,
+        "cage_transition": temporal_ran,
+        "cage_lifetime": temporal_ran,
+        "guest_residence": temporal_ran and has_guest_observations,
     }
     if not ran or not raw_mode:
         return features
@@ -222,7 +227,7 @@ def _track_executed_features(
             "half_cage": _section_enabled(config, "half_cage"),
             "quasi_cage": _section_enabled(config, "quasi_cage"),
             "cage_isomer": True,
-            "cage_occupancy": True,
+            "cage_occupancy": has_guest_observations,
             "hydrate_phase_domain": _section_enabled(
                 config, "hydrate_cluster"
             ),
@@ -343,6 +348,8 @@ def _track_locked(
     source_state_path = prepared.source_state_path
     requested_tracking = prepared.requested_tracking
 
+    print_track_header(args, config, targets, started_wall)
+
     try:
         with TemporaryDirectory(
             prefix=".sqq-track-",
@@ -400,6 +407,13 @@ def _track_locked(
             selections = select_targets(
                 result, (target.raw for target in targets)
             )
+            guest_ids = {
+                guest_id
+                for selection in selections
+                for observation in selection.observations
+                for guest_id in observation.guest_ids
+            }
+            has_guest_observations = bool(guest_ids)
             precursor_data = (
                 _raw_precursor_histories(selections, args, config)
                 if getattr(args, "input", None)
@@ -441,6 +455,26 @@ def _track_locked(
             elapsed,
             status="completed",
         )
+        raw_mode = bool(getattr(args, "input", None))
+        track_features = _track_executed_features(
+            config,
+            frames=len(result.frames),
+            raw_mode=raw_mode,
+            has_guest_observations=has_guest_observations,
+        )
+        citation_evidence = completed_citation_evidence(
+            config,
+            successful_frames=len(result.frames),
+            completed_outputs=("sqq-render",),
+            track=True,
+            occupancy_evaluated=has_guest_observations,
+            guest_residence_evaluated=has_guest_observations,
+        )
+        citation_evidence["executed_features"] = track_features
+        if not raw_mode:
+            citation_evidence["executed_order_parameters"] = ()
+        run_info.update(citation_evidence)
+        run_info["guest_molecules"] = len(guest_ids)
         write_run_config(output, config, run_info)
         _write_root_track_info(output, config, metadata, targets, result, elapsed)
 
@@ -464,14 +498,6 @@ def _track_locked(
             total_seconds=total_seconds,
             track=True,
         )
-        raw_mode = bool(getattr(args, "input", None))
-        statistics["executed_features"] = _track_executed_features(
-            config,
-            frames=len(result.frames),
-            raw_mode=raw_mode,
-        )
-        if not raw_mode:
-            statistics["executed_order_parameters"] = ()
         completed_outputs = tuple(statistics.get("completed_outputs", ()))
         if "sqq-render" not in completed_outputs:
             statistics["completed_outputs"] = completed_outputs + ("sqq-render",)

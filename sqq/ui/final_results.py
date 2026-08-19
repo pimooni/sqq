@@ -11,20 +11,27 @@ from __future__ import annotations
 import math
 import re
 import sys
+import textwrap
 from collections.abc import Iterable, Mapping
+from datetime import datetime
 from pathlib import Path
 from typing import Any, TextIO
 
 from .. import __version__
-from ..citation import (
-    GITHUB_LINE,
-    PUBLICATION_LINE,
-    build_citation_recommendation,
+from ..citation import build_citation_recommendation
+from .formatting import format_started
+from .run_header import (
+    compact_additional_search,
+    compact_graph_display,
+    compact_group_graph_display,
+    compact_input_display,
+    compact_ring_scope,
+    compact_sqq_display,
 )
 
 _ANSI_BOLD = "\x1b[1m"
 _ANSI_RESET = "\x1b[0m"
-_LABEL_WIDTH = 32
+_LABEL_WIDTH = 24
 _MISSING = object()
 _TRUE_TEXT = {"1", "true", "yes", "on", "enabled", "complete", "completed"}
 _FALSE_TEXT = {"", "0", "false", "no", "off", "disabled", "none", "null", "auto"}
@@ -62,39 +69,44 @@ def render_final_results(
     else:
         _append_configuration(lines, run_info, config)
 
-    diagnostics = _diagnostic_messages(statistics)
-    if diagnostics:
-        lines.extend(["", _bold("Diagnostics", ansi)])
-        _add_field(lines, "Warnings", len(diagnostics))
-        lines.extend(f"  Warning: {message}" for message in diagnostics)
-
     result_heading = "Tracking Results" if track_run else "Analysis Results"
     lines.extend(["", _bold(result_heading, ansi)])
-    _add_field(lines, "Requested frames", totals["requested"])
-    _add_field(lines, "Analyzed frames", totals["analyzed"])
-    _add_field(lines, "Successful frames", totals["successful"])
-    _add_field(lines, "Failed frames", totals["failed"])
-    _add_field(lines, "Total elapsed time", _format_seconds(totals["total_seconds"]))
-    _add_field(lines, "Analysis time", _format_seconds(totals["analysis_seconds"]))
-    _add_field(lines, "Output-writing time", _format_seconds(totals["write_seconds"]))
     _add_field(
         lines,
-        "Mean time / successful frame",
-        _format_seconds(totals["mean_seconds"]),
+        "Frames",
+        (
+            f"requested {totals['requested']}; analyzed {totals['analyzed']}; "
+            f"ok {totals['successful']}; failed {totals['failed']}"
+        ),
     )
-    _add_field(lines, "Run status", totals["status"])
-    _add_field(lines, "Result path", totals["result_path"])
+    _add_field(
+        lines,
+        "Time",
+        (
+            f"total {_format_seconds(totals['total_seconds'])}; "
+            f"analysis {_format_seconds(totals['analysis_seconds'])}; "
+            f"output {_format_seconds(totals['write_seconds'])}"
+        ),
+    )
+    if totals["successful"] > 1 and totals["mean_seconds"] is not None:
+        _add_field(lines, "Mean time / frame", _format_seconds(totals["mean_seconds"]))
+    if track_run:
+        _add_present_field(lines, "Tracks", _lookup(run_info, "track_count"))
+    if totals["status"] not in {"completed", "ok", "successful"} or totals["failed"]:
+        _add_field(lines, "Status", totals["status"])
+
+    diagnostics = _diagnostic_messages(statistics)
+    if diagnostics:
+        preview = diagnostics[0]
+        if len(diagnostics) > 1:
+            preview += f"; +{len(diagnostics) - 1} more (see result files)"
+        _add_field(lines, "Warnings", preview)
 
     citation = build_citation_recommendation(run_info, config, statistics)
-    lines.extend(
-        [
-            "",
-            _bold("Citation Recommendation", ansi),
-            _bold(citation.sentence, ansi),
-            citation.publication,
-            citation.github,
-        ]
-    )
+    lines.extend(["", _bold("Citation Recommendation", ansi)])
+    lines.extend(_wrap_citation(citation.sentence, ansi=ansi, bold=True))
+    lines.extend(_wrap_citation(citation.publication, ansi=ansi))
+    lines.append(f"  {citation.github}")
     return "\n".join(lines)
 
 
@@ -158,28 +170,78 @@ def build_citation_sentence(
     return build_citation_recommendation(run_info, config, statistics).sentence
 
 
-def _append_basic_information(lines: list[str], run_info: Mapping[str, Any]) -> None:
-    fields = (
-        ("Date", _lookup(run_info, "date")),
-        ("Start time", _lookup(run_info, "start_time")),
-        ("Finish time", _lookup(run_info, "finish_time")),
-        ("Time zone", _lookup(run_info, "time_zone")),
-        ("Working directory", _lookup(run_info, "working_dir")),
-        ("Input", _lookup(run_info, "input")),
-        ("Input format", _lookup(run_info, "input_format")),
-        ("Matched files", _lookup(run_info, "matched_files")),
-    )
-    for label, value in fields:
-        _add_present_field(lines, label, value)
+def _started_display(run_info: Mapping[str, Any]) -> Any:
+    value = _lookup(run_info, "started_at")
+    if value is not _MISSING and value is not None:
+        try:
+            return format_started(datetime.fromisoformat(str(value)))
+        except ValueError:
+            pass
+    date = _lookup(run_info, "date")
+    time = _lookup(run_info, "start_time")
+    zone = _lookup(run_info, "time_zone")
+    parts = [
+        str(item).strip()
+        for item in (date, time, zone)
+        if item is not _MISSING and item is not None and str(item).strip()
+    ]
+    return ", ".join(parts) if parts else _MISSING
 
-    matched = _optional_int(_lookup(run_info, "matched_files"))
-    first_file = _lookup(run_info, "first_file")
-    last_file = _lookup(run_info, "last_file")
-    if matched is not None and matched > 1:
-        _add_present_field(lines, "First file", first_file)
-        _add_present_field(lines, "Last file", last_file)
-    elif first_file is not _MISSING:
-        _add_present_field(lines, "Current file", first_file)
+
+def _explicit_cage_report_value(
+    run_info: Mapping[str, Any], config: Mapping[str, Any]
+) -> str:
+    value = _first(
+        _lookup(run_info, "cage_report_types"),
+        _config_value(config, "cage", "report_type"),
+        _config_value(config, "cage", "report_types"),
+    )
+    if value is _MISSING or value is None:
+        return ""
+    if isinstance(value, str):
+        text = value.strip()
+        if not text or text.casefold() in {"auto", "all"} or text.casefold().startswith("all detected"):
+            return ""
+        return text
+    if isinstance(value, Iterable) and not isinstance(value, (bytes, Mapping)):
+        values = [str(item).strip() for item in value if str(item).strip()]
+        return ", ".join(values)
+    return str(value)
+
+
+def _wrap_citation(text: str, *, ansi: bool, bold: bool = False) -> list[str]:
+    wrapped = textwrap.wrap(
+        text,
+        width=104,
+        initial_indent="  ",
+        subsequent_indent="  ",
+        break_long_words=False,
+        break_on_hyphens=False,
+    ) or ["  "]
+    return [_bold(line, ansi) for line in wrapped] if bold else wrapped
+
+
+def _missing_as_empty(value: Any) -> Any:
+    return "" if value is _MISSING else value
+
+
+def _append_basic_information(lines: list[str], run_info: Mapping[str, Any]) -> None:
+    _add_present_field(lines, "Started", _started_display(run_info))
+    input_value = _first(_lookup(run_info, "input"), _lookup(run_info, "source"))
+    if input_value is not _MISSING:
+        _add_field(
+            lines,
+            "Input",
+            compact_input_display(
+                input_value,
+                _missing_as_empty(_lookup(run_info, "input_format")),
+            ),
+        )
+    _add_present_field(
+        lines,
+        "Output",
+        _first(_lookup(run_info, "output_dir", "output"), _lookup(run_info, "result_path")),
+    )
 
 
 def _append_configuration(
@@ -187,111 +249,93 @@ def _append_configuration(
     run_info: Mapping[str, Any],
     config: Mapping[str, Any],
 ) -> None:
-    engine = _engine_name(run_info, config)
-    _add_field(lines, "SQQ version", _first(_lookup(run_info, "sqq_version"), __version__))
-    _add_field(lines, "SQQ engine", engine)
-    _add_present_field(lines, "Engine selector", _lookup(run_info, "engine_selector"))
-    _add_present_field(lines, "Profile", _lookup(run_info, "profile"))
+    selector = _first(_lookup(run_info, "engine_selector"), _lookup(config, "mode"), "py")
+    _add_field(
+        lines,
+        "SQQ",
+        compact_sqq_display(
+            selector,
+            version=str(_first(_lookup(run_info, "sqq_version"), __version__)),
+        ),
+    )
     _add_present_field(lines, "Config file", _lookup(run_info, "config_file"))
     _add_present_field(lines, "Topology", _lookup(run_info, "topology"))
-    _add_present_field(lines, "Sampling interval", _lookup(run_info, "sampling_interval"))
+    _add_present_field(lines, "Sampling Interval", _lookup(run_info, "sampling_interval"))
+    if str(_missing_as_empty(_lookup(run_info, "input_format"))).startswith("lammps-"):
+        _add_field(
+            lines,
+            "LAMMPS",
+            (
+                f"units {_missing_as_empty(_lookup(run_info, 'lammps_units'))}; "
+                f"timestep {_missing_as_empty(_lookup(run_info, 'lammps_timestep'))}; "
+                f"style {_missing_as_empty(_lookup(run_info, 'lammps_atom_style'))}; "
+                f"type map {_missing_as_empty(_lookup(run_info, 'lammps_type_map_source'))}"
+            ),
+        )
 
     group_modes = _lookup(run_info, "graph_mode_by_group")
     if isinstance(group_modes, Mapping) and len(group_modes) > 1:
         group_reasons = _lookup(run_info, "graph_mode_reason_by_group")
-        for label, mode in group_modes.items():
-            _add_field(lines, f"Graph mode ({label})", mode)
-            if isinstance(group_reasons, Mapping):
-                _add_present_field(
-                    lines,
-                    f"Graph reason ({label})",
-                    group_reasons.get(label, _MISSING),
-                )
+        _add_field(
+            lines,
+            "Graph",
+            compact_group_graph_display(
+                _first(_lookup(run_info, "graph_mode"), "auto"),
+                dict(group_modes),
+                dict(group_reasons) if isinstance(group_reasons, Mapping) else {},
+            ),
+        )
     else:
-        _add_present_field(lines, "Graph mode", _graph_mode(run_info, config))
-        _add_present_field(lines, "Graph mode reason", _lookup(run_info, "graph_mode_reason"))
+        _add_present_field(
+            lines,
+            "Graph",
+            compact_graph_display(
+                _graph_mode(run_info, config),
+                _missing_as_empty(_lookup(run_info, "graph_mode_reason")),
+            ),
+        )
 
     adjustments = _lookup(run_info, "resolution_adjustments")
     if isinstance(adjustments, Iterable) and not isinstance(adjustments, (str, bytes, Mapping)):
+        values: list[str] = []
         for adjustment in adjustments:
-            if not isinstance(adjustment, Mapping):
-                continue
-            parameter = adjustment.get("parameter", "parameter")
-            effective = adjustment.get("effective")
-            reason = adjustment.get("reason", "automatic adjustment")
-            value = str(parameter)
-            if effective is not None:
-                value += f" -> {effective}"
-            value += f" [{reason}]"
-            _add_field(lines, "Adjustment", value)
+            if isinstance(adjustment, Mapping):
+                parameter = adjustment.get("parameter", "parameter")
+                effective = adjustment.get("effective")
+                value = str(parameter)
+                if effective is not None:
+                    value += f" -> {effective}"
+                values.append(value)
+        if values:
+            _add_field(lines, "Adjustments", "; ".join(values))
 
-    _add_present_field(
-        lines,
-        "Search sizes",
-        _first(_config_value(config, "ring", "size"), _config_value(config, "ring", "sizes")),
-    )
+    _add_field(lines, "Ring sizes", compact_ring_scope(dict(config)))
     _add_present_field(
         lines,
         "Ring definition",
         _first(_config_value(config, "ring", "definition"), _config_value(config, "ring", "chordless")),
     )
-    if engine != "sqq-cpp":
-        _add_present_field(
-            lines,
-            "Ring report sizes",
-            _first(
-                _lookup(run_info, "ring_report_sizes"),
-                _config_value(config, "ring", "report_size"),
-                _config_value(config, "ring", "report_sizes"),
-            ),
-        )
-        _add_field(
-            lines,
-            "Find half",
-            _on_off(_effective_enabled(run_info, config, "find_half", "half_cage")),
-        )
-        _add_field(
-            lines,
-            "Find quasi",
-            _on_off(_effective_enabled(run_info, config, "find_quasi", "quasi_cage")),
-        )
-
-    _add_present_field(
-        lines,
-        "Cage report types",
-        _first(
-            _lookup(run_info, "cage_report_types"),
-            _config_value(config, "cage", "report_type"),
-            _config_value(config, "cage", "report_types"),
-        ),
-    )
+    _add_field(lines, "Additional search", compact_additional_search(dict(config)))
+    cage_report = _explicit_cage_report_value(run_info, config)
+    if cage_report:
+        _add_field(lines, "Cage report", cage_report)
     _add_present_field(
         lines,
         "Maximum cage face",
         _first(_lookup(run_info, "max_cage_face"), _config_value(config, "cage", "max_face"), _config_value(config, "cage", "max_faces")),
     )
-    if engine != "sqq-cpp":
-        _add_field(
-            lines,
-            "Find cluster",
-            _on_off(_effective_enabled(run_info, config, "find_cluster", "hydrate_cluster")),
-        )
+    cage_validation = _first(
+        _lookup(run_info, "cage_scientific_validation"),
+        _config_value(config, "cage", "scientific_validation"),
+    )
+    _add_present_field(
+        lines,
+        "Cage validation",
+        _on_off(_as_bool(cage_validation, False)),
+    )
 
     _add_field(lines, "Order parameters", _display_tokens(_selected_order_parameters(run_info, config)))
-    _add_field(lines, "Output types", _display_tokens(_selected_outputs(run_info, config)))
-    _add_present_field(
-        lines,
-        "Output layout",
-        _first(_lookup(run_info, "output_layout"), _config_value(config, "output", "structure_layout")),
-    )
-    _add_present_field(lines, "Worker policy", _lookup(run_info, "worker_policy"))
-    _add_present_field(lines, "Parallel backend", _lookup(run_info, "parallel_backend"))
-    _add_present_field(lines, "Math threads per worker", _lookup(run_info, "math_threads"))
-    _add_present_field(
-        lines,
-        "Workers",
-        _first(_lookup(run_info, "workers"), _config_value(config, "parallel", "worker"), _config_value(config, "parallel", "workers")),
-    )
+    _add_field(lines, "Output", _display_tokens(_selected_outputs(run_info, config)))
     topology_groups = _lookup(run_info, "topology_groups")
     if (
         topology_groups is not _MISSING
@@ -301,8 +345,14 @@ def _append_configuration(
             topology_groups = len(topology_groups)
         except TypeError:
             pass
-    _add_present_field(lines, "Topology groups", topology_groups)
-    _add_present_field(lines, "Grouping policy", _lookup(run_info, "grouping_policy"))
+    if topology_groups is not _MISSING:
+        grouping = str(
+            _first(
+                _lookup(run_info, "topology_grouping", "grouping_policy"),
+                "automatic",
+            )
+        )
+        _add_present_field(lines, "Topology groups", f"{topology_groups} [{grouping}]")
 
 
 def _append_track_configuration(
@@ -315,56 +365,52 @@ def _append_track_configuration(
     if not isinstance(track_config, Mapping):
         track_config = {}
 
-    _add_field(lines, "SQQ version", _first(_lookup(run_info, "sqq_version"), __version__))
-    _add_field(lines, "SQQ engine", _engine_name(run_info, config))
+    selector = _first(_lookup(run_info, "engine_selector"), _lookup(config, "mode"), "py")
+    _add_field(
+        lines,
+        "SQQ",
+        compact_sqq_display(
+            selector,
+            version=str(_first(_lookup(run_info, "sqq_version"), __version__)),
+        ),
+    )
     _add_present_field(lines, "Config file", _lookup(run_info, "config_file"))
-
-    source = _lookup(run_info, "source")
-    if source is not _MISSING and source is not None and str(source).strip():
-        _add_field(lines, "Source", source)
-    else:
-        _add_present_field(lines, "Input", _lookup(run_info, "input"))
+    _add_present_field(lines, "Topology", _lookup(run_info, "topology"))
 
     _add_field(
         lines,
         "Target",
         _first(_lookup(run_info, "target"), track_config.get("target"), "all"),
     )
-    _add_field(
-        lines,
-        "Minimum Jaccard",
-        _first(track_config.get("min_jaccard"), 0.5),
+    jaccard = _first(track_config.get("min_jaccard"), 0.5)
+    shared_fraction = _first(track_config.get("min_shared_fraction"), 0.6)
+    shared_water = _first(
+        track_config.get("min_shared_water"),
+        track_config.get("min_shared_waters"),
+        3,
     )
+    gap = _first(track_config.get("gap_frame"), 0)
     _add_field(
         lines,
-        "Minimum shared fraction",
-        _first(track_config.get("min_shared_fraction"), 0.6),
-    )
-    _add_field(
-        lines,
-        "Minimum shared water",
-        _first(
-            track_config.get("min_shared_water"),
-            track_config.get("min_shared_waters"),
-            3,
+        "Track matching",
+        (
+            f"Jaccard >={jaccard}; shared >={shared_fraction} / "
+            f"{shared_water} waters; gap {gap} frames"
         ),
     )
     maximum_distance = _first(
         track_config.get("max_center_distance_nm"),
         "none",
     )
-    _add_field(lines, "Maximum center distance (nm)", maximum_distance)
     _add_field(
         lines,
-        "Gap frames",
-        _first(track_config.get("gap_frame"), 0),
+        "Track options",
+        (
+            f"center distance {maximum_distance} nm; guest tie-break "
+            f"{_on_off(_as_bool(track_config.get('guest_tiebreak'), True))}"
+        ),
     )
-    _add_field(
-        lines,
-        "Guest tie-break",
-        _on_off(_as_bool(track_config.get("guest_tiebreak"), True)),
-    )
-    _add_field(lines, "Output types", "Track CSV, sqq-render")
+    _add_field(lines, "Output", "Track CSV, sqq-render")
 
 
 def _is_track_run(run_info: Mapping[str, Any]) -> bool:
@@ -515,30 +561,6 @@ def _selected_outputs(
     )
 
 
-def _effective_enabled(
-    run_info: Mapping[str, Any],
-    config: Mapping[str, Any],
-    run_key: str,
-    config_section: str,
-) -> bool:
-    run_value = _lookup(run_info, run_key)
-    if run_value is not _MISSING:
-        return _as_bool(run_value, False)
-    return _as_bool(_config_value(config, config_section, "enabled"), False)
-
-
-def _engine_name(run_info: Mapping[str, Any], config: Mapping[str, Any]) -> str:
-    value = _first(
-        _lookup(run_info, "sqq_engine", "engine"),
-        _lookup(config, "engine", "mode"),
-        "sqq-py",
-    )
-    text = str(value).strip().lower()
-    if text in {"99", "cpp", "sqq-cpp"} or "cpp" in text:
-        return "sqq-cpp"
-    return "sqq-py"
-
-
 def _graph_mode(run_info: Mapping[str, Any], config: Mapping[str, Any]) -> Any:
     display = _lookup(run_info, "graph_mode_display")
     if display is not _MISSING and str(display).strip():
@@ -619,15 +641,6 @@ def _nonnegative_int(name: str, value: Any) -> int:
     if number < 0:
         raise ValueError(f"{name} must be a nonnegative integer")
     return number
-
-
-def _optional_int(value: Any) -> int | None:
-    if value is _MISSING or value is None:
-        return None
-    try:
-        return int(value)
-    except (TypeError, ValueError):
-        return None
 
 
 def _nonnegative_float_or_none(name: str, value: Any) -> float | None:

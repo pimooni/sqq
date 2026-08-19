@@ -169,11 +169,15 @@ def _target_vmd_script(selection: TargetSelection, target_name: str) -> str:
         molecule_name=f"SQQ track {target_name}",
         render_kind="track",
     ).rstrip()
+    commands = "\n".join(
+        "    " + line for line in _selection_commands(selection, target_name)
+    )
     return (
         script
         + "\n\n# Default lifecycle view for this tracking target.\n"
-        + "\n".join(_selection_commands(selection, target_name))
-        + "\n"
+        + "::SQQ::when_ready {\n"
+        + commands
+        + "\n}\n"
     )
 
 
@@ -195,8 +199,9 @@ def _selection_commands(
             f'puts "SQQ track target {target_name} matched no cages."',
         ]
     return [
-        "sqq show cage " + " ".join(object_ids[start : start + 100])
-        for start in range(0, len(object_ids), 100)
+        "set ::SQQ::default_track_targets {" + " ".join(object_ids) + "}",
+        "::SQQ::set_show [linsert $::SQQ::default_track_targets 0 cage]",
+        "unset ::SQQ::default_track_targets",
     ]
 
 

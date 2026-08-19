@@ -4,20 +4,30 @@ from __future__ import annotations
 
 SQQ_CAGE_TCL = r"""# SQQ annotated cage and guest renderer for VMD.
 __SQQ_RENDER_MANIFEST__
+if {[llength [info commands ::SQQ::dispose_renderer]] > 0} {
+    catch {::SQQ::dispose_renderer 1}
+} elseif {[namespace exists ::SQQ]} {
+    # Compatibility cleanup for scripts generated before dispose_renderer.
+    namespace eval ::SQQ {
+        catch {trace remove variable ::vmd_frame write ::SQQ::frame_changed}
+        catch {trace remove variable ::vmd_pick_atom write ::SQQ::pick_atom_changed}
+        catch {trace remove variable ::vmd_pick_atom write ::SQQ::pick_atom_event}
+        catch {trace remove variable ::vmd_pick_graphics write ::SQQ::pick_graphics_changed}
+        foreach variable_name {frame_after_id pick_after_id renderer_after_id} {
+            if {[info exists $variable_name] && [set $variable_name] ne ""} {
+                catch {after cancel [set $variable_name]}
+            }
+        }
+        if {[info exists membership_handle] && $membership_handle ne ""} {
+            catch {close $membership_handle}
+        }
+        catch {::SQQ::clear_graphics}
+        catch {::SQQ::clear_representations}
+    }
+}
 namespace eval ::SQQ {
-    catch {trace remove variable ::vmd_frame write ::SQQ::frame_changed}
-    catch {trace remove variable ::vmd_pick_atom write ::SQQ::pick_atom_changed}
-    catch {trace remove variable ::vmd_pick_atom write ::SQQ::pick_atom_event}
-    catch {trace remove variable ::vmd_pick_graphics write ::SQQ::pick_graphics_changed}
-    if {[info exists frame_after_id] && $frame_after_id ne ""} {
-        catch {after cancel $frame_after_id}
-    }
-    if {[info exists pick_after_id] && $pick_after_id ne ""} {
-        catch {after cancel $pick_after_id}
-    }
-    catch {::SQQ::clear_graphics}
-    catch {::SQQ::clear_representations}
     variable molid -1
+    variable owns_molecule 0
     variable gro_path ""
     variable xtc_path ""
     variable membership_path ""
@@ -26,13 +36,29 @@ namespace eval ::SQQ {
     variable active_targets
     variable representation_names {}
     variable representation_keys {}
+    variable pending_representation_keys {}
     variable representation_atoms
     variable representation_kind
     variable representation_color
     variable representation_material
     variable representation_radius_tier
     variable representation_name_by_key
+    variable representation_registered
+    variable representation_style_snapshot
+    variable representation_style_template
     variable frame_after_id ""
+    variable renderer_after_id ""
+    variable renderer_state loading
+    variable renderer_error ""
+    variable ready_callbacks {}
+    variable membership_handle ""
+    variable membership_line_number 0
+    variable membership_frame_count 0
+    variable membership_finalize_frame 0
+    variable membership_seen_frames
+    variable parsed_frames 0
+    variable trajectory_last_count -1
+    variable trajectory_last_change_ms 0
     variable displayed_graph_mode "__unset__"
     variable label_visible 0
     variable pick_mode off
@@ -40,6 +66,7 @@ namespace eval ::SQQ {
     variable selected_guest ""
     variable atom_label_count 0
     variable pick_after_id ""
+    variable label_after_ids {}
     variable pick_cage_rep_name ""
     variable pick_guest_rep_name ""
     variable graphics_ids {}
@@ -60,11 +87,52 @@ namespace eval ::SQQ {
     variable atom_guest
     variable component_atom_role
     variable component_resname_role
-    foreach name {group_keys group_atoms graph_mode color_overrides known_objects object_aliases cage_types cage_ids cage_centers track_types graphics_targets guest_keys guest_atoms guest_types atom_guest component_atom_role component_resname_role active_targets representation_atoms representation_kind representation_color representation_material representation_radius_tier representation_name_by_key} {
+    variable components_initialized
+    variable topology_indexes {}
+    variable topology_resnames {}
+    foreach name {group_keys group_atoms graph_mode color_overrides known_objects object_aliases cage_types cage_ids cage_centers track_types graphics_targets guest_keys guest_atoms guest_types atom_guest component_atom_role component_resname_role active_targets representation_atoms representation_kind representation_color representation_material representation_radius_tier representation_name_by_key representation_registered representation_style_snapshot representation_style_template membership_seen_frames components_initialized} {
         catch {array unset $name}
         array set $name {}
     }
     set active_targets(cage) [list [list cage *]]
+}
+
+proc ::SQQ::dispose_renderer {{delete_molecule 1}} {
+    variable frame_after_id
+    variable label_after_ids
+    variable membership_handle
+    variable molid
+    variable owns_molecule
+    variable pick_after_id
+    variable ready_callbacks
+    variable renderer_after_id
+    variable renderer_state
+    set renderer_state disposing
+    foreach variable_name {frame_after_id pick_after_id renderer_after_id} {
+        if {[set $variable_name] ne ""} {
+            catch {after cancel [set $variable_name]}
+            set $variable_name ""
+        }
+    }
+    foreach callback_id $label_after_ids { catch {after cancel $callback_id} }
+    set label_after_ids {}
+    if {$membership_handle ne ""} {
+        catch {close $membership_handle}
+        set membership_handle ""
+    }
+    catch {trace remove variable ::vmd_frame write ::SQQ::frame_changed}
+    catch {trace remove variable ::vmd_pick_atom write ::SQQ::pick_atom_changed}
+    catch {trace remove variable ::vmd_pick_atom write ::SQQ::pick_atom_event}
+    catch {trace remove variable ::vmd_pick_graphics write ::SQQ::pick_graphics_changed}
+    catch {::SQQ::clear_graphics}
+    catch {::SQQ::clear_representations}
+    if {$delete_molecule && $owns_molecule && $molid >= 0 &&
+        ![catch {set molecule_ids [molinfo list]}] && $molid in $molecule_ids} {
+        catch {mol delete $molid}
+    }
+    set molid -1
+    set owns_molecule 0
+    set ready_callbacks {}
 }
 
 proc ::SQQ::add_member {frame source key atom_index} {
@@ -272,7 +340,7 @@ proc ::SQQ::read_memberships {frame atom_index family payload} {
     }
 }
 
-proc ::SQQ::read_membership_tsv {path} {
+proc ::SQQ::reset_membership_data {} {
     variable group_keys
     variable group_atoms
     variable graph_mode
@@ -287,172 +355,447 @@ proc ::SQQ::read_membership_tsv {path} {
     variable atom_guest
     variable component_atom_role
     variable component_resname_role
-    foreach name {group_keys group_atoms graph_mode known_objects object_aliases cage_types cage_centers track_types guest_keys guest_atoms guest_types atom_guest component_atom_role component_resname_role} {
+    variable components_initialized
+    variable membership_frame_count
+    variable membership_seen_frames
+    variable topology_indexes
+    variable topology_resnames
+    foreach name {group_keys group_atoms graph_mode known_objects object_aliases cage_types cage_centers track_types guest_keys guest_atoms guest_types atom_guest component_atom_role component_resname_role components_initialized membership_seen_frames} {
         array unset $name
         array set $name {}
     }
+    set membership_frame_count 0
+    set topology_indexes {}
+    set topology_resnames {}
+}
+
+proc ::SQQ::parse_membership_row {line line_number} {
+    variable membership_frame_count
+    variable membership_seen_frames
+    set fields [split $line "\t"]
+    if {[llength $fields] != 15} {
+        error "Invalid SQQ membership TSV row $line_number"
+    }
+    lassign $fields record frame source_frame time_ps graph_value family cage_id cage_type phase domain_id cluster_id atom_indexes center_x center_y center_z
+    if {![string is integer -strict $frame] || $frame < 0} {
+        error "Invalid SQQ render frame at TSV row $line_number"
+    }
+    if {$record eq "F"} {
+        variable graph_mode
+        if {[info exists membership_seen_frames($frame)]} {
+            error "Duplicate SQQ frame metadata for frame $frame"
+        }
+        set membership_seen_frames($frame) 1
+        set graph_mode($frame) $graph_value
+        if {$frame + 1 > $membership_frame_count} {
+            set membership_frame_count [expr {$frame + 1}]
+        }
+    } elseif {$record eq "C"} {
+        if {$family ne "cage" || $atom_indexes ne "-"} {
+            error "Invalid SQQ cage-center record at TSV row $line_number"
+        }
+        foreach value [list $center_x $center_y $center_z] {
+            if {![string is double -strict $value]} {
+                error "Invalid SQQ cage center at TSV row $line_number"
+            }
+        }
+        ::SQQ::set_cage_center $frame $cage_id $cage_type \
+            [list $center_x $center_y $center_z]
+    } elseif {$record eq "G"} {
+        if {$family ne "guest" || $atom_indexes in {- ""}} {
+            error "Invalid SQQ guest record at TSV row $line_number"
+        }
+        set indexes {}
+        foreach atom_index [split $atom_indexes ,] {
+            if {![string is integer -strict $atom_index] || $atom_index < 0} {
+                error "Invalid SQQ guest atom index at TSV row $line_number"
+            }
+            lappend indexes $atom_index
+        }
+        ::SQQ::add_guest_group $frame $cage_id $cage_type $indexes
+    } elseif {$record eq "P"} {
+        if {$family ne "component" || $atom_indexes in {- ""}} {
+            error "Invalid SQQ component record at TSV row $line_number"
+        }
+        # Render bundles have a fixed topology.  Frame-zero component metadata is
+        # therefore canonical; later frames reuse it instead of duplicating a full
+        # atom map in Tcl memory.
+        if {$frame > 0} { return }
+        set indexes {}
+        foreach atom_index [split $atom_indexes ,] {
+            if {![string is integer -strict $atom_index] || $atom_index < 0} {
+                error "Invalid SQQ component atom index at TSV row $line_number"
+            }
+            lappend indexes $atom_index
+        }
+        ::SQQ::add_component_group $frame $cage_id $cage_type $indexes
+    } elseif {$record eq "M"} {
+        if {$family ni {cage guest}} {
+            error "Invalid SQQ membership family at TSV row $line_number"
+        }
+        set payload "$cage_id:$cage_type:$phase:$domain_id:$cluster_id"
+        if {$atom_indexes eq "-" || $atom_indexes eq ""} {
+            error "Missing SQQ atom indexes at TSV row $line_number"
+        }
+        foreach atom_index [split $atom_indexes ,] {
+            if {![string is integer -strict $atom_index] || $atom_index < 0} {
+                error "Invalid SQQ atom index at TSV row $line_number"
+            }
+            ::SQQ::read_memberships $frame $atom_index $family $payload
+        }
+    } else {
+        error "Invalid SQQ membership record at TSV row $line_number: $record"
+    }
+}
+
+proc ::SQQ::read_membership_tsv {path} {
+    ::SQQ::reset_membership_data
+    variable membership_frame_count
+    variable membership_seen_frames
     set handle [open $path r]
     fconfigure $handle -encoding ascii -translation auto
     if {[gets $handle header] < 0 || $header ne "record\trender_frame\tsource_frame\ttime_ps\tgraph_mode\tfamily\tcage_id\tcage_type\tphase\tdomain\tcluster\tatom_indices\tcenter_x_angstrom\tcenter_y_angstrom\tcenter_z_angstrom"} {
         close $handle
         error "Invalid SQQ membership TSV header: $path"
     }
-    array set seen_frames {}
-    set frame_count 0
     set line_number 1
     while {[gets $handle line] >= 0} {
         incr line_number
         if {$line eq ""} { continue }
-        set fields [split $line "\t"]
-        if {[llength $fields] != 15} {
+        if {[catch {::SQQ::parse_membership_row $line $line_number} message]} {
             close $handle
-            error "Invalid SQQ membership TSV row $line_number"
-        }
-        lassign $fields record frame source_frame time_ps graph_value family cage_id cage_type phase domain_id cluster_id atom_indexes center_x center_y center_z
-        if {![string is integer -strict $frame] || $frame < 0} {
-            close $handle
-            error "Invalid SQQ render frame at TSV row $line_number"
-        }
-        if {$record eq "F"} {
-            if {[info exists seen_frames($frame)]} {
-                close $handle
-                error "Duplicate SQQ frame metadata for frame $frame"
-            }
-            set seen_frames($frame) 1
-            set graph_mode($frame) $graph_value
-            if {$frame + 1 > $frame_count} { set frame_count [expr {$frame + 1}] }
-        } elseif {$record eq "C"} {
-            if {$family ne "cage" || $atom_indexes ne "-"} {
-                close $handle
-                error "Invalid SQQ cage-center record at TSV row $line_number"
-            }
-            foreach value [list $center_x $center_y $center_z] {
-                if {![string is double -strict $value]} {
-                    close $handle
-                    error "Invalid SQQ cage center at TSV row $line_number"
-                }
-            }
-            if {[catch {
-                ::SQQ::set_cage_center $frame $cage_id $cage_type \
-                    [list $center_x $center_y $center_z]
-            } message]} {
-                close $handle
-                error $message
-            }
-        } elseif {$record eq "G"} {
-            if {$family ne "guest" || $atom_indexes in {- ""}} {
-                close $handle
-                error "Invalid SQQ guest record at TSV row $line_number"
-            }
-            set indexes {}
-            foreach atom_index [split $atom_indexes ,] {
-                if {![string is integer -strict $atom_index] || $atom_index < 0} {
-                    close $handle
-                    error "Invalid SQQ guest atom index at TSV row $line_number"
-                }
-                lappend indexes $atom_index
-            }
-            if {[catch {
-                ::SQQ::add_guest_group $frame $cage_id $cage_type $indexes
-            } message]} {
-                close $handle
-                error $message
-            }
-        } elseif {$record eq "P"} {
-            if {$family ne "component" || $atom_indexes in {- ""}} {
-                close $handle
-                error "Invalid SQQ component record at TSV row $line_number"
-            }
-            set indexes {}
-            foreach atom_index [split $atom_indexes ,] {
-                if {![string is integer -strict $atom_index] || $atom_index < 0} {
-                    close $handle
-                    error "Invalid SQQ component atom index at TSV row $line_number"
-                }
-                lappend indexes $atom_index
-            }
-            if {[catch {
-                ::SQQ::add_component_group $frame $cage_id $cage_type $indexes
-            } message]} {
-                close $handle
-                error $message
-            }
-        } elseif {$record eq "M"} {
-            if {$family ni {cage guest}} {
-                close $handle
-                error "Invalid SQQ membership family at TSV row $line_number"
-            }
-            set payload "$cage_id:$cage_type:$phase:$domain_id:$cluster_id"
-            if {$atom_indexes eq "-" || $atom_indexes eq ""} {
-                close $handle
-                error "Missing SQQ atom indexes at TSV row $line_number"
-            }
-            foreach atom_index [split $atom_indexes ,] {
-                if {![string is integer -strict $atom_index] || $atom_index < 0} {
-                    close $handle
-                    error "Invalid SQQ atom index at TSV row $line_number"
-                }
-                if {[catch {::SQQ::read_memberships $frame $atom_index $family $payload} message]} {
-                    close $handle
-                    error $message
-                }
-            }
-        } else {
-            close $handle
-            error "Invalid SQQ membership record at TSV row $line_number: $record"
+            error $message
         }
     }
     close $handle
-    for {set frame 0} {$frame < $frame_count} {incr frame} {
-        if {![info exists seen_frames($frame)]} {
+    for {set frame 0} {$frame < $membership_frame_count} {incr frame} {
+        if {![info exists membership_seen_frames($frame)]} {
             error "Missing SQQ frame metadata for frame $frame"
         }
         ::SQQ::deduplicate_frame_memberships $frame
     }
-    return $frame_count
+    return $membership_frame_count
 }
 
-proc ::SQQ::initialize_components {frame_count} {
-    variable atom_guest
-    variable component_atom_role
-    variable molid
+proc ::SQQ::renderer_fail {message} {
+    variable renderer_error
+    variable renderer_state
+    set original_message $message
+    ::SQQ::dispose_renderer 1
+    set renderer_error $original_message
+    set renderer_state failed
+    puts stderr "SQQ renderer failed: $original_message"
+}
+
+proc ::SQQ::require_renderer_ready {} {
+    variable renderer_error
+    variable renderer_state
+    if {$renderer_state eq "ready"} { return }
+    if {$renderer_state eq "failed"} {
+        error "SQQ renderer failed: $renderer_error"
+    }
+    error "SQQ renderer is still loading"
+}
+
+proc ::SQQ::when_ready {script} {
+    variable ready_callbacks
+    variable renderer_error
+    variable renderer_state
+    if {$renderer_state eq "ready"} {
+        uplevel #0 $script
+    } elseif {$renderer_state eq "failed"} {
+        error "SQQ renderer failed: $renderer_error"
+    } else {
+        lappend ready_callbacks $script
+    }
+}
+
+proc ::SQQ::run_ready_callbacks {} {
+    variable ready_callbacks
+    set callbacks $ready_callbacks
+    set ready_callbacks {}
+    foreach script $callbacks {
+        if {[catch {uplevel #0 $script} message options]} {
+            puts stderr "SQQ deferred command failed: $message"
+        }
+    }
+}
+
+proc ::SQQ::begin_membership_read {} {
+    variable membership_handle
+    variable membership_line_number
+    variable membership_path
+    variable renderer_after_id
     if {[catch {
-        set selection [atomselect $molid all frame 0]
-        set indexes [$selection get index]
-        set resnames [$selection get resname]
-        $selection delete
-    }]} {
+        ::SQQ::reset_membership_data
+        set membership_handle [open $membership_path r]
+        fconfigure $membership_handle -encoding ascii -translation auto
+        if {[gets $membership_handle header] < 0 ||
+            $header ne "record\trender_frame\tsource_frame\ttime_ps\tgraph_mode\tfamily\tcage_id\tcage_type\tphase\tdomain\tcluster\tatom_indices\tcenter_x_angstrom\tcenter_y_angstrom\tcenter_z_angstrom"} {
+            error "Invalid SQQ membership TSV header: $membership_path"
+        }
+        set membership_line_number 1
+    } message]} {
+        ::SQQ::renderer_fail $message
         return
     }
-    if {[llength $indexes] != [llength $resnames]} {
+    set renderer_after_id [after 1 [list ::SQQ::read_membership_chunk]]
+}
+
+proc ::SQQ::read_membership_chunk {} {
+    variable membership_handle
+    variable membership_line_number
+    variable renderer_after_id
+    variable renderer_state
+    if {$renderer_state ne "loading"} { return }
+    set renderer_after_id ""
+    set started [clock milliseconds]
+    set rows 0
+    while {$rows < 250 && [clock milliseconds] - $started < 15} {
+        if {[gets $membership_handle line] < 0} {
+            catch {close $membership_handle}
+            set membership_handle ""
+            variable membership_finalize_frame
+            set membership_finalize_frame 0
+            set renderer_after_id [after 1 [list ::SQQ::finalize_membership_chunk]]
+            return
+        }
+        incr membership_line_number
+        if {$line eq ""} { continue }
+        if {[catch {
+            ::SQQ::parse_membership_row $line $membership_line_number
+        } message]} {
+            ::SQQ::renderer_fail $message
+            return
+        }
+        incr rows
+    }
+    set renderer_after_id [after 1 [list ::SQQ::read_membership_chunk]]
+}
+
+proc ::SQQ::finalize_membership_chunk {} {
+    variable membership_finalize_frame
+    variable membership_frame_count
+    variable membership_seen_frames
+    variable renderer_after_id
+    variable renderer_state
+    if {$renderer_state ne "loading"} { return }
+    set renderer_after_id ""
+    set started [clock milliseconds]
+    while {$membership_finalize_frame < $membership_frame_count &&
+           [clock milliseconds] - $started < 15} {
+        set frame $membership_finalize_frame
+        if {![info exists membership_seen_frames($frame)]} {
+            ::SQQ::renderer_fail "Missing SQQ frame metadata for frame $frame"
+            return
+        }
+        if {[catch {::SQQ::deduplicate_frame_memberships $frame} message]} {
+            ::SQQ::renderer_fail $message
+            return
+        }
+        incr membership_finalize_frame
+    }
+    if {$membership_finalize_frame < $membership_frame_count} {
+        set renderer_after_id [after 1 [list ::SQQ::finalize_membership_chunk]]
+        return
+    }
+    if {$membership_frame_count == 0} {
+        ::SQQ::renderer_fail "SQQ membership TSV contains no frames"
+        return
+    }
+    variable parsed_frames
+    set parsed_frames $membership_frame_count
+    set renderer_after_id [after 1 [list ::SQQ::begin_topology_load]]
+}
+
+proc ::SQQ::initialize_component_frame {frame} {
+    variable atom_guest
+    variable component_atom_role
+    variable components_initialized
+    variable molid
+    variable topology_indexes
+    variable topology_resnames
+    # Component identity is topology-level metadata.  Build it once for frame 0
+    # and reuse the same atom indexes in every trajectory frame.
+    if {$frame > 0} {
+        if {![info exists components_initialized(0)]} {
+            ::SQQ::initialize_component_frame 0
+        }
+        return
+    }
+    if {[info exists components_initialized(0)]} { return }
+    if {[llength $topology_indexes] == 0} {
+        if {[catch {
+            set selection [atomselect $molid all frame 0]
+            set topology_indexes [$selection get index]
+            set topology_resnames [$selection get resname]
+            $selection delete
+        }]} {
+            return
+        }
+    }
+    if {[llength $topology_indexes] != [llength $topology_resnames]} {
         error "SQQ could not read component residue names from the render topology"
     }
-    for {set frame 0} {$frame < $frame_count} {incr frame} {
-        set has_metadata [expr {[llength [array names component_atom_role "${frame},*"]] > 0}]
-        array set grouped {}
-        foreach atom_index $indexes resname $resnames {
-            set atom_key "$frame,$atom_index"
-            if {[info exists component_atom_role($atom_key)]} {
-                set role $component_atom_role($atom_key)
-            } elseif {$frame > 0 && [info exists component_atom_role(0,$atom_index)]} {
-                # A frame-zero component map is sufficient for a fixed topology.
-                set role $component_atom_role(0,$atom_index)
-            } elseif {$has_metadata} {
-                set role other
-            } elseif {[info exists atom_guest($atom_key)]} {
-                # Compatibility fallback for compact bundles written before P records.
-                set role guest
-            } else {
-                set role water
-            }
-            lappend grouped($role,$resname) $atom_index
+    set has_metadata [expr {[llength [array names component_atom_role "${frame},*"]] > 0}]
+    array set grouped {}
+    foreach atom_index $topology_indexes resname $topology_resnames {
+        set atom_key "$frame,$atom_index"
+        if {[info exists component_atom_role($atom_key)]} {
+            set role $component_atom_role($atom_key)
+        } elseif {$frame > 0 && [info exists component_atom_role(0,$atom_index)]} {
+            # A frame-zero component map is sufficient for a fixed topology.
+            set role $component_atom_role(0,$atom_index)
+        } elseif {$has_metadata} {
+            set role other
+        } elseif {[info exists atom_guest($atom_key)]} {
+            # Compatibility fallback for compact bundles written before P records.
+            set role guest
+        } else {
+            set role water
         }
-        foreach key [array names grouped] {
-            lassign [split $key ,] role resname
-            ::SQQ::add_component_group $frame $role $resname $grouped($key)
+        lappend grouped($role,$resname) $atom_index
+    }
+    foreach key [array names grouped] {
+        lassign [split $key ,] role resname
+        ::SQQ::add_component_group $frame $role $resname $grouped($key)
+    }
+    ::SQQ::deduplicate_frame_memberships $frame
+    set components_initialized(0) 1
+}
+
+proc ::SQQ::begin_topology_load {} {
+    variable gro_path
+    variable molid
+    variable owns_molecule
+    variable renderer_after_id
+    variable trajectory_last_change_ms
+    variable trajectory_last_count
+    if {[catch {
+        set molid [mol new $gro_path type gro waitfor 0]
+        set owns_molecule 1
+        set trajectory_last_count -1
+        set trajectory_last_change_ms [clock milliseconds]
+    } message]} {
+        ::SQQ::renderer_fail $message
+        return
+    }
+    set renderer_after_id [after 25 [list ::SQQ::poll_topology_load]]
+}
+
+proc ::SQQ::poll_topology_load {} {
+    variable molid
+    variable renderer_after_id
+    variable renderer_state
+    variable trajectory_last_change_ms
+    if {$renderer_state ne "loading"} { return }
+    set renderer_after_id ""
+    if {$molid < 0 || $molid ni [molinfo list]} {
+        ::SQQ::renderer_fail "VMD discarded the SQQ topology while it was loading"
+        return
+    }
+    if {[catch {set loaded [molinfo $molid get numframes]} message]} {
+        ::SQQ::renderer_fail $message
+        return
+    }
+    if {$loaded >= 1} {
+        ::SQQ::begin_trajectory_load
+        return
+    }
+    if {[clock milliseconds] - $trajectory_last_change_ms > 600000} {
+        ::SQQ::renderer_fail "Timed out while loading the SQQ GRO topology"
+        return
+    }
+    set renderer_after_id [after 25 [list ::SQQ::poll_topology_load]]
+}
+
+proc ::SQQ::begin_trajectory_load {} {
+    variable molid
+    variable parsed_frames
+    variable renderer_after_id
+    variable trajectory_last_change_ms
+    variable trajectory_last_count
+    variable xtc_path
+    set trajectory_last_count 1
+    set trajectory_last_change_ms [clock milliseconds]
+    if {$parsed_frames > 1} {
+        if {[catch {
+            mol addfile $xtc_path type xtc first 1 waitfor 0 molid $molid
+        } message]} {
+            ::SQQ::renderer_fail $message
+            return
         }
-        ::SQQ::deduplicate_frame_memberships $frame
-        array unset grouped
+    }
+    set renderer_after_id [after 25 [list ::SQQ::poll_trajectory_load]]
+}
+
+proc ::SQQ::poll_trajectory_load {} {
+    variable molid
+    variable parsed_frames
+    variable renderer_after_id
+    variable renderer_state
+    variable trajectory_last_change_ms
+    variable trajectory_last_count
+    if {$renderer_state ne "loading"} { return }
+    set renderer_after_id ""
+    if {$molid < 0 || $molid ni [molinfo list]} {
+        ::SQQ::renderer_fail "VMD discarded the SQQ trajectory while it was loading"
+        return
+    }
+    if {[catch {set loaded [molinfo $molid get numframes]} message]} {
+        ::SQQ::renderer_fail $message
+        return
+    }
+    if {$loaded != $trajectory_last_count} {
+        set trajectory_last_count $loaded
+        set trajectory_last_change_ms [clock milliseconds]
+    }
+    if {$loaded == $parsed_frames} {
+        ::SQQ::finish_renderer
+        return
+    }
+    if {$loaded > $parsed_frames} {
+        ::SQQ::renderer_fail \
+            "SQQ frame count mismatch: parsed $parsed_frames, VMD loaded $loaded"
+        return
+    }
+    if {[clock milliseconds] - $trajectory_last_change_ms > 600000} {
+        ::SQQ::renderer_fail \
+            "Timed out while loading the SQQ trajectory ($loaded/$parsed_frames frames)"
+        return
+    }
+    set renderer_after_id [after 25 [list ::SQQ::poll_trajectory_load]]
+}
+
+proc ::SQQ::finish_renderer {} {
+    variable molid
+    variable parsed_frames
+    variable ready_callbacks
+    variable renderer_after_id
+    variable renderer_state
+    if {[catch {
+        molinfo $molid set frame 0
+        mol rename $molid __SQQ_MOLECULE_NAME__
+        ::SQQ::initialize_component_frame 0
+        ::SQQ::adopt_initial_representations
+        display projection Orthographic
+        ::SQQ::reset_show
+        catch {color Display Background white}
+        catch {trace remove variable ::vmd_frame write ::SQQ::frame_changed}
+        trace add variable ::vmd_frame write ::SQQ::frame_changed
+        catch {trace remove variable ::vmd_pick_atom write ::SQQ::pick_atom_event}
+        trace add variable ::vmd_pick_atom write ::SQQ::pick_atom_event
+        catch {trace remove variable ::vmd_pick_graphics write ::SQQ::pick_graphics_changed}
+        trace add variable ::vmd_pick_graphics write ::SQQ::pick_graphics_changed
+    } message]} {
+        ::SQQ::renderer_fail $message
+        return
+    }
+    set renderer_after_id ""
+    set renderer_state ready
+    puts "SQQ renderer: ready ($parsed_frames frame[expr {$parsed_frames == 1 ? "" : "s"}])"
+    if {[llength $ready_callbacks] > 0} {
+        set renderer_after_id [after 1 [list ::SQQ::run_ready_callbacks]]
     }
 }
 
@@ -547,6 +890,37 @@ proc ::SQQ::cage_layer_radius {tier tiers} {
     if {$count <= 1} { return 0.125 }
     set index [lsearch -exact $tiers $tier]
     return [format "%.3f" [expr {0.125 + 0.005 * $index / double($count - 1)}]]
+}
+
+proc ::SQQ::active_cage_radius_tiers {} {
+    variable active_families
+    variable active_targets
+    variable color_overrides
+    variable known_objects
+    if {"cage" ni $active_families || ![info exists active_targets(cage)]} {
+        return {}
+    }
+    array set tiers {}
+    foreach target $active_targets(cage) {
+        lassign $target source key
+        if {$source in {cage-id cage-track}} {
+            set tiers(7) 1
+        } elseif {$source eq "cage" && $key eq "*"} {
+            foreach name [array names known_objects "cage,*"] {
+                set cage_type [string range $name 5 end]
+                set rank [::SQQ::standard_cage_rank $cage_type]
+                set tiers([expr {$rank > 0 ? $rank : 0}]) 1
+            }
+        } elseif {$source eq "cage"} {
+            set rank [::SQQ::standard_cage_rank $key]
+            set tiers([expr {$rank > 0 ? $rank : 0}]) 1
+        }
+    }
+    foreach name [array names color_overrides] {
+        set source [lindex [split $name ,] 0]
+        if {$source in {cage-id cage-track}} { set tiers(7) 1 }
+    }
+    return [lsort -integer [array names tiers]]
 }
 
 proc ::SQQ::stable_color {key} {
@@ -759,10 +1133,14 @@ proc ::SQQ::target_label {family target} {
 proc ::SQQ::parse_targets {family values} {
     if {[llength $values] == 0} { error "At least one SQQ target is required" }
     set targets {}
+    array set seen {}
     foreach value $values {
         set target [::SQQ::parse_target $family $value]
         ::SQQ::require_known_target $family $target
-        if {$target ni $targets} { lappend targets $target }
+        if {![info exists seen($target)]} {
+            set seen($target) 1
+            lappend targets $target
+        }
     }
     if {[llength $targets] > 1} {
         foreach target $targets {
@@ -1008,17 +1386,26 @@ proc ::SQQ::clear_representations {} {
     variable representation_material
     variable representation_name_by_key
     variable representation_names
+    variable representation_registered
     variable representation_radius_tier
-    if {$molid < 0} { return }
+    variable representation_style_snapshot
+    variable representation_style_template
+    variable pending_representation_keys
     set indexes {}
-    foreach name $representation_names {
-        if {[catch {mol repindex $molid $name} rep]} { continue }
-        if {[string is integer -strict $rep] && $rep >= 0} { lappend indexes $rep }
+    if {$molid >= 0 && ![catch {set molecule_ids [molinfo list]}] &&
+        $molid in $molecule_ids} {
+        foreach name $representation_names {
+            if {[catch {mol repindex $molid $name} rep]} { continue }
+            if {[string is integer -strict $rep] && $rep >= 0} { lappend indexes $rep }
+        }
+        foreach rep [lsort -integer -decreasing -unique $indexes] {
+            catch {mol delrep $rep $molid}
+        }
     }
-    foreach rep [lsort -integer -decreasing -unique $indexes] { mol delrep $rep $molid }
     set representation_names {}
     set representation_keys {}
-    foreach name {representation_atoms representation_color representation_kind representation_material representation_name_by_key representation_radius_tier} {
+    set pending_representation_keys {}
+    foreach name {representation_atoms representation_color representation_kind representation_material representation_name_by_key representation_radius_tier representation_registered representation_style_snapshot representation_style_template} {
         array unset $name
         array set $name {}
     }
@@ -1029,6 +1416,7 @@ proc ::SQQ::clear_representations {} {
 proc ::SQQ::expanded_targets {frame family targets} {
     variable group_keys
     set expanded {}
+    array set seen {}
     foreach target $targets {
         lassign $target source key
         if {$family in {cage guest} && $source eq $family} {
@@ -1038,22 +1426,45 @@ proc ::SQQ::expanded_targets {frame family targets} {
             foreach object_id [lsort -unique $group_keys($group_key)] {
                 if {$key eq "*" || [::SQQ::cage_type_from_object_id $frame $object_id] eq $key} {
                     set item [list $id_source $object_id]
-                    if {$item ni $expanded} { lappend expanded $item }
+                    if {![info exists seen($item)]} {
+                        set seen($item) 1
+                        lappend expanded $item
+                    }
                 }
             }
         } elseif {$key eq "*"} {
             set group_key "$frame,$source"
+            if {$family eq "component" && ![info exists group_keys($group_key)]} {
+                set group_key "0,$source"
+            }
             if {![info exists group_keys($group_key)]} { continue }
             foreach object_key [::SQQ::ordered_keys $family $group_keys($group_key)] {
                 set item [list $source $object_key]
-                if {$item ni $expanded} { lappend expanded $item }
+                if {![info exists seen($item)]} {
+                    set seen($item) 1
+                    lappend expanded $item
+                }
             }
         } else {
             set item [list $source $key]
-            if {$item ni $expanded} { lappend expanded $item }
+            if {![info exists seen($item)]} {
+                set seen($item) 1
+                lappend expanded $item
+            }
         }
     }
     return $expanded
+}
+
+proc ::SQQ::group_atom_key {frame source key} {
+    variable group_atoms
+    set atom_key "$frame,$source,$key"
+    if {[info exists group_atoms($atom_key)]} { return $atom_key }
+    if {[::SQQ::source_family $source] eq "component"} {
+        set topology_key "0,$source,$key"
+        if {[info exists group_atoms($topology_key)]} { return $topology_key }
+    }
+    return $atom_key
 }
 
 proc ::SQQ::compare_render_keys {left right} {
@@ -1065,17 +1476,71 @@ proc ::SQQ::compare_render_keys {left right} {
     return [expr {$left_color < $right_color ? -1 : ($left_color > $right_color)}]
 }
 
+proc ::SQQ::representation_style_class {rep_key kind radius_tier} {
+    set scope [lindex $rep_key 0]
+    set family [lindex $rep_key 1]
+    set semantic_type $kind
+    if {$family in {cage guest}} {
+        set layer_key [lindex $rep_key 2]
+        if {[llength $layer_key] > 4} { set semantic_type [lindex $layer_key 4] }
+    }
+    return [list $scope $family $semantic_type $radius_tier]
+}
+
+proc ::SQQ::current_representation_style {rep} {
+    variable molid
+    if {[catch {
+        set values [molinfo $molid get [list \
+            [list rep $rep] [list color $rep] [list material $rep]]]
+    }]} {
+        return {}
+    }
+    if {[llength $values] != 3} { return {} }
+    return $values
+}
+
+proc ::SQQ::refresh_representation_style_templates {} {
+    variable molid
+    variable representation_keys
+    variable representation_kind
+    variable representation_name_by_key
+    variable representation_radius_tier
+    variable representation_style_snapshot
+    variable representation_style_template
+    foreach rep_key $representation_keys {
+        if {![info exists representation_name_by_key($rep_key)]} { continue }
+        set rep_name $representation_name_by_key($rep_key)
+        if {[catch {mol repindex $molid $rep_name} rep] || $rep < 0} { continue }
+        set style [::SQQ::current_representation_style $rep]
+        if {[llength $style] != 3} { continue }
+        if {![info exists representation_style_snapshot($rep_key)]} {
+            set representation_style_snapshot($rep_key) $style
+            continue
+        }
+        if {$style ne $representation_style_snapshot($rep_key)} {
+            set style_class [::SQQ::representation_style_class $rep_key \
+                $representation_kind($rep_key) $representation_radius_tier($rep_key)]
+            set representation_style_template($style_class) $style
+            set representation_style_snapshot($rep_key) $style
+        }
+    }
+}
+
 proc ::SQQ::register_stable_representation {frame rep_key kind indexes color_id material {radius_tier ""}} {
     variable representation_atoms
     variable representation_color
     variable representation_keys
     variable representation_kind
     variable representation_material
+    variable representation_registered
     variable representation_radius_tier
+    variable pending_representation_keys
     set indexes [lsort -integer -unique $indexes]
     if {[llength $indexes] == 0} { return 0 }
-    if {$rep_key ni $representation_keys} {
+    if {![info exists representation_registered($rep_key)]} {
+        set representation_registered($rep_key) 1
         lappend representation_keys $rep_key
+        lappend pending_representation_keys $rep_key
         set representation_kind($rep_key) $kind
         set representation_color($rep_key) $color_id
         set representation_material($rep_key) $material
@@ -1086,11 +1551,10 @@ proc ::SQQ::register_stable_representation {frame rep_key kind indexes color_id 
               $representation_radius_tier($rep_key) ne $radius_tier} {
         error "Conflicting SQQ representation definition for '$rep_key'"
     }
-    set atom_key "$frame,$rep_key"
-    if {[info exists representation_atoms($atom_key)]} {
-        set indexes [lsort -integer -unique [concat $representation_atoms($atom_key) $indexes]]
+    if {[info exists representation_atoms($rep_key)]} {
+        set indexes [lsort -integer -unique [concat $representation_atoms($rep_key) $indexes]]
     }
-    set representation_atoms($atom_key) $indexes
+    set representation_atoms($rep_key) $indexes
     return 1
 }
 
@@ -1102,35 +1566,46 @@ proc ::SQQ::create_stable_representations {} {
     variable representation_material
     variable representation_name_by_key
     variable representation_radius_tier
-    set cage_tiers {}
-    foreach rep_key $representation_keys {
-        if {$representation_kind($rep_key) eq "cage"} {
-            lappend cage_tiers $representation_radius_tier($rep_key)
-        }
-    }
-    set cage_tiers [lsort -integer -unique $cage_tiers]
-    foreach rep_key $representation_keys {
+    variable representation_style_snapshot
+    variable representation_style_template
+    variable pending_representation_keys
+    ::SQQ::refresh_representation_style_templates
+    set cage_tiers [::SQQ::active_cage_radius_tiers]
+    foreach rep_key $pending_representation_keys {
         set kind $representation_kind($rep_key)
-        if {$kind eq "cage"} {
-            set radius [::SQQ::cage_layer_radius $representation_radius_tier($rep_key) $cage_tiers]
-            mol representation DynamicBonds 3.5 $radius 12.0
-        } elseif {$kind eq "bonds"} {
-            mol representation DynamicBonds 3.5 0.125 12.0
-        } elseif {$kind eq "guest"} {
-            mol representation CPK 1.0 0.3 12.0 12.0
-        } elseif {$kind eq "component"} {
-            mol representation CPK 0.7 0.2 12.0 12.0
+        set style_class [::SQQ::representation_style_class $rep_key $kind \
+            $representation_radius_tier($rep_key)]
+        if {[info exists representation_style_template($style_class)]} {
+            lassign $representation_style_template($style_class) \
+                representation_style color_style material_style
+            mol representation {*}$representation_style
+            mol color {*}$color_style
+            mol material $material_style
         } else {
-            error "Unknown SQQ representation kind '$kind'"
+            if {$kind eq "cage"} {
+                set radius [::SQQ::cage_layer_radius $representation_radius_tier($rep_key) $cage_tiers]
+                mol representation DynamicBonds 3.5 $radius 12.0
+            } elseif {$kind eq "bonds"} {
+                mol representation DynamicBonds 3.5 0.125 12.0
+            } elseif {$kind eq "guest"} {
+                mol representation CPK 1.0 0.3 12.0 12.0
+            } elseif {$kind eq "component"} {
+                mol representation CPK 0.7 0.2 12.0 12.0
+            } else {
+                error "Unknown SQQ representation kind '$kind'"
+            }
+            mol color ColorID $representation_color($rep_key)
+            mol material $representation_material($rep_key)
         }
-        mol color ColorID $representation_color($rep_key)
         mol selection "none"
-        mol material $representation_material($rep_key)
         mol addrep $molid
         set rep [expr {[molinfo $molid get numreps] - 1}]
         ::SQQ::track_representation $rep
         set representation_name_by_key($rep_key) [mol repname $molid $rep]
+        set style [::SQQ::current_representation_style $rep]
+        if {[llength $style] == 3} { set representation_style_snapshot($rep_key) $style }
     }
+    set pending_representation_keys {}
 }
 
 proc ::SQQ::update_representation_selections {frame} {
@@ -1142,9 +1617,8 @@ proc ::SQQ::update_representation_selections {frame} {
         if {![info exists representation_name_by_key($rep_key)]} { continue }
         set rep_name $representation_name_by_key($rep_key)
         if {[catch {mol repindex $molid $rep_name} rep] || $rep < 0} { continue }
-        set atom_key "$frame,$rep_key"
-        if {[info exists representation_atoms($atom_key)]} {
-            set indexes $representation_atoms($atom_key)
+        if {[info exists representation_atoms($rep_key)]} {
+            set indexes $representation_atoms($rep_key)
         } else {
             set indexes {}
         }
@@ -1243,8 +1717,14 @@ proc ::SQQ::remove_new_atom_labels {} {
 }
 
 proc ::SQQ::schedule_atom_label_cleanup {} {
+    variable label_after_ids
+    set pending_ids {}
+    foreach callback_id $label_after_ids {
+        if {![catch {after info $callback_id}]} { lappend pending_ids $callback_id }
+    }
+    set label_after_ids $pending_ids
     foreach delay {0 100 250 500 1000} {
-        after $delay [list ::SQQ::remove_new_atom_labels]
+        lappend label_after_ids [after $delay [list ::SQQ::remove_new_atom_labels]]
     }
 }
 
@@ -1480,7 +1960,7 @@ proc ::SQQ::render_family {frame family targets} {
         set layer_keys {}
         foreach item [::SQQ::expanded_targets $frame $family $targets] {
             lassign $item source key
-            set atom_key "$frame,$source,$key"
+            set atom_key [::SQQ::group_atom_key $frame $source $key]
             if {![info exists group_atoms($atom_key)]} { continue }
             lassign [::SQQ::effective_color $frame $source $key] color_id color_priority
             set explicit [info exists explicit_ids($key)]
@@ -1513,7 +1993,7 @@ proc ::SQQ::render_family {frame family targets} {
         set render_keys {}
         foreach item [::SQQ::expanded_targets $frame $family $targets] {
             lassign $item source key
-            set atom_key "$frame,$source,$key"
+            set atom_key [::SQQ::group_atom_key $frame $source $key]
             if {![info exists group_atoms($atom_key)]} { continue }
             lassign [::SQQ::effective_color $frame $source $key] color_id priority
             set render_key "$priority,$color_id"
@@ -1536,7 +2016,7 @@ proc ::SQQ::render_family {frame family targets} {
         set render_keys {}
         foreach item [::SQQ::expanded_targets $frame $family $targets] {
             lassign $item source key
-            set atom_key "$frame,$source,$key"
+            set atom_key [::SQQ::group_atom_key $frame $source $key]
             if {![info exists group_atoms($atom_key)]} { continue }
             lassign [::SQQ::effective_color $frame $source $key] color_id priority
             set render_key "$priority,$color_id"
@@ -1565,18 +2045,18 @@ proc ::SQQ::render_current {{announce 0}} {
     ::SQQ::announce_graph_mode $frame
     ::SQQ::clear_representations
     ::SQQ::clear_graphics
+    ::SQQ::initialize_component_frame $frame
+    variable representation_atoms
+    array unset representation_atoms
+    array set representation_atoms {}
     array set current_counts {}
-    set numframes [molinfo $molid get numframes]
-    for {set build_frame 0} {$build_frame < $numframes} {incr build_frame} {
-        foreach family [::SQQ::ordered_active_families] {
-            if {$pick_mode eq "guest" && $family eq "guest"} { continue }
-            set targets $active_targets($family)
-            set representation_count [::SQQ::render_family $build_frame $family $targets]
-            if {$build_frame == $frame} { set current_counts($family) $representation_count }
-        }
-        if {$pick_mode eq "guest"} {
-            ::SQQ::render_guest_pick_context $build_frame
-        }
+    foreach family [::SQQ::ordered_active_families] {
+        if {$pick_mode eq "guest" && $family eq "guest"} { continue }
+        set targets $active_targets($family)
+        set current_counts($family) [::SQQ::render_family $frame $family $targets]
+    }
+    if {$pick_mode eq "guest"} {
+        ::SQQ::render_guest_pick_context $frame
     }
     ::SQQ::create_stable_representations
     if {$announce} {
@@ -1607,6 +2087,20 @@ proc ::SQQ::update_current {} {
     if {$molid < 0 || $molid ni [molinfo list]} { return }
     set frame [molinfo $molid get frame]
     ::SQQ::announce_graph_mode $frame
+    ::SQQ::initialize_component_frame $frame
+    variable active_targets
+    variable pick_mode
+    variable representation_atoms
+    array unset representation_atoms
+    array set representation_atoms {}
+    foreach family [::SQQ::ordered_active_families] {
+        if {$pick_mode eq "guest" && $family eq "guest"} { continue }
+        ::SQQ::render_family $frame $family $active_targets($family)
+    }
+    if {$pick_mode eq "guest"} {
+        ::SQQ::render_guest_pick_context $frame
+    }
+    ::SQQ::create_stable_representations
     ::SQQ::update_representation_selections $frame
     ::SQQ::clear_graphics
     ::SQQ::render_selected $frame
@@ -1669,7 +2163,11 @@ __SQQ_HELP_BODY__
 }
 
 proc sqq {{command help} args} {
-    switch -- [string tolower $command] {
+    set normalized_command [string tolower $command]
+    if {$normalized_command ni {help -h --help}} {
+        ::SQQ::require_renderer_ready
+    }
+    switch -- $normalized_command {
         show {
             if {[llength $args] >= 1 &&
                 [string tolower [lindex $args 0]] in {label lable}} {
@@ -1713,33 +2211,21 @@ set script_dir [file dirname [file normalize [info script]]]
 set ::SQQ::gro_path [file join $script_dir __SQQ_GRO_FILENAME__]
 set ::SQQ::xtc_path [file join $script_dir __SQQ_XTC_FILENAME__]
 set ::SQQ::membership_path [file join $script_dir __SQQ_MEMBERSHIP_FILENAME__]
+set missing_render_file ""
 foreach {label path} [list GRO $::SQQ::gro_path XTC $::SQQ::xtc_path membership $::SQQ::membership_path] {
-    if {![file isfile $path]} { error "SQQ $label file not found: $path" }
+    if {![file isfile $path]} {
+        set missing_render_file "SQQ $label file not found: $path"
+        break
+    }
 }
-set parsed_frames [::SQQ::read_membership_tsv $::SQQ::membership_path]
-if {$parsed_frames == 0} { error "SQQ membership TSV contains no frames: $::SQQ::membership_path" }
-set ::SQQ::molid [mol new $::SQQ::gro_path type gro waitfor all]
-if {$parsed_frames > 1} {
-    mol addfile $::SQQ::xtc_path type xtc first 1 waitfor all molid $::SQQ::molid
-}
-set loaded_frames [molinfo $::SQQ::molid get numframes]
-molinfo $::SQQ::molid set frame 0
-mol rename $::SQQ::molid __SQQ_MOLECULE_NAME__
-if {$loaded_frames != $parsed_frames} {
-    error "SQQ frame count mismatch: parsed $parsed_frames, VMD loaded $loaded_frames"
-}
-::SQQ::initialize_components $parsed_frames
-::SQQ::adopt_initial_representations
-display projection Orthographic
-catch {trace remove variable ::vmd_frame write ::SQQ::frame_changed}
-trace add variable ::vmd_frame write ::SQQ::frame_changed
-catch {trace remove variable ::vmd_pick_atom write ::SQQ::pick_atom_event}
-trace add variable ::vmd_pick_atom write ::SQQ::pick_atom_event
-catch {trace remove variable ::vmd_pick_graphics write ::SQQ::pick_graphics_changed}
-trace add variable ::vmd_pick_graphics write ::SQQ::pick_graphics_changed
 ::SQQ::startup_help
-::SQQ::reset_show
 catch {color Display Background white}
+if {$missing_render_file ne ""} {
+    ::SQQ::renderer_fail $missing_render_file
+} else {
+    puts "SQQ renderer: loading; sqq -h is available now"
+    set ::SQQ::renderer_after_id [after idle [list ::SQQ::begin_membership_read]]
+}
 """
 
 __all__ = ["SQQ_CAGE_TCL"]

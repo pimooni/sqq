@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections import Counter
+import shutil
 import sys
 from threading import Event, Lock, Thread
 from time import perf_counter
@@ -12,7 +13,7 @@ from .formatting import TERMINAL_LABEL_WIDTH, format_seconds, terminal_field_lin
 
 
 PROGRESS_BAR_WIDTH = 25
-PARALLEL_FILE_PREVIEW_LIMIT = 6
+PARALLEL_FILE_PREVIEW_LIMIT = 5
 PARALLEL_FILE_COLUMN_WIDTH = 25
 PARALLEL_ACTIVE_STAGE_WIDTH = 30
 PROGRESS_RENDER_INTERVAL_SECONDS = 0.10
@@ -102,6 +103,21 @@ def print_output_write_status() -> None:
     write_terminal_block(["Writing output files; please wait and do not close SQQ..."])
 
 
+def compact_worker_policy(value: Any) -> str:
+    """Shorten the resolved worker policy for the live Execution row."""
+    text = " ".join(str(value or "auto").split())
+    normalized = text.casefold()
+    if normalized.startswith("auto"):
+        return "auto; reserve 1 core"
+    if normalized.startswith("explicit"):
+        inner = text[text.find("(") + 1 : text.rfind(")")]
+        inner = inner.replace("reserve 1 physical core", "reserve 1 core")
+        return inner or "explicit"
+    if normalized.startswith("engine default"):
+        return text.replace("engine default", "engine default", 1)
+    return text.replace("reserve 1 physical core", "reserve 1 core")
+
+
 class RunProgressDisplay:
     """Render one stable progress panel or append-only static checkpoints."""
 
@@ -112,6 +128,8 @@ class RunProgressDisplay:
         include_cluster_stage: bool,
         cpp_mode: bool = False,
         include_patch_stage: bool = True,
+        unit: str = "Frames",
+        execution: str | None = None,
     ) -> None:
         self.total = total
         self.total_started_at = total_started_at
@@ -120,6 +138,8 @@ class RunProgressDisplay:
         )
         self.completed = 0
         self.failed = 0
+        self.unit = str(unit or "Frames")
+        self.execution = str(execution).strip() if execution else ""
         self.current_index: int | None = None
         self.current_file = "waiting"
         self.stage = "waiting"
@@ -136,7 +156,6 @@ class RunProgressDisplay:
         self._last_render_at = float("-inf")
         self._last_panel_lines: tuple[str, ...] | None = None
         self._last_static_state: tuple[int, int] | None = None
-        self._last_static_bucket = -1
         self._render(force=True)
         if self._interactive:
             self._thread = Thread(target=self._tick, daemon=True)
@@ -183,9 +202,6 @@ class RunProgressDisplay:
             with self._lock:
                 if self._closed:
                     return
-                final_state = (self.completed, self.failed)
-                if not self._interactive and final_state != self._last_static_state:
-                    self._last_static_bucket = -1
                 self._render_locked(force=True)
                 self._stream.write("\n")
                 self._stream.flush()
@@ -207,25 +223,24 @@ class RunProgressDisplay:
             state = (self.completed, self.failed)
             if state == self._last_static_state:
                 return
-            current_bucket = (
-                20
-                if self.total <= 0 or self.completed >= self.total
-                else int(max(0, self.completed) * 20 / self.total)
-            )
-            if self._last_static_state is not None and current_bucket <= self._last_static_bucket:
+            if self._last_static_state is not None and self.completed < self.total:
                 return
             if self._last_static_state is None:
                 self._stream.write("Analysis Progress\n")
-            self._stream.write(
-                terminal_field_line(
-                    "completed_files",
-                    f"{self.completed} / {self.total}  [ {self.failed} failed ]",
-                )
-                + "\n"
-            )
+                if self.execution:
+                    self._stream.write(
+                        terminal_field_line("Execution", self.execution) + "\n"
+                    )
+                if self.total > 1:
+                    self._stream.write(
+                        terminal_field_line(
+                            self.unit,
+                            f"0 / {self.total} [0 failed]",
+                        )
+                        + "\n"
+                    )
             self._stream.flush()
             self._last_static_state = state
-            self._last_static_bucket = current_bucket
             return
         now = perf_counter()
         if not force and now - self._last_render_at < PROGRESS_RENDER_INTERVAL_SECONDS:
@@ -245,32 +260,39 @@ class RunProgressDisplay:
     def _panel_lines(self) -> list[str]:
         stage_lines = self._stage_lines()
         connector_indent = " " * (TERMINAL_LABEL_WIDTH + 2)
-        return [
-            "Analysis Progress",
-            f"  {'completed_files':<{TERMINAL_LABEL_WIDTH}}: {self.completed} / {self.total}  [ {self.failed} failed ]",
-            f"  {'current_file':<{TERMINAL_LABEL_WIDTH}}: {self._current_file_text()}",
-            f"  {'stage':<{TERMINAL_LABEL_WIDTH}}: {stage_lines[0]}",
-            connector_indent + stage_lines[1],
-            connector_indent + stage_lines[2],
-            f"  {'stage / frame / total':<{TERMINAL_LABEL_WIDTH}}: {self._time_text()}",
-            "",
-            self._files_bar(),
-        ]
+        height = shutil.get_terminal_size(fallback=(120, 40)).lines
+        if height < 24:
+            lines = ["Analysis Progress"]
+            if self.execution:
+                lines.append(terminal_field_line("Execution", self.execution))
+            lines.extend([
+                terminal_field_line("Stage", STAGE_LABEL_BY_NAME.get(self.stage, self.stage)),
+                terminal_field_line("Stage / total", self._compact_time_text()),
+            ])
+        else:
+            lines = ["Analysis Progress"]
+            if self.execution:
+                lines.append(terminal_field_line("Execution", self.execution))
+            if self.total > 1:
+                item_label = "File" if self.unit.casefold() == "files" else "Frame"
+                lines.append(terminal_field_line(item_label, self._current_frame_text()))
+            lines.extend([
+                f"  {'Stage':<{TERMINAL_LABEL_WIDTH}}: {stage_lines[0]}",
+                connector_indent + stage_lines[1],
+                connector_indent + stage_lines[2],
+                terminal_field_line(
+                    "Stage / frame / total" if self.total > 1 else "Stage / total",
+                    self._time_text() if self.total > 1 else self._compact_time_text(),
+                ),
+            ])
+        if self.total > 1:
+            lines.extend(["", self._files_bar()])
+        return lines
 
-    def _postfix_text(self) -> str:
-        return (
-            f"completed_files: {self.completed} / {self.total} [ {self.failed} failed ]; "
-            f"current_file: {self._current_file_text()}; "
-            f"stage: {STAGE_LABEL_BY_NAME.get(self.stage, self.stage)}; "
-            f"stage / frame / total: {self._time_text()}"
-        )
-
-    def _current_file_text(self) -> str:
+    def _current_frame_text(self) -> str:
         if self.current_index is None:
             return "waiting"
-        if self.total <= 1:
-            return self.current_file
-        return f"{self.current_index + 1} / {self.total}  {self.current_file}"
+        return f"{self.current_index + 1} / {self.total}"
 
     def _time_text(self) -> str:
         now = perf_counter()
@@ -278,6 +300,13 @@ class RunProgressDisplay:
         frame_elapsed = now - self.frame_started_at if self.current_index is not None else 0.0
         total_elapsed = now - self.total_started_at
         return f"{format_seconds(stage_elapsed)} / {format_seconds(frame_elapsed)} / {format_seconds(total_elapsed)}"
+
+    def _compact_time_text(self) -> str:
+        now = perf_counter()
+        return (
+            f"{format_seconds(now - self.stage_started_at)} / "
+            f"{format_seconds(now - self.total_started_at)}"
+        )
 
     def _stage_lines(self) -> list[str]:
         labels_by_row = [[label for _, label in group] for group in self.stage_groups]
@@ -309,7 +338,11 @@ class RunProgressDisplay:
         fraction = 1.0 if self.total <= 0 else min(max(self.completed / self.total, 0.0), 1.0)
         filled = int(round(PROGRESS_BAR_WIDTH * fraction))
         bar = chr(9608) * filled + " " * (PROGRESS_BAR_WIDTH - filled)
-        return f"Files: {fraction * 100:3.0f}%|{bar}| {self.completed}/{self.total} completed"
+        failed = f" [{self.failed} failed]" if self.failed else ""
+        return (
+            f"{self.unit}: {fraction * 100:3.0f}%|{bar}| "
+            f"{self.completed}/{self.total} completed{failed}"
+        )
 
 
 class ParallelRunProgressDisplay:
@@ -323,6 +356,9 @@ class ParallelRunProgressDisplay:
         include_cluster_stage: bool,
         cpp_mode: bool = False,
         include_patch_stage: bool = True,
+        math_threads: int = 1,
+        policy: str = "auto; reserve 1 core",
+        unit: str = "Files",
     ) -> None:
         self.total = total
         self.workers = workers
@@ -332,6 +368,9 @@ class ParallelRunProgressDisplay:
         )
         self.completed = 0
         self.failed = 0
+        self.math_threads = max(1, int(math_threads))
+        self.policy = str(policy or "auto; reserve 1 core")
+        self.unit = str(unit or "Files")
         self._active: dict[int, dict[str, Any]] = {}
         self._finished: set[int] = set()
         self._stream = sys.stdout
@@ -345,7 +384,6 @@ class ParallelRunProgressDisplay:
         self._last_render_at = float("-inf")
         self._last_panel_lines: tuple[str, ...] | None = None
         self._last_static_state: tuple[int, int] | None = None
-        self._last_static_bucket = -1
         self._render(force=True)
         if self._interactive:
             self._thread = Thread(target=self._tick, daemon=True)
@@ -412,9 +450,6 @@ class ParallelRunProgressDisplay:
             with self._lock:
                 if self._closed:
                     return
-                final_state = (self.completed, self.failed)
-                if not self._interactive and final_state != self._last_static_state:
-                    self._last_static_bucket = -1
                 self._render_locked(force=True)
                 self._stream.write("\n")
                 self._stream.flush()
@@ -436,25 +471,15 @@ class ParallelRunProgressDisplay:
             state = (self.completed, self.failed)
             if state == self._last_static_state:
                 return
-            current_bucket = (
-                20
-                if self.total <= 0 or self.completed >= self.total
-                else int(max(0, self.completed) * 20 / self.total)
-            )
-            if self._last_static_state is not None and current_bucket <= self._last_static_bucket:
+            if self._last_static_state is not None and self.completed < self.total:
                 return
             if self._last_static_state is None:
                 self._stream.write("Analysis Progress\n")
-            self._stream.write(
-                terminal_field_line(
-                    "completed_files",
-                    f"{self.completed} / {self.total}  [ {self.failed} failed ]",
+                self._stream.write(
+                    terminal_field_line("Execution", self._execution_text()) + "\n"
                 )
-                + "\n"
-            )
             self._stream.flush()
             self._last_static_state = state
-            self._last_static_bucket = current_bucket
             return
         now = perf_counter()
         if not force and now - self._last_render_at < PROGRESS_RENDER_INTERVAL_SECONDS:
@@ -474,21 +499,32 @@ class ParallelRunProgressDisplay:
     def _panel_lines(self) -> list[str]:
         stage_lines = self._stage_summary_lines()
         indent = " " * (TERMINAL_LABEL_WIDTH + 4)
+        terminal_height = shutil.get_terminal_size(fallback=(120, 40)).lines
         lines = [
             "Analysis Progress",
-            f"  {'completed_files':<{TERMINAL_LABEL_WIDTH}}: {self.completed} / {self.total}  [ {self.failed} failed ]",
-            f"  {'active_workers':<{TERMINAL_LABEL_WIDTH}}: {len(self._active)} / {self.workers}",
-            f"  {'queued_files':<{TERMINAL_LABEL_WIDTH}}: {self._queued_files()}",
-            f"  {'stage_summary':<{TERMINAL_LABEL_WIDTH}}: {stage_lines[0]}",
-            indent + stage_lines[1],
-            indent + stage_lines[2],
-            f"  {'total_elapsed':<{TERMINAL_LABEL_WIDTH}}: {format_seconds(perf_counter() - self.total_started_at)}",
-            "",
-            "  active files",
-            f"    {'file':<{PARALLEL_FILE_COLUMN_WIDTH}} {'stage':<{PARALLEL_ACTIVE_STAGE_WIDTH}} stage / file",
+            terminal_field_line("Execution", self._execution_text()),
         ]
+        if terminal_height < 24:
+            active_stages = ", ".join(
+                f"{STAGE_LABEL_BY_NAME.get(stage, stage)}:{count}"
+                for stage, count in self._stage_counts().items()
+                if count
+            ) or "waiting"
+            lines.append(terminal_field_line("Stages", active_stages))
+        else:
+            lines.extend([
+                f"  {'Stages':<{TERMINAL_LABEL_WIDTH}}: {stage_lines[0]}",
+                indent + stage_lines[1],
+                indent + stage_lines[2],
+            ])
+        lines.extend([
+            terminal_field_line("Elapsed", format_seconds(perf_counter() - self.total_started_at)),
+            "",
+            f"    {'active files':<{PARALLEL_FILE_COLUMN_WIDTH}} {'stage':<{PARALLEL_ACTIVE_STAGE_WIDTH}} stage / file",
+        ])
         active_items = sorted(self._active.items())
-        preview_slots = min(PARALLEL_FILE_PREVIEW_LIMIT, self.workers)
+        height_limit = 1 if terminal_height < 24 else (3 if terminal_height < 32 else 5)
+        preview_slots = min(PARALLEL_FILE_PREVIEW_LIMIT, height_limit, self.workers)
         now = perf_counter()
         for slot in range(preview_slots):
             lines.append(
@@ -501,17 +537,6 @@ class ParallelRunProgressDisplay:
             lines.append(f"    ... {overflow} additional active files" if overflow else "")
         lines.extend(["", self._files_bar()])
         return lines
-
-    def _postfix_text(self) -> str:
-        stage_text = " / ".join(
-            "  ".join(row) for row in self._stage_summary_cell_rows()
-        )
-        return (
-            f"completed_files: {self.completed} / {self.total} [ {self.failed} failed ]; "
-            f"active_workers: {len(self._active)} / {self.workers}; "
-            f"queued_files: {self._queued_files()}; stages: {stage_text}; "
-            f"total_elapsed: {format_seconds(perf_counter() - self.total_started_at)}"
-        )
 
     def _stage_counts(self) -> Counter[str]:
         return Counter(str(state["stage"]) for state in self._active.values())
@@ -558,14 +583,23 @@ class ParallelRunProgressDisplay:
             f"{stage_elapsed:>8} / {file_elapsed:>8}"
         )
 
-    def _queued_files(self) -> int:
-        return max(0, self.total - self.completed - len(self._active))
-
     def _files_bar(self) -> str:
         fraction = 1.0 if self.total <= 0 else min(max(self.completed / self.total, 0.0), 1.0)
         filled = int(round(PROGRESS_BAR_WIDTH * fraction))
         bar = chr(9608) * filled + " " * (PROGRESS_BAR_WIDTH - filled)
-        return f"Files: {fraction * 100:3.0f}%|{bar}| {self.completed}/{self.total} completed"
+        failed = f" [{self.failed} failed]" if self.failed else ""
+        return (
+            f"{self.unit}: {fraction * 100:3.0f}%|{bar}| "
+            f"{self.completed}/{self.total} completed{failed}"
+        )
+
+    def _execution_text(self) -> str:
+        process_word = "process" if self.workers == 1 else "processes"
+        thread_word = "thread" if self.math_threads == 1 else "threads"
+        return (
+            f"{self.workers} {process_word} x {self.math_threads} {thread_word} "
+            f"[{self.policy}]"
+        )
 
 
 def compact_terminal_text(text: str, width: int) -> str:
@@ -591,6 +625,7 @@ __all__ = [
     "STAGE_GROUPS",
     "STAGE_LABEL_BY_NAME",
     "compact_terminal_text",
+    "compact_worker_policy",
     "configured_stage_groups",
     "format_stage_label",
     "print_output_write_status",

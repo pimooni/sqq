@@ -17,7 +17,7 @@
 #include <unordered_set>
 
 #ifndef SQQ_VERSION
-#define SQQ_VERSION "0.5.3"
+#define SQQ_VERSION "0.5.4"
 #endif
 
 namespace sqq_cpp {

@@ -8,7 +8,7 @@ from dataclasses import dataclass, replace
 from datetime import datetime
 from pathlib import Path
 from time import perf_counter
-from typing import Any, Mapping, Sequence
+from typing import Any, Iterable, Mapping, Sequence
 import warnings
 
 from ..config import (
@@ -16,10 +16,12 @@ from ..config import (
     is_cpp_mode,
     load_config,
     normalize_analysis_scopes,
+    normalize_output_types,
     output_enabled,
     refresh_resolution_report,
     validate_cpp_cli,
 )
+from ..citation import completed_citation_evidence
 from ..io.gro_grouping import (
     GroGroupingResult,
     GroTopologyGroup,
@@ -42,7 +44,8 @@ from ..io.reporting import (
     write_summary,
 )
 from ..io.trajectory import expand_inputs, read_gro
-from ..runtime.contracts import FrameTask, RunPlan, TaskOutcome
+from ..runtime.contracts import FrameTask, InputKind, RunPlan, TaskOutcome
+from ..runtime.parallel.policy import worker_policy_text
 from ..core.tracking import TrackingAccumulator, snapshot_from_frame_result
 from ..models.tracking import TrackingConfig, TrackingResult
 from ..runtime.frame import analyze_frame
@@ -52,6 +55,7 @@ from ..ui.final_results import print_final_results, refresh_terminal
 from ..ui.progress import (
     ParallelRunProgressDisplay,
     RunProgressDisplay,
+    compact_worker_policy,
     print_output_write_status,
 )
 from ..ui.run_header import (
@@ -203,8 +207,10 @@ def _analyze_locked(
     extra_fields = None
     if grouping is not None:
         extra_fields = [
-            ("Topology groups", grouping.group_count),
-            ("Grouping policy", _grouping_policy(grouping)),
+            (
+                "Topology groups",
+                f"{grouping.group_count} [{_grouping_policy(grouping)}]",
+            ),
         ]
     print_run_header(
         args,
@@ -327,6 +333,14 @@ def _analyze_locked(
             grouping_warnings,
         )
     root_info.update(status="completed", error="")
+    citation_evidence_by_group = _analyze_citation_evidence_by_group(
+        grouping,
+        execution_config,
+        group_configs,
+        rows_by_index,
+        tracking_results,
+    )
+    root_info.update(_merge_citation_evidence(citation_evidence_by_group.values()))
     try:
         _write_completed_reports(
             args,
@@ -345,6 +359,7 @@ def _analyze_locked(
             run_started_at,
             finished_at,
             perf_counter() - started_at,
+            citation_evidence_by_group,
         )
     except Exception as exc:
         root_info.update(status="failed", error=str(exc))
@@ -372,7 +387,9 @@ def _analyze_locked(
         analysis_seconds=analysis_seconds,
         write_seconds=write_seconds,
         total_seconds=total_seconds,
-        track=_has_tracking_state(plan),
+        track=bool(
+            root_info.get("executed_features", {}).get("cage_tracking", False)
+        ),
     )
     statistics["diagnostic_messages"] = diagnostics.consume()
     refresh_terminal()
@@ -400,7 +417,15 @@ class _ProgressBridge:
             for item in configs
         )
         cpp = all(is_cpp_mode(item.get("mode")) for item in configs)
-        if plan.policy.backend != "serial" and plan.policy.workers > 1:
+        unit = "Files" if plan.input_kind in {
+            InputKind.GRO_BATCH,
+        } else "Frames"
+        multiple_tasks = len(plan.tasks) > 1
+        if (
+            multiple_tasks
+            and plan.policy.backend != "serial"
+            and plan.policy.workers > 1
+        ):
             self._display: RunProgressDisplay | ParallelRunProgressDisplay = (
                 ParallelRunProgressDisplay(
                     len(plan.tasks),
@@ -409,16 +434,28 @@ class _ProgressBridge:
                     include_cluster,
                     cpp_mode=cpp,
                     include_patch_stage=include_patch,
+                    math_threads=plan.policy.math_threads,
+                    policy=compact_worker_policy(worker_policy_text(dict(config))),
+                    unit=unit,
                 )
             )
             self._parallel = True
         else:
+            thread_word = "thread" if plan.policy.math_threads == 1 else "threads"
+            serial_execution = (
+                f"1 process x {plan.policy.math_threads} {thread_word} "
+                f"[{compact_worker_policy(worker_policy_text(dict(config)))}]"
+                if unit == "Files" and multiple_tasks
+                else None
+            )
             self._display = RunProgressDisplay(
                 len(plan.tasks),
                 started_at,
                 include_cluster,
                 cpp_mode=cpp,
                 include_patch_stage=include_patch,
+                unit=unit,
+                execution=serial_execution,
             )
             self._parallel = False
         self._closed = False
@@ -700,6 +737,110 @@ def _rows_by_input_index(
     return rows
 
 
+def _analyze_citation_evidence_by_group(
+    grouping: GroGroupingResult | None,
+    config: Mapping[str, Any],
+    group_configs: Mapping[int, Mapping[str, Any]],
+    rows_by_index: Mapping[int, Mapping[str, Any]],
+    tracking_results: Mapping[int | str, TrackingResult],
+) -> dict[int | str, dict[str, Any]]:
+    """Freeze the citation evidence used by reports and the final terminal."""
+    if grouping is None or not grouping.groups:
+        rows = [rows_by_index[index] for index in sorted(rows_by_index)]
+        return {
+            "run": _completed_analyze_citation_evidence(
+                config,
+                rows,
+                tracking_results.get("run"),
+            )
+        }
+
+    evidence: dict[int | str, dict[str, Any]] = {}
+    for group in grouping.groups:
+        rows = [
+            rows_by_index[index]
+            for index in group.source_indices
+            if index in rows_by_index
+        ]
+        evidence[group.group_index] = _completed_analyze_citation_evidence(
+            group_configs[group.group_index],
+            rows,
+            tracking_results.get(group.group_index),
+        )
+    return evidence
+
+
+def _completed_analyze_citation_evidence(
+    config: Mapping[str, Any],
+    rows: Sequence[Mapping[str, Any]],
+    tracking: TrackingResult | None,
+) -> dict[str, Any]:
+    successful = sum(
+        str(row.get("status", "")).strip().casefold() == "ok" for row in rows
+    )
+    track_completed = tracking is not None and len(tracking.frames) >= 2
+    guest_residence_evaluated = bool(
+        track_completed
+        and tracking is not None
+        and any(observation.guest_ids for observation in tracking.observations)
+    )
+    return completed_citation_evidence(
+        config,
+        successful_frames=successful,
+        completed_outputs=normalize_output_types(
+            config.get("output", {}).get("types")  # type: ignore[union-attr]
+        ),
+        track=track_completed,
+        occupancy_evaluated=any(
+            int(row.get("n_guests", 0) or 0) > 0
+            for row in rows
+            if str(row.get("status", "")).strip().casefold() == "ok"
+        ),
+        guest_residence_evaluated=guest_residence_evaluated,
+    )
+
+
+def _merge_citation_evidence(
+    values: Iterable[Mapping[str, Any]],
+) -> dict[str, Any]:
+    """Merge independently executed topology-group evidence for the run root."""
+    items = list(values)
+    features: dict[str, bool] = {}
+    order_parameters: list[str] = []
+    completed_outputs: list[str] = []
+    successful_frames = 0
+    occupancy_evaluated = False
+    guest_residence_evaluated = False
+    for item in items:
+        successful_frames += int(item.get("successful_frames", 0) or 0)
+        raw_features = item.get("executed_features", {})
+        if isinstance(raw_features, Mapping):
+            for name, enabled in raw_features.items():
+                features[str(name)] = features.get(str(name), False) or bool(enabled)
+        for target, values_key in (
+            (order_parameters, "executed_order_parameters"),
+            (completed_outputs, "completed_outputs"),
+        ):
+            for value in item.get(values_key, ()) or ():
+                text = str(value)
+                if text not in target:
+                    target.append(text)
+        occupancy_evaluated = occupancy_evaluated or bool(
+            item.get("occupancy_evaluated", False)
+        )
+        guest_residence_evaluated = guest_residence_evaluated or bool(
+            item.get("guest_residence_evaluated", False)
+        )
+    return {
+        "successful_frames": successful_frames,
+        "executed_features": features,
+        "executed_order_parameters": tuple(order_parameters),
+        "completed_outputs": tuple(completed_outputs),
+        "occupancy_evaluated": occupancy_evaluated,
+        "guest_residence_evaluated": guest_residence_evaluated,
+    }
+
+
 def _write_completed_reports(
     args: Namespace,
     root_info: dict[str, Any],
@@ -717,6 +858,7 @@ def _write_completed_reports(
     started_at: datetime,
     finished_at: datetime,
     elapsed: float,
+    citation_evidence_by_group: Mapping[int | str, Mapping[str, Any]],
 ) -> None:
     root = plan.context.output_root
     all_rows = [rows_by_index[index] for index in sorted(rows_by_index)]
@@ -773,6 +915,7 @@ def _write_completed_reports(
             grouping_warnings,
         )
         group_info.update(status="completed", error="")
+        group_info.update(citation_evidence_by_group.get(group.group_index, {}))
         metric = write_summary(
             group_rows,
             Path(plan.context.group_output_roots[group.group_index]),

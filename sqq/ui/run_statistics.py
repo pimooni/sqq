@@ -31,7 +31,24 @@ def completed_run_statistics(
         successful_frames=successful,
         completed_outputs=output_types,
         track=track,
+        occupancy_evaluated=bool(
+            run_info.get(
+                "occupancy_evaluated",
+                run_info.get("guest_molecules", 0),
+            )
+        ),
     )
+    if "executed_features" in run_info:
+        for key in (
+            "successful_frames",
+            "executed_features",
+            "executed_order_parameters",
+            "completed_outputs",
+            "occupancy_evaluated",
+            "guest_residence_evaluated",
+        ):
+            if key in run_info:
+                citation_evidence[key] = run_info[key]
     return {
         "requested_frames": max(0, int(requested_frames)),
         "analyzed_frames": successful + failed,

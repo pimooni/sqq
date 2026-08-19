@@ -502,6 +502,9 @@ def _write_membership_tsv(
     try:
         with temporary.open("w", encoding="ascii", newline="\n") as output:
             output.write(header)
+            canonical_components: (
+                tuple[tuple[str, str, tuple[int, ...]], ...] | None
+            ) = None
             for render_index, record in enumerate(records):
                 time_value = record.get("time_ps")
                 time_text = "-" if time_value is None else f"{float(time_value):.9g}"
@@ -620,6 +623,7 @@ def _write_membership_tsv(
                         )
                         + "\n"
                     )
+                components: list[tuple[str, str, tuple[int, ...]]] = []
                 for component in sorted(
                     record.get("component_groups", ()),
                     key=lambda item: (
@@ -647,30 +651,48 @@ def _write_membership_tsv(
                         raise ValueError(
                             "Invalid SQQ component atom indexes in fragment metadata."
                         )
-                    for start in range(0, len(atom_indexes), COMPONENT_INDEX_CHUNK):
-                        chunk = atom_indexes[start : start + COMPONENT_INDEX_CHUNK]
-                        output.write(
-                            "\t".join(
-                                (
-                                    "P",
-                                    str(render_index),
-                                    "-",
-                                    "-",
-                                    "-",
-                                    "component",
-                                    role,
-                                    _membership_token(component["resname"]),
-                                    "-",
-                                    "-",
-                                    "-",
-                                    ",".join(str(value) for value in chunk),
-                                    "-",
-                                    "-",
-                                    "-",
-                                )
-                            )
-                            + "\n"
+                    components.append(
+                        (
+                            role,
+                            _membership_token(component["resname"]),
+                            tuple(atom_indexes),
                         )
+                    )
+                component_signature = tuple(components)
+                if canonical_components is None:
+                    canonical_components = component_signature
+                elif component_signature != canonical_components:
+                    raise ValueError(
+                        "SQQ render component topology changes between frames; "
+                        f"frame 0 and frame {render_index} do not match."
+                    )
+                if render_index == 0:
+                    for role, resname, atom_indexes_tuple in components:
+                        atom_indexes = list(atom_indexes_tuple)
+                        for start in range(0, len(atom_indexes), COMPONENT_INDEX_CHUNK):
+                            chunk = atom_indexes[start : start + COMPONENT_INDEX_CHUNK]
+                            output.write(
+                                "\t".join(
+                                    (
+                                        "P",
+                                        "0",
+                                        "-",
+                                        "-",
+                                        "-",
+                                        "component",
+                                        role,
+                                        resname,
+                                        "-",
+                                        "-",
+                                        "-",
+                                        ",".join(str(value) for value in chunk),
+                                        "-",
+                                        "-",
+                                        "-",
+                                    )
+                                )
+                                + "\n"
+                            )
                 groups = _fragment_membership_groups(record)
                 for (family, membership), atom_indexes in sorted(groups.items()):
                     cage_id, cage_type, phase, domain_id, cluster_id = (

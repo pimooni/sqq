@@ -9,6 +9,12 @@ from typing import Any
 
 TERMINAL_LABEL_WIDTH = 24
 
+_MONTH_NAMES = (
+    "Jan", "Feb", "Mar", "Apr", "May", "Jun",
+    "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+)
+_WEEKDAY_NAMES = ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
+
 
 def write_terminal_block(lines: list[str], *, stream: Any | None = None) -> None:
     """Write one complete terminal block without cross-stream interleaving."""
@@ -102,6 +108,24 @@ def format_time_zone(value: datetime) -> str:
     return f"{name} ({offset_text})"
 
 
+def format_started(value: datetime) -> str:
+    """Format a locale-independent, compact run start timestamp."""
+    offset = value.utcoffset()
+    if offset is None:
+        offset_text = "UTC"
+    else:
+        total_minutes = int(offset.total_seconds() / 60)
+        sign = "+" if total_minutes >= 0 else "-"
+        hours, minutes = divmod(abs(total_minutes), 60)
+        offset_text = f"UTC{sign}{hours:02d}:{minutes:02d}"
+    month = _MONTH_NAMES[value.month - 1]
+    weekday = _WEEKDAY_NAMES[value.weekday()]
+    return (
+        f"{month} {value.day}, {value.year} ({weekday}), "
+        f"{value:%H:%M:%S} ({offset_text})"
+    )
+
+
 def format_seconds(seconds: float) -> str:
     """Format elapsed seconds for the live terminal display."""
     return f"{max(seconds, 0.0):.1f} s"
@@ -113,6 +137,7 @@ __all__ = [
     "TIME_ZONE_ALIASES",
     "ascii_superscript_text",
     "format_seconds",
+    "format_started",
     "format_terminal_value",
     "format_time_zone",
     "print_terminal_field",
