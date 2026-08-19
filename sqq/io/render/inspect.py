@@ -123,16 +123,29 @@ def format_render_package(
             lines.append(f"  {label:<{width}} : {', '.join(values)}")
     if not report.complete:
         lines.append("The following commands may fail:")
-    script = _display_path(report.script_path)
+    console_command, terminal_command = render_launch_commands(report)
     lines.extend(
         (
             "VMD Tcl Console:",
-            f"  source {_tcl_path_argument(script)}",
+            f"  {console_command}",
             "Terminal:",
-            f"  vmd -e {_terminal_path_argument(script)}",
+            f"  {terminal_command}",
         )
     )
     return lines
+
+
+def render_launch_commands(
+    report: RenderPackageInspection,
+    *,
+    platform: str | None = None,
+) -> tuple[str, str]:
+    """Return copy-ready VMD commands for one inspected render script."""
+    script = _display_path(report.script_path)
+    return (
+        f"source {_tcl_path_argument(script)}",
+        f"vmd -e {_terminal_path_argument(script, platform=platform)}",
+    )
 
 
 def _parse_legacy_references(text: str) -> tuple[RenderFileReference, ...]:
@@ -232,5 +245,6 @@ __all__ = [
     "discover_render_scripts",
     "format_render_package",
     "inspect_render_script",
+    "render_launch_commands",
     "run_vmd_command",
 ]

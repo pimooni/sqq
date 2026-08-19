@@ -11,7 +11,6 @@ from __future__ import annotations
 import math
 import re
 import sys
-import textwrap
 from collections.abc import Iterable, Mapping
 from datetime import datetime
 from pathlib import Path
@@ -19,12 +18,14 @@ from typing import Any, TextIO
 
 from .. import __version__
 from ..citation import build_citation_recommendation
+from ..io.render.inspect import inspect_render_script, render_launch_commands
 from .formatting import format_started
 from .run_header import (
     compact_additional_search,
     compact_graph_display,
     compact_group_graph_display,
     compact_input_display,
+    compact_output_display,
     compact_ring_scope,
     compact_sqq_display,
 )
@@ -61,7 +62,7 @@ def render_final_results(
     totals = _result_totals(run_info, statistics)
     track_run = _is_track_run(run_info)
     lines: list[str] = [_bold("Basic Information", ansi)]
-    _append_basic_information(lines, run_info)
+    _append_basic_information(lines, run_info, config)
 
     lines.extend(["", _bold("Configuration", ansi)])
     if track_run:
@@ -79,17 +80,20 @@ def render_final_results(
             f"ok {totals['successful']}; failed {totals['failed']}"
         ),
     )
-    _add_field(
-        lines,
-        "Time",
-        (
-            f"total {_format_seconds(totals['total_seconds'])}; "
-            f"analysis {_format_seconds(totals['analysis_seconds'])}; "
-            f"output {_format_seconds(totals['write_seconds'])}"
-        ),
+    time_value = (
+        f"total {_format_seconds(totals['total_seconds'])}; "
+        f"analysis {_format_seconds(totals['analysis_seconds'])}; "
+        f"output {_format_seconds(totals['write_seconds'])}"
     )
     if totals["successful"] > 1 and totals["mean_seconds"] is not None:
-        _add_field(lines, "Mean time / frame", _format_seconds(totals["mean_seconds"]))
+        time_value += f"; mean {_format_seconds(totals['mean_seconds'])}/frame"
+    _add_field(lines, "Time", time_value)
+
+    launch_commands = _validated_render_launch_commands(statistics)
+    if launch_commands is not None:
+        lines.extend(["", _bold("VMD Rendering", ansi)])
+        _add_field(lines, "VMD Tk Console", launch_commands[0])
+        _add_field(lines, "Terminal", launch_commands[1])
     if track_run:
         _add_present_field(lines, "Tracks", _lookup(run_info, "track_count"))
     if totals["status"] not in {"completed", "ok", "successful"} or totals["failed"]:
@@ -104,8 +108,8 @@ def render_final_results(
 
     citation = build_citation_recommendation(run_info, config, statistics)
     lines.extend(["", _bold("Citation Recommendation", ansi)])
-    lines.extend(_wrap_citation(citation.sentence, ansi=ansi, bold=True))
-    lines.extend(_wrap_citation(citation.publication, ansi=ansi))
+    lines.append(f"  {citation.sentence}")
+    lines.append(f"  {citation.publication}")
     lines.append(f"  {citation.github}")
     return "\n".join(lines)
 
@@ -129,6 +133,39 @@ def _diagnostic_messages(statistics: Mapping[str, Any]) -> tuple[str, ...]:
             seen.add(message)
             messages.append(message)
     return tuple(messages)
+
+
+def _validated_render_launch_commands(
+    statistics: Mapping[str, Any],
+) -> tuple[str, str] | None:
+    """Return commands only for one complete, manifest-backed render package."""
+    raw = statistics.get(
+        "render_script_paths",
+        statistics.get("render_script_path", ()),
+    )
+    if isinstance(raw, (str, Path)):
+        candidates = (Path(raw),)
+    elif isinstance(raw, Iterable) and not isinstance(raw, (bytes, Mapping)):
+        candidates = tuple(Path(item) for item in raw if str(item).strip())
+    else:
+        return None
+    if len(candidates) != 1:
+        return None
+    script = candidates[0]
+    try:
+        if not script.is_file() or script.stat().st_size == 0:
+            return None
+    except OSError:
+        return None
+    inspection = inspect_render_script(script)
+    if inspection is None or not inspection.complete or inspection.source != "manifest":
+        return None
+    required_roles = {
+        reference.role for reference in inspection.references if reference.required
+    }
+    if not {"topology", "trajectory", "membership"}.issubset(required_roles):
+        return None
+    return render_launch_commands(inspection)
 
 
 def print_final_results(
@@ -209,23 +246,15 @@ def _explicit_cage_report_value(
     return str(value)
 
 
-def _wrap_citation(text: str, *, ansi: bool, bold: bool = False) -> list[str]:
-    wrapped = textwrap.wrap(
-        text,
-        width=104,
-        initial_indent="  ",
-        subsequent_indent="  ",
-        break_long_words=False,
-        break_on_hyphens=False,
-    ) or ["  "]
-    return [_bold(line, ansi) for line in wrapped] if bold else wrapped
-
-
 def _missing_as_empty(value: Any) -> Any:
     return "" if value is _MISSING else value
 
 
-def _append_basic_information(lines: list[str], run_info: Mapping[str, Any]) -> None:
+def _append_basic_information(
+    lines: list[str],
+    run_info: Mapping[str, Any],
+    config: Mapping[str, Any],
+) -> None:
     _add_present_field(lines, "Started", _started_display(run_info))
     input_value = _first(_lookup(run_info, "input"), _lookup(run_info, "source"))
     if input_value is not _MISSING:
@@ -237,11 +266,20 @@ def _append_basic_information(lines: list[str], run_info: Mapping[str, Any]) -> 
                 _missing_as_empty(_lookup(run_info, "input_format")),
             ),
         )
-    _add_present_field(
-        lines,
-        "Output",
-        _first(_lookup(run_info, "output_dir", "output"), _lookup(run_info, "result_path")),
+    output_value = _first(
+        _lookup(run_info, "output_resolved_path", "output_dir", "output"),
+        _lookup(run_info, "result_path"),
     )
+    output_config = config.get("output", {})
+    metadata = dict(output_config) if isinstance(output_config, Mapping) else {}
+    resolved_path = _lookup(run_info, "output_resolved_path")
+    if resolved_path is not _MISSING:
+        metadata["resolved_path"] = resolved_path
+    auto_renamed = _lookup(run_info, "output_auto_renamed")
+    if auto_renamed is not _MISSING:
+        metadata["auto_renamed"] = _as_bool(auto_renamed, False)
+    if output_value is not _MISSING:
+        _add_field(lines, "Output", compact_output_display(output_value, metadata))
 
 
 def _append_configuration(
@@ -259,7 +297,6 @@ def _append_configuration(
         ),
     )
     _add_present_field(lines, "Config file", _lookup(run_info, "config_file"))
-    _add_present_field(lines, "Topology", _lookup(run_info, "topology"))
     _add_present_field(lines, "Sampling Interval", _lookup(run_info, "sampling_interval"))
     if str(_missing_as_empty(_lookup(run_info, "input_format"))).startswith("lammps-"):
         _add_field(
@@ -295,26 +332,7 @@ def _append_configuration(
             ),
         )
 
-    adjustments = _lookup(run_info, "resolution_adjustments")
-    if isinstance(adjustments, Iterable) and not isinstance(adjustments, (str, bytes, Mapping)):
-        values: list[str] = []
-        for adjustment in adjustments:
-            if isinstance(adjustment, Mapping):
-                parameter = adjustment.get("parameter", "parameter")
-                effective = adjustment.get("effective")
-                value = str(parameter)
-                if effective is not None:
-                    value += f" -> {effective}"
-                values.append(value)
-        if values:
-            _add_field(lines, "Adjustments", "; ".join(values))
-
-    _add_field(lines, "Ring sizes", compact_ring_scope(dict(config)))
-    _add_present_field(
-        lines,
-        "Ring definition",
-        _first(_config_value(config, "ring", "definition"), _config_value(config, "ring", "chordless")),
-    )
+    _add_field(lines, "Ring", compact_ring_scope(dict(config)))
     _add_field(lines, "Additional search", compact_additional_search(dict(config)))
     cage_report = _explicit_cage_report_value(run_info, config)
     if cage_report:
@@ -375,7 +393,6 @@ def _append_track_configuration(
         ),
     )
     _add_present_field(lines, "Config file", _lookup(run_info, "config_file"))
-    _add_present_field(lines, "Topology", _lookup(run_info, "topology"))
 
     _add_field(
         lines,

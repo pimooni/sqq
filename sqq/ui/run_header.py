@@ -203,11 +203,18 @@ def build_run_info(
         int(row.get("n_guests", 0) or 0) for row in successful_rows
     )
     input_format = input_format_label(paths)
+    output_metadata = config.get("output", {})
+    requested_output_path = output_metadata.get("requested_path") or str(outdir)
+    resolved_output_path = output_metadata.get("resolved_path") or str(outdir.resolve())
+    output_auto_renamed = bool(output_metadata.get("auto_renamed", False))
     info: dict[str, Any] = {
         "working_dir": str(Path.cwd()),
         "input": str(input_path),
         "input_format": input_format,
-        "output_dir": str(outdir.resolve()),
+        "output_dir": str(Path(resolved_output_path).resolve()),
+        "output_requested_path": str(requested_output_path),
+        "output_resolved_path": str(Path(resolved_output_path).resolve()),
+        "output_auto_renamed": output_auto_renamed,
         "date": started_at_wall.strftime("%Y-%m-%d"),
         "start_time": started_at_wall.strftime("%H:%M:%S"),
         "finish_time": finished_at_wall.strftime("%H:%M:%S"),
@@ -375,6 +382,19 @@ def compact_input_display(path: Any, input_format: Any) -> str:
     return f"{resolved} [{format_text}]" if format_text else resolved
 
 
+def compact_output_display(path: Any, metadata: Any = None) -> str:
+    """Render the resolved output path and an automatic-rename marker."""
+    details = metadata if isinstance(metadata, dict) else {}
+    resolved_value = details.get("resolved_path") or path
+    try:
+        resolved = str(Path(str(resolved_value)).expanduser().resolve())
+    except (OSError, RuntimeError):
+        resolved = str(resolved_value)
+    if bool(details.get("auto_renamed", False)):
+        return f"{resolved} [auto-renamed]"
+    return resolved
+
+
 def human_input_format(value: Any) -> str:
     """Return a compact display form for normalized input-format identifiers."""
     text = str(value or "").strip()
@@ -398,9 +418,10 @@ def compact_ring_scope(config: dict[str, Any]) -> str:
     if report_value in (None, "", "auto"):
         report_value = ring.get("sizes", ())
     report = _size_scope_text(report_value)
+    definition = str(ring.get("definition", "chordless"))
     if search == report:
-        return f"{search} [search and report]"
-    return f"search {search}; report {report}"
+        return f"{search} [{definition}]: search and report"
+    return f"{search} search; {report} report [{definition}]"
 
 
 def compact_additional_search(config: dict[str, Any]) -> str:
@@ -429,7 +450,7 @@ def _size_scope_text(value: Any) -> str:
         parts = []
     else:
         parts = [str(value)]
-    return "/".join(parts) if parts else "none"
+    return ", ".join(parts) if parts else "none"
 
 
 def _explicit_cage_report(config: dict[str, Any]) -> str:
@@ -462,11 +483,10 @@ def print_run_header(
     input_format = input_format_label(paths)
     add_field("Started", format_started(started_at_wall))
     add_field("Input", compact_input_display(input_path, input_format))
-    add_field("Output", outdir.resolve())
+    add_field("Output", compact_output_display(outdir, config.get("output", {})))
     lines.extend(["", "Configuration"])
     add_field("SQQ", compact_sqq_display(config.get("mode", DEFAULT_MODE)))
     add_field("Config file", args.config or "<built-in defaults>")
-    add_field("Topology", topology or "<none>")
     if config["input"].get("sampling"):
         add_field("Sampling Interval", sampling_interval_display(config))
     if input_format.startswith("lammps-"):
@@ -503,8 +523,7 @@ def print_run_header(
         raise RuntimeError(
             "Graph mode auto was not resolved before the run header was printed."
         )
-    add_field("Ring sizes", compact_ring_scope(config))
-    add_field("Ring definition", config["ring"].get("definition", "chordless"))
+    add_field("Ring", compact_ring_scope(config))
     add_field("Additional search", compact_additional_search(config))
     explicit_cages = _explicit_cage_report(config)
     if explicit_cages:
@@ -524,18 +543,6 @@ def print_run_header(
             cpp_mode=is_cpp_mode(config.get("mode", DEFAULT_MODE)),
         ),
     )
-    adjustment_values: list[str] = []
-    for adjustment in config.get("resolution_report", {}).get("adjustments", ()):
-        if not isinstance(adjustment, dict):
-            continue
-        parameter = adjustment.get("parameter", "parameter")
-        effective = adjustment.get("effective")
-        value = f"{parameter}"
-        if effective is not None:
-            value += f" -> {effective}"
-        adjustment_values.append(value)
-    if adjustment_values:
-        add_field("Adjustments", "; ".join(adjustment_values))
     for label, value in extra_configuration_fields or []:
         add_field(label, value)
     lines.append("")
@@ -561,12 +568,14 @@ def print_track_header(
         "Basic Information",
         terminal_field_line("Started", format_started(started_at_wall)),
         terminal_field_line("Input", compact_input_display(input_value, input_format)),
-        terminal_field_line("Output", Path(args.output).resolve()),
+        terminal_field_line(
+            "Output",
+            compact_output_display(args.output, config.get("output", {})),
+        ),
         "",
         "Configuration",
         terminal_field_line("SQQ", compact_sqq_display(config.get("mode", DEFAULT_MODE))),
         terminal_field_line("Config file", getattr(args, "config", None) or "<built-in defaults>"),
-        terminal_field_line("Topology", getattr(args, "topology", None) or "<none>"),
         terminal_field_line("Target", target_text or "all"),
     ]
     if raw_input and config.get("input", {}).get("delta_time_ps") is not None:

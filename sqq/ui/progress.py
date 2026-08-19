@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections import Counter
 import shutil
 import sys
+from pathlib import Path
 from threading import Event, Lock, Thread
 from time import perf_counter
 from typing import Any, Callable
@@ -103,9 +104,27 @@ def print_output_write_status() -> None:
     write_terminal_block(["Writing output files; please wait and do not close SQQ..."])
 
 
+def print_output_directory_notice(
+    requested: str | Path,
+    resolved: str | Path,
+    *,
+    auto_renamed: bool,
+) -> None:
+    """Report the one intentional output-root rename without extra UI rows."""
+    if not auto_renamed:
+        return
+    write_terminal_block(
+        [
+            "Output directory is not empty; using "
+            f"{Path(resolved)} [auto-renamed] instead of {Path(requested)}."
+        ]
+    )
+
+
 def compact_worker_policy(value: Any) -> str:
     """Shorten the resolved worker policy for the live Execution row."""
     text = " ".join(str(value or "auto").split())
+    text = text.replace("1 workers", "1 worker")
     normalized = text.casefold()
     if normalized.startswith("auto"):
         return "auto; reserve 1 core"
@@ -156,8 +175,13 @@ class RunProgressDisplay:
         self._last_render_at = float("-inf")
         self._last_panel_lines: tuple[str, ...] | None = None
         self._last_static_state: tuple[int, int] | None = None
-        self._render(force=True)
-        if self._interactive:
+        # A one-task run has no useful aggregate progress information.  Keep
+        # accepting stage callbacks for a uniform runner contract, but emit no
+        # heading, Execution row, one-item table, bar, or closing blank line.
+        self._visible = self.total > 1
+        if self._visible:
+            self._render(force=True)
+        if self._visible and self._interactive:
             self._thread = Thread(target=self._tick, daemon=True)
             self._thread.start()
 
@@ -202,9 +226,10 @@ class RunProgressDisplay:
             with self._lock:
                 if self._closed:
                     return
-                self._render_locked(force=True)
-                self._stream.write("\n")
-                self._stream.flush()
+                if self._visible:
+                    self._render_locked(force=True)
+                    self._stream.write("\n")
+                    self._stream.flush()
                 self._closed = True
 
     def _tick(self) -> None:
@@ -217,7 +242,7 @@ class RunProgressDisplay:
                 self._render_locked(force=force)
 
     def _render_locked(self, *, force: bool = False) -> None:
-        if self._closed:
+        if self._closed or not self._visible:
             return
         if not self._interactive:
             state = (self.completed, self.failed)
@@ -628,6 +653,7 @@ __all__ = [
     "compact_worker_policy",
     "configured_stage_groups",
     "format_stage_label",
+    "print_output_directory_notice",
     "print_output_write_status",
     "stage_column_widths",
 ]

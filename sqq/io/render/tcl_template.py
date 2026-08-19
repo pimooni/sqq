@@ -18,9 +18,6 @@ if {[llength [info commands ::SQQ::dispose_renderer]] > 0} {
                 catch {after cancel [set $variable_name]}
             }
         }
-        if {[info exists membership_handle] && $membership_handle ne ""} {
-            catch {close $membership_handle}
-        }
         catch {::SQQ::clear_graphics}
         catch {::SQQ::clear_representations}
     }
@@ -51,14 +48,9 @@ namespace eval ::SQQ {
     variable renderer_state loading
     variable renderer_error ""
     variable ready_callbacks {}
-    variable membership_handle ""
-    variable membership_line_number 0
     variable membership_frame_count 0
-    variable membership_finalize_frame 0
     variable membership_seen_frames
     variable parsed_frames 0
-    variable trajectory_last_count -1
-    variable trajectory_last_change_ms 0
     variable displayed_graph_mode "__unset__"
     variable label_visible 0
     variable pick_mode off
@@ -100,7 +92,6 @@ namespace eval ::SQQ {
 proc ::SQQ::dispose_renderer {{delete_molecule 1}} {
     variable frame_after_id
     variable label_after_ids
-    variable membership_handle
     variable molid
     variable owns_molecule
     variable pick_after_id
@@ -116,10 +107,6 @@ proc ::SQQ::dispose_renderer {{delete_molecule 1}} {
     }
     foreach callback_id $label_after_ids { catch {after cancel $callback_id} }
     set label_after_ids {}
-    if {$membership_handle ne ""} {
-        catch {close $membership_handle}
-        set membership_handle ""
-    }
     catch {trace remove variable ::vmd_frame write ::SQQ::frame_changed}
     catch {trace remove variable ::vmd_pick_atom write ::SQQ::pick_atom_changed}
     catch {trace remove variable ::vmd_pick_atom write ::SQQ::pick_atom_event}
@@ -484,7 +471,6 @@ proc ::SQQ::renderer_fail {message} {
     ::SQQ::dispose_renderer 1
     set renderer_error $original_message
     set renderer_state failed
-    puts stderr "SQQ renderer failed: $original_message"
 }
 
 proc ::SQQ::require_renderer_ready {} {
@@ -494,7 +480,7 @@ proc ::SQQ::require_renderer_ready {} {
     if {$renderer_state eq "failed"} {
         error "SQQ renderer failed: $renderer_error"
     }
-    error "SQQ renderer is still loading"
+    error "SQQ renderer is not ready"
 }
 
 proc ::SQQ::when_ready {script} {
@@ -519,93 +505,6 @@ proc ::SQQ::run_ready_callbacks {} {
             puts stderr "SQQ deferred command failed: $message"
         }
     }
-}
-
-proc ::SQQ::begin_membership_read {} {
-    variable membership_handle
-    variable membership_line_number
-    variable membership_path
-    variable renderer_after_id
-    if {[catch {
-        ::SQQ::reset_membership_data
-        set membership_handle [open $membership_path r]
-        fconfigure $membership_handle -encoding ascii -translation auto
-        if {[gets $membership_handle header] < 0 ||
-            $header ne "record\trender_frame\tsource_frame\ttime_ps\tgraph_mode\tfamily\tcage_id\tcage_type\tphase\tdomain\tcluster\tatom_indices\tcenter_x_angstrom\tcenter_y_angstrom\tcenter_z_angstrom"} {
-            error "Invalid SQQ membership TSV header: $membership_path"
-        }
-        set membership_line_number 1
-    } message]} {
-        ::SQQ::renderer_fail $message
-        return
-    }
-    set renderer_after_id [after 1 [list ::SQQ::read_membership_chunk]]
-}
-
-proc ::SQQ::read_membership_chunk {} {
-    variable membership_handle
-    variable membership_line_number
-    variable renderer_after_id
-    variable renderer_state
-    if {$renderer_state ne "loading"} { return }
-    set renderer_after_id ""
-    set started [clock milliseconds]
-    set rows 0
-    while {$rows < 250 && [clock milliseconds] - $started < 15} {
-        if {[gets $membership_handle line] < 0} {
-            catch {close $membership_handle}
-            set membership_handle ""
-            variable membership_finalize_frame
-            set membership_finalize_frame 0
-            set renderer_after_id [after 1 [list ::SQQ::finalize_membership_chunk]]
-            return
-        }
-        incr membership_line_number
-        if {$line eq ""} { continue }
-        if {[catch {
-            ::SQQ::parse_membership_row $line $membership_line_number
-        } message]} {
-            ::SQQ::renderer_fail $message
-            return
-        }
-        incr rows
-    }
-    set renderer_after_id [after 1 [list ::SQQ::read_membership_chunk]]
-}
-
-proc ::SQQ::finalize_membership_chunk {} {
-    variable membership_finalize_frame
-    variable membership_frame_count
-    variable membership_seen_frames
-    variable renderer_after_id
-    variable renderer_state
-    if {$renderer_state ne "loading"} { return }
-    set renderer_after_id ""
-    set started [clock milliseconds]
-    while {$membership_finalize_frame < $membership_frame_count &&
-           [clock milliseconds] - $started < 15} {
-        set frame $membership_finalize_frame
-        if {![info exists membership_seen_frames($frame)]} {
-            ::SQQ::renderer_fail "Missing SQQ frame metadata for frame $frame"
-            return
-        }
-        if {[catch {::SQQ::deduplicate_frame_memberships $frame} message]} {
-            ::SQQ::renderer_fail $message
-            return
-        }
-        incr membership_finalize_frame
-    }
-    if {$membership_finalize_frame < $membership_frame_count} {
-        set renderer_after_id [after 1 [list ::SQQ::finalize_membership_chunk]]
-        return
-    }
-    if {$membership_frame_count == 0} {
-        ::SQQ::renderer_fail "SQQ membership TSV contains no frames"
-        return
-    }
-    variable parsed_frames
-    set parsed_frames $membership_frame_count
-    set renderer_after_id [after 1 [list ::SQQ::begin_topology_load]]
 }
 
 proc ::SQQ::initialize_component_frame {frame} {
@@ -664,136 +563,70 @@ proc ::SQQ::initialize_component_frame {frame} {
     set components_initialized(0) 1
 }
 
-proc ::SQQ::begin_topology_load {} {
+proc ::SQQ::load_renderer {} {
     variable gro_path
+    variable membership_path
     variable molid
     variable owns_molecule
-    variable renderer_after_id
-    variable trajectory_last_change_ms
-    variable trajectory_last_count
-    if {[catch {
-        set molid [mol new $gro_path type gro waitfor 0]
-        set owns_molecule 1
-        set trajectory_last_count -1
-        set trajectory_last_change_ms [clock milliseconds]
-    } message]} {
-        ::SQQ::renderer_fail $message
-        return
-    }
-    set renderer_after_id [after 25 [list ::SQQ::poll_topology_load]]
-}
-
-proc ::SQQ::poll_topology_load {} {
-    variable molid
-    variable renderer_after_id
-    variable renderer_state
-    variable trajectory_last_change_ms
-    if {$renderer_state ne "loading"} { return }
-    set renderer_after_id ""
-    if {$molid < 0 || $molid ni [molinfo list]} {
-        ::SQQ::renderer_fail "VMD discarded the SQQ topology while it was loading"
-        return
-    }
-    if {[catch {set loaded [molinfo $molid get numframes]} message]} {
-        ::SQQ::renderer_fail $message
-        return
-    }
-    if {$loaded >= 1} {
-        ::SQQ::begin_trajectory_load
-        return
-    }
-    if {[clock milliseconds] - $trajectory_last_change_ms > 600000} {
-        ::SQQ::renderer_fail "Timed out while loading the SQQ GRO topology"
-        return
-    }
-    set renderer_after_id [after 25 [list ::SQQ::poll_topology_load]]
-}
-
-proc ::SQQ::begin_trajectory_load {} {
-    variable molid
     variable parsed_frames
-    variable renderer_after_id
-    variable trajectory_last_change_ms
-    variable trajectory_last_count
     variable xtc_path
-    set trajectory_last_count 1
-    set trajectory_last_change_ms [clock milliseconds]
-    if {$parsed_frames > 1} {
-        if {[catch {
-            mol addfile $xtc_path type xtc first 1 waitfor 0 molid $molid
-        } message]} {
-            ::SQQ::renderer_fail $message
-            return
-        }
-    }
-    set renderer_after_id [after 25 [list ::SQQ::poll_trajectory_load]]
-}
 
-proc ::SQQ::poll_trajectory_load {} {
-    variable molid
-    variable parsed_frames
-    variable renderer_after_id
-    variable renderer_state
-    variable trajectory_last_change_ms
-    variable trajectory_last_count
-    if {$renderer_state ne "loading"} { return }
-    set renderer_after_id ""
+    set parsed_frames [::SQQ::read_membership_tsv $membership_path]
+    if {$parsed_frames == 0} {
+        error "SQQ membership TSV contains no frames"
+    }
+
+    set molid [mol new $gro_path type gro waitfor all]
+    set owns_molecule 1
     if {$molid < 0 || $molid ni [molinfo list]} {
-        ::SQQ::renderer_fail "VMD discarded the SQQ trajectory while it was loading"
-        return
+        error "VMD discarded the SQQ topology while it was loading"
     }
-    if {[catch {set loaded [molinfo $molid get numframes]} message]} {
-        ::SQQ::renderer_fail $message
-        return
+    set topology_frames [molinfo $molid get numframes]
+    if {$topology_frames != 1} {
+        error "SQQ topology frame count mismatch: expected 1, VMD loaded $topology_frames"
     }
-    if {$loaded != $trajectory_last_count} {
-        set trajectory_last_count $loaded
-        set trajectory_last_change_ms [clock milliseconds]
+    if {$parsed_frames > 1} {
+        mol addfile $xtc_path type xtc first 1 waitfor all molid $molid
     }
-    if {$loaded == $parsed_frames} {
-        ::SQQ::finish_renderer
-        return
+    if {$molid < 0 || $molid ni [molinfo list]} {
+        error "VMD discarded the SQQ trajectory while it was loading"
     }
-    if {$loaded > $parsed_frames} {
-        ::SQQ::renderer_fail \
-            "SQQ frame count mismatch: parsed $parsed_frames, VMD loaded $loaded"
-        return
+    set loaded [molinfo $molid get numframes]
+    if {$loaded != $parsed_frames} {
+        error "SQQ frame count mismatch: parsed $parsed_frames, VMD loaded $loaded"
     }
-    if {[clock milliseconds] - $trajectory_last_change_ms > 600000} {
-        ::SQQ::renderer_fail \
-            "Timed out while loading the SQQ trajectory ($loaded/$parsed_frames frames)"
-        return
-    }
-    set renderer_after_id [after 25 [list ::SQQ::poll_trajectory_load]]
+    ::SQQ::finish_renderer
 }
 
 proc ::SQQ::finish_renderer {} {
+    variable displayed_graph_mode
+    variable graph_mode
     variable molid
     variable parsed_frames
     variable ready_callbacks
     variable renderer_after_id
     variable renderer_state
-    if {[catch {
-        molinfo $molid set frame 0
-        mol rename $molid __SQQ_MOLECULE_NAME__
-        ::SQQ::initialize_component_frame 0
-        ::SQQ::adopt_initial_representations
-        display projection Orthographic
-        ::SQQ::reset_show
-        catch {color Display Background white}
-        catch {trace remove variable ::vmd_frame write ::SQQ::frame_changed}
-        trace add variable ::vmd_frame write ::SQQ::frame_changed
-        catch {trace remove variable ::vmd_pick_atom write ::SQQ::pick_atom_event}
-        trace add variable ::vmd_pick_atom write ::SQQ::pick_atom_event
-        catch {trace remove variable ::vmd_pick_graphics write ::SQQ::pick_graphics_changed}
-        trace add variable ::vmd_pick_graphics write ::SQQ::pick_graphics_changed
-    } message]} {
-        ::SQQ::renderer_fail $message
-        return
-    }
+    molinfo $molid set frame 0
+    mol rename $molid __SQQ_MOLECULE_NAME__
+    ::SQQ::initialize_component_frame 0
+    ::SQQ::adopt_initial_representations
+    display projection Orthographic
+    # Keep startup output deterministic: graph-mode announcements begin only
+    # when a later frame actually changes mode.
+    set displayed_graph_mode [expr {[info exists graph_mode(0)] ?
+        $graph_mode(0) : "unknown"}]
+    ::SQQ::reset_show
+    catch {color Display Background white}
+    catch {trace remove variable ::vmd_frame write ::SQQ::frame_changed}
+    trace add variable ::vmd_frame write ::SQQ::frame_changed
+    catch {trace remove variable ::vmd_pick_atom write ::SQQ::pick_atom_event}
+    trace add variable ::vmd_pick_atom write ::SQQ::pick_atom_event
+    catch {trace remove variable ::vmd_pick_graphics write ::SQQ::pick_graphics_changed}
+    trace add variable ::vmd_pick_graphics write ::SQQ::pick_graphics_changed
     set renderer_after_id ""
     set renderer_state ready
-    puts "SQQ renderer: ready ($parsed_frames frame[expr {$parsed_frames == 1 ? "" : "s"}])"
+    puts "SQQ VMD Renderer: ready ($parsed_frames frame[expr {$parsed_frames == 1 ? "" : "s"}])"
+    ::SQQ::startup_help
     if {[llength $ready_callbacks] > 0} {
         set renderer_after_id [after 1 [list ::SQQ::run_ready_callbacks]]
     }
@@ -2135,9 +1968,12 @@ proc ::SQQ::frame_changed {name1 name2 operation} {
     set frame_after_id [after idle [list ::SQQ::render_pending]]
 }
 
-proc ::SQQ::startup_help {} {
-    puts "SQQ VMD Renderer"
+proc ::SQQ::startup_banner {} {
+__SQQ_BANNER_BODY__
     puts ""
+}
+
+proc ::SQQ::startup_help {} {
     puts "Default view : cage all (opaque)"
     puts "Show mode    : additive"
     puts ""
@@ -2149,13 +1985,6 @@ proc ::SQQ::startup_help {} {
     puts "  sqq target save"
     puts "  sqq clear"
     puts "  sqq -h"
-    puts ""
-    puts "Examples:"
-    puts "  sqq show cage 512"
-    puts "  sqq show cage 512 guest 512"
-    puts "  sqq show cage all component environment"
-    puts "  sqq color component KLN gray"
-    puts "  sqq pick guest"
 }
 
 proc ::SQQ::help {} {
@@ -2218,13 +2047,17 @@ foreach {label path} [list GRO $::SQQ::gro_path XTC $::SQQ::xtc_path membership 
         break
     }
 }
-::SQQ::startup_help
+::SQQ::startup_banner
 catch {color Display Background white}
 if {$missing_render_file ne ""} {
     ::SQQ::renderer_fail $missing_render_file
+    error "SQQ renderer failed: $missing_render_file"
 } else {
-    puts "SQQ renderer: loading; sqq -h is available now"
-    set ::SQQ::renderer_after_id [after idle [list ::SQQ::begin_membership_read]]
+    puts "SQQ VMD Renderer: loading files, please wait..."
+    if {[catch {::SQQ::load_renderer} message options]} {
+        ::SQQ::renderer_fail $message
+        return -options $options "SQQ renderer failed: $message"
+    }
 }
 """
 

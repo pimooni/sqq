@@ -72,10 +72,13 @@ from ..models.tracking import (
 )
 from ..runtime.contracts import FrameTask, RunPlan, TaskOutcome
 from ..runtime.frame import analyze_frame
-from ..runtime.output_lock import output_lock
+from ..runtime.output_lock import reserve_output_directory
 from ..ui.diagnostics import RunDiagnostics, capture_run_warnings
 from ..ui.formatting import format_time_zone
-from ..ui.progress import RunProgressDisplay
+from ..ui.progress import (
+    RunProgressDisplay,
+    print_output_directory_notice,
+)
 from ..ui.run_header import input_format_label, print_run_banner, print_track_header
 from ..ui import completed_run_statistics, print_final_results, refresh_terminal
 from .analyze_plan import build_run_plan
@@ -251,9 +254,16 @@ def track(args: Namespace) -> None:
         with capture_run_warnings(diagnostics):
             _preflight_track_paths(args)
             prepared = _prepare_track(args)
-            output = Path(args.output)
-            output.mkdir(parents=True, exist_ok=True)
-            with output_lock(output):
+            with reserve_output_directory(Path(args.output)) as output_selection:
+                output_selection.apply_to_config(prepared.config)
+                args.output = str(output_selection.resolved)
+                args.output_requested = str(output_selection.requested)
+                args.output_auto_renamed = output_selection.auto_renamed
+                print_output_directory_notice(
+                    output_selection.requested,
+                    output_selection.resolved,
+                    auto_renamed=output_selection.auto_renamed,
+                )
                 _track_locked(
                     args,
                     diagnostics,
@@ -347,6 +357,7 @@ def _track_locked(
     targets = prepared.targets
     source_state_path = prepared.source_state_path
     requested_tracking = prepared.requested_tracking
+    published_render_scripts: list[str] = []
 
     print_track_header(args, config, targets, started_wall)
 
@@ -431,11 +442,13 @@ def _track_locked(
             )
             for selection in selections:
                 directory = written[target_directory_name(selection.target)]
-                publish_target_render_bundle(
+                bundle = publish_target_render_bundle(
                     selection,
                     directory,
                     source_bundle,
                 )
+                if bundle.complete and bundle.script_path is not None:
+                    published_render_scripts.append(str(bundle.script_path.resolve()))
 
         _write_precursor_outputs(
             selections,
@@ -501,6 +514,7 @@ def _track_locked(
         completed_outputs = tuple(statistics.get("completed_outputs", ()))
         if "sqq-render" not in completed_outputs:
             statistics["completed_outputs"] = completed_outputs + ("sqq-render",)
+        statistics["render_script_paths"] = tuple(published_render_scripts)
         statistics["diagnostic_messages"] = diagnostics.consume()
         refresh_terminal()
         print_final_results(run_info, config, statistics)
@@ -1276,6 +1290,14 @@ def _run_info(
     frames = len(result.frames) if result is not None else 0
     graph_mode = str(config.get("graph", {}).get("bond_mode", ""))
     input_value = metadata.get("input") or metadata.get("source")
+    output_metadata = config.get("output", {})
+    if not isinstance(output_metadata, Mapping):
+        output_metadata = {}
+    requested_output_path = output_metadata.get("requested_path") or str(args.output)
+    resolved_output_path = output_metadata.get("resolved_path") or str(
+        Path(args.output).resolve()
+    )
+    output_auto_renamed = bool(output_metadata.get("auto_renamed", False))
     return {
         "sqq_version": __version__,
         "release_date": __release_date__,
@@ -1296,7 +1318,10 @@ def _run_info(
         "source": metadata.get("source"),
         "matched_files": 1 if input_value else 0,
         "first_file": input_value,
-        "output": str(Path(args.output).resolve()),
+        "output": str(Path(resolved_output_path).resolve()),
+        "output_requested_path": str(requested_output_path),
+        "output_resolved_path": str(Path(resolved_output_path).resolve()),
+        "output_auto_renamed": output_auto_renamed,
         "engine_selector": config.get("mode", DEFAULT_MODE),
         "sqq_engine": engine_display(config.get("mode", DEFAULT_MODE)),
         "graph_mode": graph_mode,

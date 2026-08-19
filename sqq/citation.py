@@ -13,6 +13,7 @@ PUBLICATION_LINE = (
     "Water-Shell Topology Analysis, in submission."
 )
 GITHUB_LINE = "GitHub     : https://github.com/pimooni/sqq"
+CITATION_SENTENCE = "Cages were identified and analyzed using SQQ."
 
 _MISSING = object()
 _TOKEN_SPLIT = re.compile(r"[,;/\s]+")
@@ -34,165 +35,11 @@ def build_citation_recommendation(
     config: Mapping[str, Any],
     statistics: Mapping[str, Any],
 ) -> CitationRecommendation:
-    """Build a recommendation from work that completed successfully.
-
-    ``statistics['executed_features']`` is authoritative when supplied.  An
-    enabled analysis that completed successfully may be cited even when it
-    found zero matching structures; this function never claims detection.
-    """
+    """Return the fixed copy-ready SQQ citation recommendation."""
     _require_mapping("run_info", run_info)
     _require_mapping("config", config)
     _require_mapping("statistics", statistics)
-
-    completed = _successful_frames(run_info, statistics) > 0
-    water_network = _feature_ran(
-        "water_network",
-        run_info,
-        statistics,
-        default=completed and _configured_enabled(config, "graph", True),
-    )
-    ring_topology = _feature_ran(
-        "ring_topology",
-        run_info,
-        statistics,
-        aliases=("ring", "rings"),
-        default=completed and _configured_enabled(config, "ring", True),
-    )
-
-    cage_ran = _feature_ran(
-        "cage_topology",
-        run_info,
-        statistics,
-        aliases=("cage", "cages"),
-        default=completed and _configured_enabled(config, "cage", True),
-    )
-    half_ran = _feature_ran(
-        "half_cage",
-        run_info,
-        statistics,
-        default=completed and _effective_enabled(run_info, config, "find_half", "half_cage"),
-    )
-    quasi_ran = _feature_ran(
-        "quasi_cage",
-        run_info,
-        statistics,
-        default=completed and _effective_enabled(run_info, config, "find_quasi", "quasi_cage"),
-    )
-    isomer_ran = _feature_ran(
-        "cage_isomer",
-        run_info,
-        statistics,
-        aliases=("isomer", "cage_isomers"),
-        default=cage_ran,
-    )
-    occupancy_ran = _feature_ran(
-        "cage_occupancy",
-        run_info,
-        statistics,
-        aliases=("occupancy",),
-        default=completed and _occupancy_evaluated(run_info, statistics),
-    )
-
-    parameters = _executed_order_parameters(run_info, config, statistics)
-    phase_ran = _feature_ran(
-        "hydrate_phase_domain",
-        run_info,
-        statistics,
-        aliases=("hydrate_cluster", "cluster", "phase_domain"),
-        default=completed
-        and _effective_enabled(run_info, config, "find_cluster", "hydrate_cluster"),
-    )
-    render_ran = _feature_ran(
-        "vmd_rendering",
-        run_info,
-        statistics,
-        aliases=("sqq_render", "render", "vmd"),
-        default=_completed_render_output(run_info, config, statistics),
-    )
-    tracking_ran = _feature_ran(
-        "cage_tracking",
-        run_info,
-        statistics,
-        aliases=("tracking", "track"),
-        default=completed and _track_enabled(config),
-    )
-    transition_ran = _feature_ran(
-        "cage_transition",
-        run_info,
-        statistics,
-        aliases=("transition", "type_transition", "type_transitions"),
-        default=False,
-    )
-    lifetime_ran = _feature_ran(
-        "cage_lifetime",
-        run_info,
-        statistics,
-        aliases=("lifetime", "lifetimes"),
-        default=completed and _lifetime_enabled(config),
-    )
-    guest_residence_ran = _feature_ran(
-        "guest_residence",
-        run_info,
-        statistics,
-        aliases=("residence", "guest_residence_time"),
-        default=(tracking_ran or lifetime_ran)
-        and _guest_residence_evaluated(run_info, statistics),
-    )
-
-    analysis_items: list[str] = []
-    if ring_topology:
-        analysis_items.append("water-ring topology")
-    elif water_network:
-        analysis_items.append("water-network topology")
-    if half_ran and quasi_ran:
-        analysis_items.append("half- and quasi-cage structures")
-    elif half_ran:
-        analysis_items.append("half-cage structures")
-    elif quasi_ran:
-        analysis_items.append("quasi-cage structures")
-    if cage_ran:
-        analysis_items.append("cage types and populations")
-    if isomer_ran:
-        analysis_items.append("cage isomers")
-    if occupancy_ran:
-        analysis_items.append("guest occupancies")
-    if phase_ran:
-        analysis_items.append("hydrate phases and domains")
-    if completed and parameters:
-        analysis_items.append(f"{_slash_join(parameters)} order parameters")
-
-    sentences: list[str] = []
-    if analysis_items:
-        if analysis_items == ["cage types and populations", "guest occupancies"]:
-            sentence = (
-                "Cage types, populations, and guest occupancies were analyzed "
-                "using SQQ."
-            )
-        else:
-            verb = "was" if len(analysis_items) == 1 and analysis_items[0] in {
-                "water-ring topology",
-                "water-network topology",
-            } else "were"
-            sentence = f"{_natural_join(analysis_items)} {verb} analyzed using SQQ."
-            sentence = sentence[0].upper() + sentence[1:]
-        sentences.append(sentence)
-    if render_ran:
-        sentences.append("VMD visualization files were generated using SQQ.")
-    if transition_ran or lifetime_ran or guest_residence_ran:
-        tracking_items = ["cage evolution"]
-        if transition_ran:
-            tracking_items.append("type transitions")
-        if lifetime_ran:
-            tracking_items.append("lifetimes")
-        if guest_residence_ran:
-            tracking_items.append("guest residence")
-        sentences.append(
-            f"{_natural_join(tracking_items).capitalize()} were tracked using SQQ."
-        )
-    elif tracking_ran:
-        sentences.append("Cage tracks were generated using SQQ.")
-    sentence = " ".join(sentences) or "SQQ was used for this analysis."
-    return CitationRecommendation(sentence=sentence)
+    return CitationRecommendation(sentence=CITATION_SENTENCE)
 
 
 def build_citation_sentence(

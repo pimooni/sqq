@@ -110,10 +110,7 @@ def format_summary_dashboard_sheet(worksheet) -> None:
                 row[0].fill = label_fill
                 row[0].font = Font(bold=True, color="0F172A")
             if row[1].value not in (None, ""):
-                row[1].font = Font(
-                    color="111827",
-                    bold=row[0].value == "Recommended text",
-                )
+                row[1].font = Font(color="111827", bold=False)
                 row[1].alignment = Alignment(horizontal="left", vertical="top", wrap_text=True)
 
 

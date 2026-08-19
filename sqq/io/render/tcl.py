@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from ...banner import SQQ_BANNER
 from .manifest import render_manifest_block
 from .models import (
     RenderFileReference,
@@ -57,6 +58,30 @@ VMD_COMMAND_HELP_LINES = (
 VMD_COMMAND_HELP = "\n".join(VMD_COMMAND_HELP_LINES)
 
 
+def tcl_banner_body() -> str:
+    """Return ASCII-only Tcl statements for the shared Unicode SQQ banner."""
+
+    def _escaped_line(line: str) -> str:
+        output: list[str] = []
+        for character in line:
+            codepoint = ord(character)
+            if character in {'\\', '"', '$', '[', ']'}:
+                output.append("\\" + character)
+            elif 0x20 <= codepoint <= 0x7E:
+                output.append(character)
+            elif codepoint <= 0xFFFF:
+                output.append(f"\\u{codepoint:04x}")
+            else:
+                # The current artwork is BMP-only. Keep the generator explicit
+                # instead of relying on Tcl-version-specific non-BMP escaping.
+                raise ValueError("SQQ VMD banner contains a non-BMP character.")
+        return "".join(output)
+
+    return "\n".join(
+        f'    puts "{_escaped_line(line)}"' for line in SQQ_BANNER.splitlines()
+    )
+
+
 def tcl_help_body() -> str:
     """Return Tcl statements that print the shared command help."""
     output: list[str] = []
@@ -108,7 +133,9 @@ def vmd_script_text(
                 RenderFileReference("membership", str(membership_filename)),
             ),
         ),
-    ).replace("__SQQ_HELP_BODY__", tcl_help_body())
+    ).replace("__SQQ_HELP_BODY__", tcl_help_body()).replace(
+        "__SQQ_BANNER_BODY__", tcl_banner_body()
+    )
     for placeholder, (filename, label) in replacements.items():
         value = str(filename)
         if value in {".", ".."} or "/" in value or "\\" in value:
@@ -127,6 +154,7 @@ __all__ = [
     "VMD_COMMAND_HELP",
     "VMD_COMMAND_HELP_LINES",
     "tcl_braced_literal",
+    "tcl_banner_body",
     "tcl_help_body",
     "vmd_script_text",
 ]

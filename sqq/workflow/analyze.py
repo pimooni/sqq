@@ -49,13 +49,17 @@ from ..runtime.parallel.policy import worker_policy_text
 from ..core.tracking import TrackingAccumulator, snapshot_from_frame_result
 from ..models.tracking import TrackingConfig, TrackingResult
 from ..runtime.frame import analyze_frame
-from ..runtime.output_lock import output_lock
+from ..runtime.output_lock import (
+    OutputDirectorySelection,
+    reserve_output_directory,
+)
 from ..ui.diagnostics import RunDiagnostics, capture_run_warnings
 from ..ui.final_results import print_final_results, refresh_terminal
 from ..ui.progress import (
     ParallelRunProgressDisplay,
     RunProgressDisplay,
     compact_worker_policy,
+    print_output_directory_notice,
     print_output_write_status,
 )
 from ..ui.run_header import (
@@ -74,20 +78,30 @@ def analyze(args: Namespace) -> None:
     print_run_banner(getattr(args, "engine", None))
     run_started_at = datetime.now().astimezone()
     started_at = perf_counter()
-    outdir = Path(args.output)
-    if outdir.exists() and not outdir.is_dir():
-        raise NotADirectoryError(f"Output path is not a directory: {outdir}")
+    requested_outdir = Path(args.output)
+    if requested_outdir.exists() and not requested_outdir.is_dir():
+        raise NotADirectoryError(
+            f"Output path is not a directory: {requested_outdir}"
+        )
     diagnostics = RunDiagnostics()
     try:
         with capture_run_warnings(diagnostics):
             prepared = _prepare_analyze(args)
-            outdir.mkdir(parents=True, exist_ok=True)
-            with output_lock(outdir):
+            with reserve_output_directory(requested_outdir) as output_selection:
+                prepared = _activate_analyze_output(prepared, output_selection)
+                args.output = str(output_selection.resolved)
+                args.output_requested = str(output_selection.requested)
+                args.output_auto_renamed = output_selection.auto_renamed
+                print_output_directory_notice(
+                    output_selection.requested,
+                    output_selection.resolved,
+                    auto_renamed=output_selection.auto_renamed,
+                )
                 cleanup_previous_analyze_outputs(
-                    outdir,
+                    output_selection.resolved,
                     prepared.execution_config,
                 )
-                with OutputOwnershipSession(outdir):
+                with OutputOwnershipSession(output_selection.resolved):
                     for root in prepared.plan.output_roots:
                         root.mkdir(parents=True, exist_ok=True)
                     _analyze_locked(
@@ -115,6 +129,60 @@ class _AnalyzePreparation:
     plan: RunPlan
     execution_config: dict[str, Any]
     group_configs: dict[int, dict[str, Any]]
+
+
+def _activate_analyze_output(
+    prepared: _AnalyzePreparation,
+    selection: OutputDirectorySelection,
+) -> _AnalyzePreparation:
+    """Move a side-effect-free plan to its exclusively reserved output root."""
+    plan = prepared.plan
+    old_root = Path(plan.context.output_root)
+
+    def relocated(path: Path | None) -> Path | None:
+        if path is None:
+            return None
+        candidate = Path(path)
+        try:
+            relative = candidate.relative_to(old_root)
+        except ValueError as exc:
+            raise RuntimeError(
+                f"Planned output path escapes the requested root: {candidate}"
+            ) from exc
+        return selection.resolved / relative
+
+    selection.apply_to_config(prepared.execution_config)
+    for group_config in prepared.group_configs.values():
+        selection.apply_to_config(group_config)
+
+    group_roots = {
+        key: relocated(Path(path))
+        for key, path in plan.context.group_output_roots.items()
+    }
+    context = replace(
+        plan.context,
+        config=prepared.execution_config,
+        output_root=selection.resolved,
+        fragment_dir=relocated(plan.context.fragment_dir),
+        group_configs=prepared.group_configs,
+        group_output_roots=group_roots,
+        group_fragment_dirs={
+            key: relocated(Path(path))
+            for key, path in plan.context.group_fragment_dirs.items()
+        },
+    )
+    moved_plan = replace(
+        plan,
+        tasks=tuple(
+            replace(task, output_root=relocated(task.output_root))
+            for task in plan.tasks
+        ),
+        context=context,
+        output_roots=tuple(
+            relocated(Path(path)) for path in plan.output_roots
+        ),
+    )
+    return replace(prepared, plan=moved_plan)
 
 
 def _prepare_analyze(args: Namespace) -> _AnalyzePreparation:
@@ -265,6 +333,7 @@ def _analyze_locked(
     )
 
     rows_by_index: dict[int, dict[str, Any]] = {}
+    published_render_scripts: list[str] = []
     progress = _ProgressBridge(plan, execution_config, group_configs, started_at)
     try:
         outcomes = AnalysisRunner(
@@ -280,7 +349,9 @@ def _analyze_locked(
             tracking_sink.results if tracking_sink is not None else {}
         )
         for key, session in render_sessions.items():
-            session.finalize(tracking=tracking_results.get(key))
+            bundle = session.finalize(tracking=tracking_results.get(key))
+            if bundle.complete and bundle.script_path is not None:
+                published_render_scripts.append(str(bundle.script_path.resolve()))
         _write_analyze_tracking_outputs(plan, tracking_results)
     except Exception as exc:
         progress.close()
@@ -391,6 +462,7 @@ def _analyze_locked(
             root_info.get("executed_features", {}).get("cage_tracking", False)
         ),
     )
+    statistics["render_script_paths"] = tuple(published_render_scripts)
     statistics["diagnostic_messages"] = diagnostics.consume()
     refresh_terminal()
     print_final_results(root_info, final_config, statistics)

@@ -2,7 +2,7 @@
 
 **SQQ (Shell Quant Qualifier): Python Joint Toolkit for Water-Shell Topology Analysis.**
 
-Current development version: **0.5.4** (Aug 19, 2026; Qixi Festival)
+Current development version: **0.5.5** (Aug 19, 2026; Qixi Festival)
 
 SQQ provides the complete SQQ-Py water-shell topology workflow and the focused SQQ-CPP cage engine. Select the Python workflow with `-e py` or the C++17 graph/ring/cage/occupancy/F3/F4 workflow with `-e cpp`. Algorithms are documented in `docs/design.md` and release notes in `docs/update.md`.
 
@@ -25,12 +25,13 @@ Names are listed alphabetically by family name.
 - Zhang, Zhengcai  @  Laoshan Laboratory
 - Zhao, Jingyuan   @  Akatsuki Games Inc.
 
-## Changed in 0.5.4
+## Changed in 0.5.5
 
-- Made generated VMD scripts responsive while membership and trajectory data load, added transactional cleanup for repeated sourcing and failed loads, and made renderer readiness the final successful initialization step.
-- Kept semantic VMD representations stable and created them lazily, inherited user-edited styles when a compatible layer first appears later, and reduced large Track target initialization to one redraw.
-- Stored fixed component metadata only once at render frame 0 while validating that every later frame has the same component topology.
-- Condensed Analyze and Track into one terminal page, removed the execution panel for every true single-task run, and made terminal and summary citation text share the same completed-feature evidence.
+- Restored deterministic, fast synchronous VMD bundle loading: `source` returns only after the GRO, XTC, membership data, default view, and commands are ready, while preserving stable cross-frame representations and GUI-edited styles.
+- Added the shared SQQ Banner to generated VMD scripts and prints validated absolute-path `source` and `vmd -e` commands directly in completed Analyze results.
+- Automatically reserves a new `_001`, `_002`, ... result directory when the requested output directory is non-empty, preserves all earlier data, and removes the run-owned lock after successful completion.
+- Further condensed terminal output by removing empty single-task progress, `Topology`, and `Adjustments` rows; merging ring and timing fields; and using one concise unbolded citation sentence.
+- Expanded generated YAML choice comments and moved the release workflow to official Node.js 24 GitHub Actions.
 
 ## Install
 
@@ -148,7 +149,7 @@ The default `chordless`/`bounded` path preserves the established scientific defi
 
 Every cage now passes the same mandatory topology validation in SQQ-Py and SQQ-CPP: each edge belongs to exactly two faces, `V - E + F = 2`, the face shell is connected, every vertex link is one cycle, and every shell vertex is trivalent. Optional scientific cage validation adds PBC-aware face-planarity and edge-variation limits, nonzero projected area, positive-volume validation, and volume-centroid cage centers. It remains disabled by default, but disabling it no longer bypasses topology validation. SQQ uses an orthorhombic box representation and rejects non-orthogonal/triclinic input explicitly.
 
-The current development version keeps the complete run on one compact terminal page. `Started`, resolved `Input`, `SQQ`, `Graph`, `Ring sizes`, and `Additional search` combine information that was previously repeated across several rows. Serial and parallel progress retain the same three-stage model: file preparation (`reading`, `settings`, `selecting`), core topology search (`graph`, `ring`, optional `half/quasi`, `cage`, and optional `cluster`), and post-processing (`filtering`, `order`, `ice`, `output`). An execution plan containing exactly one task, including a directory that resolves to one file, has no execution row or one-item progress bar. Multi-item runs show one execution-policy row, aggregate stages, and at most five active files; shorter terminals automatically reduce live-progress detail. The TTY panel updates in place, while redirected output prints one bounded starting progress record without ANSI or carriage-return rewrites and leaves final counts to `Analysis Results`. The normal successful completed page targets no more than 35 lines; no separate 80-column by 24-row layout is defined. Nonfatal warnings are deduplicated and reduced to one final preview with full details retained in result files.
+The current development version keeps the complete run on one compact terminal page. `Started`, resolved `Input`, `SQQ`, `Graph`, merged `Ring`, and `Additional search` combine information that was previously repeated across several rows; `Topology` and routine `Adjustments` stay in persistent metadata rather than the terminal Configuration block. Serial and parallel progress retain the same three-stage model: file preparation (`reading`, `settings`, `selecting`), core topology search (`graph`, `ring`, optional `half/quasi`, `cage`, and optional `cluster`), and post-processing (`filtering`, `order`, `ice`, `output`). An execution plan containing exactly one task, including a directory that resolves to one file, prints no `Analysis Progress` section, execution row, file row, or one-item progress bar. Multi-item runs show one execution-policy row, aggregate stages, and at most five active files; shorter terminals automatically reduce live-progress detail. The TTY panel updates in place, while redirected output remains plain text. Completed results merge total/analysis/output and mean-per-frame timing into one `Time` row. The normal successful completed page targets no more than 35 lines; no separate 80-column by 24-row layout is defined. Nonfatal warnings are deduplicated and reduced to one final preview with full details retained in result files.
 
 ### Native SQQ-CPP Backend
 
@@ -195,7 +196,7 @@ Release CI is configured to build and test precompiled wheels for CPython 3.10-3
 
 ## Package Architecture
 
-SQQ 0.5.4 separates public configuration and data models, parallel `core/sqq_py` and `core/sqq_cpp` scientific backends, command workflows (`init`, `analyze`, `track`, and `vmd`), runtime scheduling, I/O/reporting/rendering, and terminal UI. Retired monolithic modules are not compatibility entry points; new code should use the public API or the responsibility-specific package paths. The shared VMD Tcl template is kept as a readable Python string in `sqq/io/render/tcl_template.py`; generated render packages still contain the ordinary `*.vmd.tcl` script required by VMD.
+SQQ 0.5.5 separates public configuration and data models, parallel `core/sqq_py` and `core/sqq_cpp` scientific backends, command workflows (`init`, `analyze`, `track`, and `vmd`), runtime scheduling, I/O/reporting/rendering, and terminal UI. Retired monolithic modules are not compatibility entry points; new code should use the public API or the responsibility-specific package paths. The shared VMD Tcl template is kept as a readable Python string in `sqq/io/render/tcl_template.py`; generated render packages still contain the ordinary `*.vmd.tcl` script required by VMD.
 
 ### Python API
 
@@ -269,7 +270,7 @@ Raw-input Track currently analyzes selected frames serially: any `-w` / `--worke
 The generated file uses YAML `#` comments and canonical singular keys. The main settings are:
 
 ```yaml
-schema_version: "0.5.4"
+schema_version: "0.5.5"
 engine: py  # choices: py, cpp
 
 run:
@@ -510,7 +511,7 @@ Cage IDs are mutually exclusive across sI, sII, sH, and boundary, but adjacent c
 | isolated           | isolated     | 5        |
 ```
 
-The compact table does not include exact IDs, seeds, confidence values, water/guest membership, or domain adjacency. Add `cluster-detail` to YAML `output.type` for `summary/hydrate_domain.csv` and one-row-per-cluster `summary/hydrate_cluster_detail.csv`. Explicit `cluster-detail` or `cluster-gro` selection requires cluster search. Turning search off writes neither `cluster-detail` nor `cluster-gro` and removes stale generated cluster GRO files. Public motif output is not generated.
+The compact table does not include exact IDs, seeds, confidence values, water/guest membership, or domain adjacency. Add `cluster-detail` to YAML `output.type` for `summary/hydrate_domain.csv` and one-row-per-cluster `summary/hydrate_cluster_detail.csv`. Explicit `cluster-detail` or `cluster-gro` selection requires cluster search. Turning search off writes neither `cluster-detail` nor `cluster-gro`. Public motif output is not generated.
 
 ## Hydrate Nucleation Order Parameters
 
@@ -729,9 +730,9 @@ result_track/
 
 Target tables preserve each selected cage's complete lifecycle, not just frames in which it has the requested type or phase. Lifetime rows report left/right censoring; population rows are per selected frame; event rows include birth, death, type/phase change, split, merge, and explicit gap events; guest residence remains non-exclusive.
 
-SQQ permits only one active Analyze run per output root. A concurrent run stops before modifying results and asks for another `--output` directory. Worker fragments use a private run workspace; final render files are replaced atomically. Temporary-directory removal retries transient Linux/shared-filesystem `ENOTEMPTY`, `EBUSY`, and permission delays. If cleanup still fails, SQQ prints the retained temporary path but does not turn an otherwise completed analysis into a failure.
+Analyze and Track never merge a new run into a non-empty requested output directory. A missing or empty requested path is used directly; otherwise SQQ atomically reserves the first available sibling named `_001`, `_002`, and so on, reports the resolved path as auto-renamed, and records requested/resolved paths in run metadata. This race-safe reservation also separates concurrent runs. Worker fragments use a private run workspace; final render files are replaced atomically. Temporary-directory removal retries transient Linux/shared-filesystem `ENOTEMPTY`, `EBUSY`, and permission delays. A run-owned `.sqq.lock` is removed only after successful publication and lock release; failed or interrupted runs retain it for diagnosis.
 
-Each frame stages its Markdown, TSV, and selected GRO files privately and publishes the complete frame bundle only after every selected writer succeeds. Summary XLSX/CSV/detail files use the same recoverable publication rule. A failed write removes its staging data rather than exposing empty directories or a mixture of old and new generated files. Reusing an output root clears known SQQ artifacts from previous source names, grouped/flat layouts, and obsolete lettered topology roots, including F3/F4 output; unknown user files remain untouched.
+Each frame stages its Markdown, TSV, and selected GRO files privately and publishes the complete frame bundle only after every selected writer succeeds. Summary XLSX/CSV/detail files use the same recoverable publication rule. A failed write removes its staging data rather than exposing empty directories or a mixture of files. Existing non-empty output roots are preserved unchanged because a new sibling result root is selected before publication.
 
 Keep all four files together in `sqq_render/`, then source only the script from the VMD Tk Console:
 
@@ -747,7 +748,7 @@ sqq vmd path/to/result
 
 `sqq vmd` searches the current directory when no path is supplied. It accepts a result directory, `sqq_render/` directory, or specific `.vmd.tcl` file, lists multiple packages in stable path order, and reports missing or empty required files without launching VMD. Commands use absolute VMD/Tcl-compatible paths and Windows or POSIX terminal quoting automatically. Existing Tcl files without an embedded manifest remain readable through their declared SQQ data paths.
 
-Sourcing returns control to the Tk Console promptly, sets the background to white, prints a compact welcome, and loads the membership table plus GRO/XTC data through short event-loop tasks. `sqq help`, `sqq -h`, and `sqq --help` are available immediately; another SQQ command entered before initialization finishes reports `SQQ renderer is still loading`. Re-sourcing or a failed load uses one cleanup path to cancel pending callbacks, close the membership file, remove SQQ traces/graphics/representations, and delete only the molecule created by that SQQ script; help and the original error remain available after failure. The renderer becomes ready only after the default view and frame traces have been initialized successfully. It then reports the loaded frame count, displays the default opaque `sqq show cage all` view, and reports `SQQ graph: <effective-mode>` once. The graph line is printed again only if the effective mode changes. Use any of these equivalent commands for the full guide:
+Sourcing first prints the shared SQQ Banner and `SQQ VMD Renderer: loading files, please wait...`, then uses a tight synchronous pass to read membership data and load the GRO/XTC with VMD `waitfor all`. This avoids the slower chunk-scheduling path and the misleading empty-window `still loading` state: `source` returns only when the renderer is ready or has failed explicitly. Re-sourcing or a failed load uses one cleanup path to close handles, remove SQQ traces/graphics/representations, and delete only the molecule created by that SQQ script. After successful frame-count validation and default-view initialization, the script prints the ready frame count, default view, concise `sqq show`/`color`/`pick`/`target`/`clear` command list, and `sqq -h` entry. Use any of these equivalent commands for the full guide:
 
 ```tcl
 sqq help
@@ -817,7 +818,7 @@ Cage identifiers are persistent `tID` values when a complete Analyze/Track state
 
 In an interactive terminal, SQQ redraws the same page after all reports and render files are safely published. It retains compact `Basic Information` and `Configuration`, replaces progress with `Analysis Results` or `Tracking Results`, combines all frame counts on one row and total/analysis/output time on another, and shows mean time when meaningful. A fully successful run omits status, and the result path is not repeated because the persistent `Output` row already identifies it. Redirected output is never cleared.
 
-The final `Citation Recommendation` is a copy-ready manuscript sentence generated from one completed-feature evidence record, not merely from requested YAML settings. The terminal and summary dashboard consume that same record. For example, an applicable run may state `Cage types, populations, and guest occupancies were analyzed using SQQ.` Exact order parameters are named, VMD is mentioned only when `sqq-render` was published, occupancy is mentioned only when guests were actually available for evaluation, and Track mentions guest residence only when a multi-frame result contains guest observations. A one-frame Track result states only `Cage tracks were generated using SQQ.` Type transitions and lifetimes are claimed only for results containing at least two frames; without guest observations, that multi-frame sentence omits guest residence. Every completed page ends with the provisional publication and GitHub lines:
+The final `Citation Recommendation` uses the same concise, unbolded sentence in Analyze, Track, terminal output, and the summary home page: `Cages were identified and analyzed using SQQ.` The sentence, complete provisional Publication entry, and GitHub URL are each emitted as one logical line. When a complete render package was published, `Analysis Results` also prints adjacent absolute-path commands for the VMD Tk Console (`source {...}`) and the system terminal (`vmd -e "..."`).
 
 ```text
 Publication: J. Pang & Q. Sun, SQQ: Python Joint Toolkit for Water-Shell Topology Analysis, in submission.
@@ -853,7 +854,7 @@ When quasi-cage or cage isomers are present, the same report adds description ta
 
 `summary-xlsx` and `summary-csv` use one shared main-table builder. SQQ-Py main output contains `summary`, optional `failures`, the effective connection table, `ring`, `half_cage`, compact composition-level `quasi_cage`, `cage`, optional `hydrate_cluster`, `order_parameter`, `ice`, and `detail_index` when detail files exist. SQQ-CPP emits the applicable subset: `summary`, optional `failures`, `cage`, `order_parameter`, and optional `detail_index`. XLSX stores these as sheets; CSV stores one UTF-8-SIG file per table under `output.summary_csv_dir` (default `summary/`). `summary-detail-csv` writes `cage_occupancy.csv` and `cage_isomer.csv` for both engines, plus `quasi_cage_isomer.csv` for SQQ-Py. `cluster-detail` adds `hydrate_domain.csv` and `hydrate_cluster_detail.csv`. Main, detail, and cluster-detail CSV files share the same `summary/` directory; they have disjoint filenames and can be selected together. The first `summary` table is the compact dashboard, `failures` has one failed input/frame per row, and `detail_index` lists generated detail files. `cage_isomer.csv` defaults to observed nonzero isomer rows plus per-frame totals; YAML `output.cage_isomer_row: all` restores the zero-filled matrix. `order_parameter` contains only the selected F3, F4, Q_l, MCG, and DHOP columns; `--order-parameter none` omits it.
 
-Summary construction records rows, columns, cells, bytes, CSV/XLSX write time, formatting time, and final-save time in `sqq_config_resolved.yaml -> run.summary_write`; the terminal prints its total seconds. The mandatory output-root `sqq_config_resolved.yaml` records final SQQ version, requested engine, effective SQQ engine, requested and effective graph modes, requested and resolved workers, normalized output types, input metadata, status/failures, and summary timing. Main CSV, XLSX, detail CSV, and `sqq_config_resolved.yaml` are written to same-directory temporary files and atomically replaced on success or failure. A completed run also writes `sqq_output_manifest.json`; later cleanup removes only paths recorded as SQQ-owned and leaves unrelated files in a reused result directory untouched. XLSX sheets above 200,000 cells or 128 columns keep header styling, filter, freeze pane, and fixed column widths but skip costly body-cell formatting; scientific values and table schemas are unchanged.
+Summary construction records rows, columns, cells, bytes, CSV/XLSX write time, formatting time, and final-save time in `sqq_config_resolved.yaml -> run.summary_write`; the terminal prints its total seconds. The mandatory output-root `sqq_config_resolved.yaml` records final SQQ version, requested engine, effective SQQ engine, requested and effective graph modes, requested and resolved workers, normalized output types, input metadata, status/failures, and summary timing. Main CSV, XLSX, detail CSV, and `sqq_config_resolved.yaml` are written to same-directory temporary files and atomically replaced on success or failure. A completed run also writes `sqq_output_manifest.json`. A later invocation targeting that nonempty root selects a new numbered sibling rather than cleaning or modifying the completed result. XLSX sheets above 200,000 cells or 128 columns keep header styling, filter, freeze pane, and fixed column widths but skip costly body-cell formatting; scientific values and table schemas are unchanged.
 
 The `hydrate_cluster` main-summary table reports the mutually exclusive `classified_cage_count`, `boundary_cage_count`, `ambiguous_cage_count`, and `unclassified_cage_count`. Optional cluster-detail CSV records add the corresponding cage-id groups and `boundary_composition`; hydrate-domain CSV records expose only external boundary contacts through `external_boundary_contact_count` and `external_boundary_contact_ids`.
 

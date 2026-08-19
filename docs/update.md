@@ -1,5 +1,35 @@
 # SQQ Update Notes
 
+## Version 0.5.5
+
+### Short Summary
+
+Version 0.5.5 is a focused usability and release-maintenance update. It restores fast, synchronous VMD package loading, makes output-directory selection non-destructive, further condenses terminal output, and keeps the generated configuration self-documenting. The release is dated Aug 19, 2026 and is designated the Qixi Festival release.
+
+### Main Changes
+
+1. VMD loading and presentation
+   - Loads the GRO topology, membership metadata, XTC trajectory, default view, and public commands in one deterministic synchronous initialization; `source` returns only when the renderer is ready or has failed explicitly.
+   - Retains semantic VMD representations across frame changes so GUI-edited DynamicBonds radius, color, and material apply when moving to earlier or later frames.
+   - Prints the shared SQQ Banner at source time, followed by the ready frame count, default view, and concise command guide.
+
+2. Safe output-directory selection
+   - Uses the requested output directory when it is absent or empty. If it already exists and is nonempty, SQQ selects the first available sibling suffix `_001`, `_002`, and so on instead of cleaning or overwriting it.
+   - Shows the resolved output path in the run header and records the automatic rename in persistent metadata.
+   - Removes the run-owned `.sqq.lock` after successful completion; failed or interrupted runs retain it as diagnostic evidence.
+
+3. Compact terminal results
+   - Omits the complete progress section for a one-task execution plan and keeps the multi-task progress table bounded.
+   - Removes `Topology` and routine `Adjustments` from the terminal configuration, merges ring scope and timing fields, and prints the fixed unbolded citation sentence `Cages were identified and analyzed using SQQ.`
+   - Prints validated absolute-path `source {...}` and `vmd -e "..."` commands in completed Analyze results when an SQQ render package was published.
+
+4. Configuration and release maintenance
+   - Adds explicit `# choices:` comments to the remaining generated YAML controls, keeping configuration options discoverable without expanding the CLI.
+   - Updates the GitHub Actions used by the wheel/sdist release workflow to their Node.js 24-compatible major versions.
+   - Updates the Python package, configuration schema, native fallback, help, and documentation version to `0.5.5`, released Aug 19, 2026 (`Qixi Festival`).
+
+These changes affect output selection, renderer initialization, terminal presentation, generated configuration comments, and release automation. They do not change water-graph, ring, cage, occupancy, phase/domain, order-parameter, or Track-matching scientific definitions.
+
 ## Version 0.5.4
 
 ### Short Summary

@@ -48,7 +48,7 @@ jobs:
 
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Build and test wheels
         uses: pypa/cibuildwheel@v4.1.0
@@ -59,7 +59,7 @@ jobs:
           output-dir: wheelhouse
 
       - name: Upload wheels
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: distribution-${{ matrix.platform }}
           path: wheelhouse/*.whl
@@ -71,10 +71,10 @@ jobs:
 
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: "3.12"
 
@@ -88,7 +88,7 @@ jobs:
         run: python -m twine check dist/*.tar.gz
 
       - name: Upload source distribution
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: distribution-sdist
           path: dist/*.tar.gz
@@ -101,14 +101,14 @@ jobs:
 
     steps:
       - name: Download distributions
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v7
         with:
           pattern: distribution-*
           path: dist
           merge-multiple: true
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: "3.12"
 
