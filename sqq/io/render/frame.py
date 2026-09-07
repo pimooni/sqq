@@ -10,11 +10,10 @@ from typing import Any, Iterable, Mapping
 
 import numpy as np
 
-from ...display import graph_mode_display
-from ...models import Atom, Frame, FrameResult
-from ..gro_grouping import gro_topology_fingerprint
-from ..gro_writer import ascii_gro_text
-from ..occupancy import guest_id
+from ...models import Atom, Frame, FrameResult, guest_id
+from ...presentation.graph_mode import graph_mode_display
+from ..input.gro_grouping import gro_topology_fingerprint
+from ..output.gro_writer import ascii_gro_text
 from .models import (
     ANNOTATION_COLUMN,
     ANNOTATION_PREFIX,

@@ -29,12 +29,8 @@ class OutputLock:
     def release(self, *, remove_owned_file: bool = False) -> None:
         if self.handle.closed:
             return
-        # POSIX permits unlinking the directory entry while this process still
-        # holds flock on the open inode.  Doing so before unlock closes the
-        # acquire-between-unlock-and-unlink race.  Windows may reject deletion
-        # of an open handle, in which case the token-checked retry after close
-        # is the best available path; normal 0.5.5 runs never reuse the now
-        # non-empty output root and therefore cannot contend for it.
+        # POSIX can unlink under flock; Windows may require a token-checked
+        # retry after closing the handle.
         remove_after_close = False
         try:
             self.handle.seek(0)
@@ -130,7 +126,7 @@ def acquire_output_directory(requested: Path) -> OutputDirectorySelection:
         try:
             requested.mkdir()
         except FileExistsError:
-            # Another process claimed the requested name after our check.
+            # The requested name was claimed after the existence check.
             pass
         else:
             return _selection_for_created_directory(requested, requested, False)

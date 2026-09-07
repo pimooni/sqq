@@ -107,6 +107,9 @@ _INLINE_COMMENTS: dict[tuple[str, ...], str] = {
     ("parallel", "backend"): "choices: process, thread, serial",
     ("parallel", "worker"): "auto, integer count, fraction, or percentage",
     ("track", "guest_tiebreak"): "choices: true, false",
+    ("track", "max_gap_ps"): "ps; null disables the physical-time gap limit",
+    ("track", "ambiguity_score_margin"): "diagnostic only; does not change tID assignment",
+    ("track", "near_threshold_tolerance"): "diagnostic fractional margin, 0 to 1",
     ("debug", "use_networkx_check"): "choices: true, false",
 }
 

@@ -8,7 +8,6 @@ from pathlib import Path
 from typing import Any
 
 from .. import __version__
-from ..banner import banner_for_engine
 from ..config import (
     DEFAULT_MODE,
     is_cpp_mode,
@@ -21,10 +20,11 @@ from ..config import (
     profile_name,
     q_degrees_from_order_parameters,
 )
-from ..display import graph_mode_display, ordered_unique_graph_modes
 from ..io.reporting.tables import dashboard_cage_targets
-from ..io.trajectory import TrajectorySelection
+from ..io.input.trajectory import TrajectorySelection
+from ..presentation.graph_mode import graph_mode_display, ordered_unique_graph_modes
 from ..runtime.parallel.policy import worker_policy_text
+from .banner import banner_for_engine
 from .formatting import (
     format_started,
     format_time_zone,

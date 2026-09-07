@@ -207,13 +207,13 @@ Standalone files whose case-insensitive stems collide inside the same output roo
 
 Terminal and main-summary dashboard metadata share the same display helpers. The requested graph mode is preserved from YAML or retained CLI. Explicit graph modes display as `hbond`, `oo`, or `pairs`. Automatic graph mode is resolved during preflight from the first selected frame before the terminal header or initial resolved YAML is written. If an automatic mode is still unresolved at that boundary, the workflow fails instead of omitting the field or displaying a pending value. A compatible topology therefore displays only `auto -> hbond` or `auto -> oo` in the terminal, per-frame reports, summaries, VMD metadata, and resolved YAML. Multiple-GRO topology groups are resolved independently; when groups differ, the root terminal and manifest list one exact mode per `result_A` ... `result_Z` instead of a pending or mixed placeholder.
 
-Root `sqq` / `sqq -h` output renders the banner and the `SQQ (Shell Quant Qualifier)` product sentence, then `SQQ version: 0.5.5   Release date: Aug 19, 2026 (Qixi Festival)`, then the ordinary `usage:` line. The root command list contains `init`, `analyze`, `track`, and `vmd`. Root `sqq -v` / `sqq --version` exits successfully after printing only that version line. Subcommand help retains the standard argparse layout. Every `sqq analyze` and raw-input `sqq track` invocation prints the SQQ banner before directory creation, output locking, reader initialization, or other preflight work; the version remains in the standard `Configuration` block, so it is not duplicated. Even an early validation failure therefore has a stable first screen.
+Root `sqq` / `sqq -h` output renders the banner and the `SQQ (Shell Quant Qualifier)` product sentence, then `SQQ version: 0.5.6   Release date: Sep 7, 2026`, then the ordinary `usage:` line. The root command list contains `init`, `analyze`, `track`, and `vmd`. Root `sqq -v` / `sqq --version` exits successfully after printing only that version line. Subcommand help retains the standard argparse layout. Every `sqq analyze` and raw-input `sqq track` invocation prints the SQQ banner before directory creation, output locking, reader initialization, or other preflight work. After the live area is cleared for the completed screen, the same selector-aware banner is printed again above the final summary: ordinary `py`/`cpp` runs use the default artwork, while `-e 00` and `-e 99` retain their dedicated artwork. The version remains in the standard `Configuration` block, so it is not duplicated. Even an early validation failure therefore has a stable first screen.
 
 Analyze and raw-input Track resolve configuration, inputs, topology/group compatibility, LAMMPS mapping, and the execution plan without writing to the requested output path. The output directory, lock, cleanup, and ownership session begin only after this read-only preflight succeeds. Expected configuration, input, I/O, lock, and analysis failures are rendered by the CLI as one `Error: ...` line with exit status 2; setting `SQQ_DEBUG=1` restores the Python traceback for development.
 
 `sqq init` writes the fixed commented template to `sqq_config.yaml` by default; `sqq init -o NAME.yaml` changes only that destination. It refuses to overwrite an existing file. The template uses `#` section/choices comments and defaults `ring.size` to `[4, 5, 6]`. Analyze does not auto-read a same-named current-directory file when `-c` is omitted. User YAML is never rewritten: relative paths in it resolve from the YAML directory, while CLI paths resolve from the invocation directory. Duplicate mapping keys and unknown public keys are errors. Former inactive keys `output.gro_atom_mode` and `output.context_role`/`context_roles` are removed during legacy migration with both a warning and a recorded adjustment. `output.center_resname` remains active, accepts 1-5 non-whitespace ASCII characters, and supplies the residue name of synthetic ring, half/quasi-cage, and SQQ-Py cage-center records.
 
-Terminal headers combine the effective engine, optional special selector, and version as `SQQ: sqq-py (0.5.5)`, `sqq-cpp (0.5.5)`, `sqq-py-00 (0.5.5)`, or `sqq-cpp-99 (0.5.5)`. Per-frame information and resolved configuration retain their explicit machine-readable engine/version fields.
+Terminal headers combine the effective engine, optional special selector, and version as `SQQ: sqq-py (0.5.6)`, `sqq-cpp (0.5.6)`, `sqq-py-00 (0.5.6)`, or `sqq-cpp-99 (0.5.6)`. Per-frame information and resolved configuration retain their explicit machine-readable engine/version fields.
 
 The mandatory output-root `sqq_config_resolved.yaml` is the authoritative runtime record. It preserves normalized analysis settings and adds final effective metadata: SQQ version, requested `engine`, effective `sqq-py`/`sqq-cpp` backend, input/topology provenance, requested and effective graph modes, requested worker policy and resolved workers, backend/math threads, normalized output types, automatic adjustments, status/error, frame totals, failures, and `summary_write` timing/table dimensions. It is initialized with `status: running` before frame analysis and atomically replaced with `completed` or `failed`; a failed rewrite does not truncate the previous complete file. The detailed `config` worksheet in `summary.xlsx` and `summary/config.csv` are no longer built. Main summaries retain only the compact dashboard Configuration block. `--output-type` and YAML `output.type` are the two output selectors; removed `output.disabled_outputs` configurations are rejected rather than migrated.
 
@@ -237,32 +237,214 @@ After every selected output is safely published, an interactive TTY redraws the 
 
 Analyze and Track use one fixed recommendation in the terminal and summary dashboard: `Cages were identified and analyzed using SQQ.` The sentence is plain text, followed by the complete provisional Publication entry and GitHub URL as separate logical lines. Detailed completed-feature evidence remains in persistent metadata for reproducibility but no longer lengthens the copy-ready recommendation.
 
+## Configuration Reference
+
+`sqq init` is the authoritative configuration reference. It writes the following commented schema to `sqq_config.yaml`; SQQ refuses to overwrite an existing destination and never auto-loads or rewrites this file. Pass it explicitly with `-c`. The generated names are canonical and singular:
+
+```yaml
+schema_version: 0.5.6  # managed by SQQ
+engine: py  # choices: py, cpp; compatibility presets: 00, 99
+
+run:
+  strict: false  # choices: true, false
+
+input:
+  pattern: '*.gro'
+  recursive: false
+  first_file_time_ps: 0.0
+  frame_time_step_ps: 100.0
+  delta_time_ps: null
+  xyz_scale: 0.1
+  lammps:
+    unit: real  # choices: real, metal, nano
+    timestep: 1.0
+    atom_style: full
+    coordinate_convention: auto  # choices: auto, x, xs, xu, xsu, unscaled, scaled, unwrapped, scaled_unwrapped
+    type_map: {}
+
+component:
+  auto_classify: true
+  unknown_role: other  # choices: water, guest, additive, environment, other
+  unknown_action: warn  # choices: warn, ignore, error
+  role_map: {}
+
+additive:
+  resname: []
+
+environment:
+  resname: []
+
+water:
+  resname: [SOL, TIP, WAT, HOH]
+  oxygen_name: [OW, O, OH2]
+  hydrogen_name: [HW1, HW2, H1, H2, HW, HT1, HT2]
+
+guest:
+  resname: [CH4, CO2, MET, ETH]
+  center_atom:
+    CH4: [C]
+    CO2: [C]
+    MET: [C]
+  center_mode: center_atom  # choices: center_atom, centroid, auto
+
+graph:
+  mode: auto  # choices: auto, hbond, oo, pairs
+  oo_cutoff_nm: 0.35
+  hbond_distance_nm: 0.35
+  hbond_angle_deg: 30.0
+  pair_file: null
+  pair_id: resid  # choices: resid, oxygen_index, atomid
+
+pbc:
+  box_mode: orthorhombic
+
+ring:
+  size: [4, 5, 6]
+  report_size: auto
+  chordless: true
+  definition: chordless  # choices: chordless, shortest_path
+
+half_cage:
+  enabled: auto  # choices: auto, true, false
+
+quasi_cage:
+  search_policy: bounded  # choices: bounded, exact
+  enabled: auto  # choices: auto, true, false
+  base_size: auto
+  side_size: auto
+  max_combination_per_base: 50000
+  max_layer: 1
+  max_ring_per_layer: 6
+  max_layer_state_per_seed: 200
+  max_candidate_per_edge: 4
+  max_layer_candidate: 24
+
+cage:
+  report_type: auto
+  max_face: 20
+  enabled: true
+  search_mode: grow  # choices: grow, pair, patch_pair
+  seed_mode: ring  # choices: ring, patch
+  max_state_per_seed: 0
+  max_total_state: 0
+  max_boundary_candidate: 8
+  scientific_validation: false
+  max_face_planarity_rms_nm: 0.06
+  max_face_edge_cv: 0.35
+  min_cage_volume_nm3: 1.0e-06
+  occupancy_mode: polyhedron  # choices: polyhedron, center, auto
+  occupancy_radius_nm: 0.5
+
+hydrate_cluster:
+  enabled: false
+  min_cage: 2
+
+hydrate_order:
+  mcg_guest_resname: [CH4, MET]
+  mcg_guest_cutoff_nm: 0.9
+  mcg_water_cutoff_nm: 0.6
+  mcg_cone_half_angle_deg: 45.0
+  mcg_min_water: 5
+  dhop_neighbor_cutoff_nm: 0.35
+  dhop_planar_count: [11, 12]
+  dhop_min_qualified_neighbor: 3
+
+order_parameter:
+  enabled: [f3, f4]  # choices: f3, f4, qN, mcg1, mcg3, dhop35, dhop30, all, none
+  q_neighbor_mode: graph  # choices: graph, cutoff, nearest, lammps
+  q_cutoff_nm: 0.35
+  q_n_neighbor: null
+  focus_water: []
+
+ice:
+  enabled: true
+  method: chill
+  min_six_ring: 2
+  require_four_coord_neighbor: true
+
+output:
+  type: [info, sqq-render, summary-xlsx]
+  summary_csv_dir: summary
+  cage_isomer_row: nonzero  # choices: nonzero, all
+  write_empty_file: false
+  structure_layout: grouped  # choices: grouped, flat
+  center_resname: CNT
+
+render:
+  atom_scope: full  # choices: full, compact
+
+parallel:
+  backend: process  # choices: process, thread, serial
+  worker: auto
+  math_thread: 1
+
+track:
+  target: all
+  source: null
+  min_jaccard: 0.5
+  min_shared_fraction: 0.6
+  min_shared_water: 3
+  max_center_distance_nm: null
+  gap_frame: 0
+  max_gap_ps: null
+  guest_tiebreak: true
+  ambiguity_score_margin: 1.0
+  near_threshold_tolerance: 0.05
+
+debug:
+  use_networkx_check: false
+```
+
+Configuration precedence is `built-in defaults -> engine preset -> user YAML -> retained CLI overrides`. Unknown or duplicate YAML keys are errors. Older supported YAML spellings migrate with a warning; generated and resolved configurations always use canonical names. Former advanced CLI controls map to YAML as follows:
+
+| Former CLI setting | Canonical YAML key |
+| --- | --- |
+| `--pattern`, `--recursive`, `--strict`, `--xyz-scale` | `input.pattern`, `input.recursive`, `run.strict`, `input.xyz_scale` |
+| `--lammps-units`, `--lammps-timestep`, `--lammps-atom-style` | `input.lammps.unit`, `input.lammps.timestep`, `input.lammps.atom_style` |
+| `--ring-size`, `--ring-definition` | `ring.report_size`, `ring.definition` |
+| `--quasi-size`, `--quasi-base-size`, `--quasi-side-size`, `--quasi-max-layer`, `--quasi-search-policy` | `ring.size`; `quasi_cage.base_size`; `quasi_cage.side_size`; `quasi_cage.max_layer`; `quasi_cage.search_policy` |
+| `--cage-size`, `--max-cage-face`, `--cage-scientific-validation` | `cage.report_type`, `cage.max_face`, `cage.scientific_validation` |
+| `--cluster-min-cage` | `hydrate_cluster.min_cage` |
+| `--q-neighbor-mode`, `--q-cutoff`, `--q-n-neighbor` | `order_parameter.q_neighbor_mode`, `order_parameter.q_cutoff_nm`, `order_parameter.q_n_neighbor` |
+| `--pair-id`, `--parallel-backend` | `graph.pair_id`, `parallel.backend` |
+| `--output-layout`, `--cage-isomer-rows` | `output.structure_layout`, `output.cage_isomer_row` |
+
+`--mode`/`-m` reports that `--engine`/`-e` must be used, and `--pairs` reports that `--pair` must be used. Removed spellings are not hidden aliases. Every completed or failed run writes the effective configuration and resolution record to `sqq_config_resolved.yaml`.
+
 ## Modules
 
-SQQ 0.5.5 uses these responsibility boundaries:
+SQQ 0.5.6 uses these responsibility boundaries:
 
 ```text
 sqq/
-├ config/                 defaults, migration, resolution, and validation
-├ models/                 structure, topology, result, and tracking contracts
-├ core/
-│  ├ sqq_py/              Python frame-analysis backend
-│  ├ sqq_cpp/             Python adapter and native C++17 source in native/
-│  ├ order/               F3/F4, Steinhardt Q, MCG, and DHOP
-│  └ tracking.py          deterministic temporal matching algorithms
-├ workflow/               init, analyze, track, and vmd command flows
-├ runtime/                plans, frame tasks, workers, and execution policy
-├ io/
-│  ├ reporting/           per-frame and aggregate reports
-│  ├ render/              Analyze/Track render packages and Python Tcl template
-│  ├ tracking.py          Track state, CSV, and membership conversion
-│  └ trajectory/LAMMPS/GRO readers and writers
-└ ui/                     progress, diagnostics, final results, and citations
+|-- config/                 defaults, migration, resolution, and validation
+|-- models/                 structure, topology, result, order, and tracking contracts
+|-- presentation/           shared scientific labels, graph-mode text, occupancy, and citations
+|-- core/
+|   |-- common/             shared geometry, PBC, and molecule selection
+|   |-- sqq_py/             Python cage kernel and Python-only scientific analyses
+|   |   `-- order/          F3/F4, Steinhardt Q, MCG, and DHOP
+|   |-- sqq_cpp/            Python adapter and native C++17 cage kernel
+|   `-- tracking/           matching, snapshots, targets, and temporal statistics
+|-- workflow/
+|   |-- analyze/            Analyze planning, tracking sink, and command orchestration
+|   |-- track/              Track request, precursor, and command orchestration
+|   |-- init.py             configuration initialization
+|   `-- vmd.py              VMD-package inspection command
+|-- runtime/                contracts, dispatcher, tasks, runners, locks, and parallel execution
+|-- io/
+|   |-- input/              GRO/trajectory/LAMMPS/pair readers and topology grouping
+|   |-- output/             GRO writers and output ownership cleanup
+|   |-- reporting/          per-frame, aggregate, CSV, XLSX, and Markdown reports
+|   |-- render/             Analyze/Track render packages and Python Tcl template
+|   `-- tracking/           Track state, tables, membership conversion, and transition network
+|-- ui/                     Banner, progress, diagnostics, run headers, and final results
+`-- api.py / cli.py        stable Python API and command-line entry point
 ```
 
-The two cage kernels are peers. `sqq.core.sqq_py.analyze_frame` and `sqq.core.sqq_cpp.analyze_frame` share the normalized `Frame`, selected `Water`/`Guest`, configuration, callback, and `FrameResult` contract. Their documented capabilities remain different; the shared Python workflow applies engine normalization before dispatch and never falls back silently from C++ to Python.
+The two cage kernels are peers. `sqq.core.sqq_py.analyze_frame` and `sqq.core.sqq_cpp.analyze_frame` share the normalized `Frame`, selected `Water`/`Guest`, configuration, callback, and `FrameResult` contract. Their documented capabilities remain different; the shared dispatcher applies engine normalization before dispatch and never falls back silently from C++ to Python.
 
-`workflow/init.py`, `workflow/analyze.py`, `workflow/track.py`, and `workflow/vmd.py` are parallel command entry points. Workflow code owns orchestration and final publication; scientific acceptance remains in `core`, serialization remains in `io`, scheduling remains in `runtime`, and terminal-only presentation remains in `ui`. The C++17 implementation and pybind11 bindings live below `core/sqq_cpp/native`, so native and Python backends are visibly parallel while wheel builds still compile one `_sqq_cpp` extension.
+`workflow/init.py`, `workflow/analyze/`, `workflow/track/`, and `workflow/vmd.py` are parallel command entry points. Workflow code owns orchestration and final publication; scientific acceptance remains in `core`, serialization remains in `io`, scheduling remains in `runtime`, shared scientific wording remains in `presentation`, and terminal-only behavior remains in `ui`. The C++17 implementation and pybind11 bindings live below `core/sqq_cpp/native`, so native and Python backends are visibly parallel while wheel builds still compile one `_sqq_cpp` extension.
 
 The shared VMD renderer is stored as a readable raw string in `io/render/tcl_template.py`; no standalone Tcl source file is tracked or packaged. Python supplies the generated manifest, actual filenames, molecule name, and synchronized help body when publishing Analyze or Track scripts. The published render package still contains the ordinary `*.vmd.tcl` file required by VMD, with the same content and command interface as before. `workflow/vmd.py` owns the public `sqq vmd` flow; render discovery, validation, and file generation remain I/O responsibilities.
 
@@ -270,14 +452,17 @@ The public Python surface is `sqq.load_config`, `sqq.read_frames`, and `sqq.anal
 
 Important implementation modules remain:
 
-- `core/graph.py`, `ring.py`, `ring_topology.py`, and `components.py`: water graph, ring search, sparse ring incidence, and shared deterministic component traversal.
-- `core/half_quasi.py`, `cage.py`, and `phase.py`: open patches, exact closed cages, and frame-local hydrate phase/domain classification.
-- `core/order/{f3f4,steinhardt,mcg,dhop}.py` and `core/ice.py`: order parameters and ice classification.
-- `core/tracking.py`: persistent-ID matching, events, lifetimes, targets, and streaming accumulation.
-- `io/trajectory.py` and `io/lammps.py`: normalized coordinate/topology readers.
-- `io/tracking.py`: versioned Track state, normalized tables, target selection, and persistent membership conversion.
+- `core/common/{geometry,pbc,selection}.py`: engine-neutral geometry, boundary handling, and molecule selection.
+- `core/sqq_py/{graph,ring,ring_topology,components}.py`: water graph, ring search, sparse ring incidence, and deterministic component traversal.
+- `core/sqq_py/{half_quasi,cage,phase,ice}.py` and `core/sqq_py/order/`: Python open-patch, cage, phase, ice, and order-parameter analyses.
+- `core/sqq_cpp/`: native cage implementation and its Python adapter.
+- `core/tracking/{engine,snapshot,targets,statistics}.py`: persistent-ID matching, compact frame state, target filtering, events, and lifetimes.
+- `io/input/{trajectory,lammps,pairs,gro_grouping}.py` and `io/output/`: normalized readers, structure writers, and owned-output cleanup.
+- `io/reporting/tables/`: frame records, summary dashboards, detail tables, and table formatting.
+- `io/tracking/{state,network}.py`: versioned Track state, normalized tables, target selection, persistent membership conversion, and directed transition networks.
 - `io/render/tracking.py`: target render discovery, validation, naming, and publication.
-- `ui/final_results.py` and `ui/run_statistics.py`: final-page wording and measured run statistics.
+- `runtime/{dispatcher,task,runner,session}.py` and `runtime/parallel/`: shared execution boundary and scheduling.
+- `ui/{banner,final_results,run_statistics}.py`: terminal artwork, final-page wording, and measured run statistics.
 
 ### Stable Python API
 
@@ -327,7 +512,7 @@ The equivalent CLI is `--order-parameter f3,f4`. Supported names are `f3`, `f4`,
 
 The pre-0.2.7 selectors `--no-q`, `-q` / `--q-degree`, `--mcg3`, and `--dhop30` are removed rather than retained as hidden compatibility options. Descriptor selection is expressed only through retained `--order-parameter` or YAML `order_parameter.enabled`.
 
-F3 and F4 follow the project reference implementation and use the active water graph as the neighbor map.
+F3 and F4 use the active water graph as the neighbor map.
 
 F3 and F4 are independently selectable. If only `f3` is selected, F4 is neither calculated nor written, and conversely for `f4`.
 
@@ -340,7 +525,7 @@ Ybar_lm(i) = (1 / Nb(i)) * sum_j Y_lm(theta_ij, phi_ij)
 Q_l(i)     = sqrt(4*pi / (2*l + 1) * sum_m |Ybar_lm(i)|^2)
 ```
 
-The implementation is independent Python code and does not copy LAMMPS source. It uses unweighted oxygen-neighbor bond vectors and the same rotationally invariant normalization as LAMMPS `compute orientorder/atom`. Q_l is opt-in in 0.2.7: selecting `q6,q12` computes the former default degree pair, while `q4,q6,q8,q10,q12` selects the common LAMMPS degree list.
+The implementation uses unweighted oxygen-neighbor bond vectors and the same rotationally invariant normalization as LAMMPS `compute orientorder/atom`. Q_l is opt-in in 0.2.7: selecting `q6,q12` computes the former default degree pair, while `q4,q6,q8,q10,q12` selects the common LAMMPS degree list.
 
 Neighbor modes:
 
@@ -349,7 +534,7 @@ Neighbor modes:
 - `nearest`: use the nearest `order_parameter.q_n_neighbor` water oxygens within `order_parameter.q_cutoff_nm`.
 - `lammps`: LAMMPS-compatible cutoff plus fixed-neighbor behavior; if `order_parameter.q_n_neighbor` is null, it defaults to `12`.
 
-The non-graph modes reuse the deterministic orthorhombic/non-periodic cell-list pair search from `sqq/core/spatial.py` rather than scanning every O-O pair. Distances and vectors are still recomputed with the shared float64 minimum-image function and sorted deterministically.
+The non-graph modes reuse the deterministic orthorhombic/non-periodic cell-list pair search from `sqq/core/sqq_py/spatial.py` rather than scanning every O-O pair. Distances and vectors are still recomputed with the shared float64 minimum-image function and sorted deterministically.
 
 When a fixed neighbor count is active and fewer than that number of neighbors are found inside the cutoff, every requested Q_l value is set to `0.0`, matching LAMMPS behavior. If this shortfall affects at least half of the selected waters in `nearest` or `lammps` mode, SQQ emits one frame-level summary warning with the affected and total counts. The warning does not add neighbors, widen the cutoff, or change any Q_l value. Without a fixed neighbor count, waters with no Q_l neighbors are omitted from the Q_l mean and count.
 
@@ -361,7 +546,7 @@ MCG/DHOP are opt-in frame-local descriptors and are separate from the cage-topol
 
 ### Shared spatial search
 
-`sqq/core/spatial.py` supplies deterministic self- and cross-cutoff pairs. For an orthorhombic box, coordinates are wrapped into cells whose widths are at least the cutoff; only the 27 neighboring cells are inspected. Candidate distances are recomputed in float64 with the same minimum-image function used elsewhere. Pairs are deduplicated and sorted, so process/serial output and tie breaking are stable. Non-periodic input uses the same cell scheme without wrapping. No fixed atom or neighbor array is used.
+`sqq/core/sqq_py/spatial.py` supplies deterministic self- and cross-cutoff pairs. For an orthorhombic box, coordinates are wrapped into cells whose widths are at least the cutoff; only the 27 neighboring cells are inspected. Candidate distances are recomputed in float64 with the same minimum-image function used elsewhere. Pairs are deduplicated and sorted, so process/serial output and tie breaking are stable. Non-periodic input uses the same cell scheme without wrapping. No fixed atom or neighbor array is used.
 
 ### MCG-1 and MCG-3
 
@@ -609,7 +794,7 @@ Engine values `00` and `py` with resolved cluster search can run cluster analysi
 
 Hydrate_cluster uses `result.all_cages`, the complete detected cage set in the selected ring/search scope. YAML `cage.report_type` filters cage counts, occupancy, GRO, Markdown cage tables, and main-summary cage columns only; it does not filter the cluster graph or phase evidence. Cluster hierarchy/detail/domain records resolve cage IDs against the same complete set, so an unreported cage can remain topologically necessary without appearing in the report-scoped cage table.
 
-The high-level hierarchy is informed by HTR+ ([DOI 10.1088/1361-648X/ad52df](https://doi.org/10.1088/1361-648X/ad52df)): classify hydrate type and polycrystalline boundaries on a cage-connection graph. SQQ does not copy the HTR+ implementation; it uses the explicit shared-face fingerprints and deterministic domain rules below.
+The high-level hierarchy classifies hydrate type and polycrystalline boundaries on a cage-connection graph using the explicit shared-face fingerprints and deterministic domain rules below; related scientific context is described in [DOI 10.1088/1361-648X/ad52df](https://doi.org/10.1088/1361-648X/ad52df).
 
 ### Physical shared-face cage graph
 
@@ -763,34 +948,42 @@ Public motif output is not generated in the current development version. The com
 
 ## Cross-Frame Cage Tracking
 
-Tracking is a temporal identity layer over the accepted closed cages of each selected frame. It does not change the water graph, ring set, cage search, cage type, occupancy, or hydrate phase/domain assignment. Each frame is reduced to a compact snapshot containing frame/time/source, orthorhombic box, frame-local cage ID, canonical cage type, sorted face-size topology, stable member-water identities, wrapped cage center, phase labels, and non-exclusive guest IDs. A water identity is its one-based topology atom position, not the width-limited serial stored in a GRO atom record.
+Tracking is one shared temporal identity layer over the accepted closed cages produced by SQQ-Py or SQQ-CPP in each selected frame. It does not change the water graph, ring set, cage search, cage type, occupancy, or hydrate phase/domain assignment. Each frame is reduced to a compact snapshot containing frame/time/source, orthorhombic box, frame-local cage ID, canonical cage type, sorted face-size topology, stable member-water identities, wrapped cage center, phase labels, and non-exclusive guest IDs. A water identity is its one-based topology atom position, not the width-limited serial stored in a GRO atom record.
 
 ### Persistent identity
 
 Candidate generation is sparse by water identity: an inverted current-frame water-to-cage map counts shared waters only for pairs that actually overlap. A pair must satisfy all configured minimums for shared-water count, Jaccard similarity, and shared fraction relative to the smaller cage. `max_center_distance_nm`, when non-null, is an additional orthorhombic minimum-image guard. Face-size multiset similarity, center proximity, and optional guest similarity rank surviving candidates; guest continuity contributes only a small tie-break term and cannot create a candidate without sufficient water overlap.
 
-One deterministic maximum-weight bipartite assignment selects the global one-to-one continuation set rather than accepting cage pairs greedily. Stable snapshot sorting and assignment tie handling give newly born cages persistent IDs `t1`, `t2`, ... in deterministic order. A compatible cage retains its ID through cage-type or phase-label changes. Frame-local cage IDs remain stored in observation metadata for auditability.
+One deterministic maximum-weight bipartite assignment selects the global one-to-one continuation set rather than accepting cage pairs greedily. Disconnected components of the sparse candidate graph are solved independently because no admissible edge crosses them; each local matrix retains the same global match bonus, blocked cost, dummy columns, row order, and column order. A 1x1 component still compares its candidate cost with the dummy cost instead of being accepted unconditionally. The result is mathematically identical to the dense formulation for every valid configuration while avoiding a frame-wide dense matrix. Stable snapshot sorting and assignment tie handling give newly born cages persistent IDs `t1`, `t2`, ... in deterministic order. A compatible cage retains its ID through cage-type or phase-label changes. Frame-local cage IDs remain stored in observation metadata for auditability.
 
-`track.gap_frame` counts consecutive selected frames in which a cage may be absent. The default `0` expires an unmatched cage immediately. A positive value keeps a dormant state for at most that many selected frames; any later match records the exact gap on the observation and emits a `gap` event. Snapshot indexes must remain consecutive, so an analyzed frame with no cages is represented explicitly as an empty snapshot and cannot disappear from the time axis.
+Every accepted continuation also stores diagnostic evidence without changing the candidate gates, score, assignment, or persistent ID. The diagnostic set comprises the number of qualifying alternatives sharing either endpoint, assigned and runner-up scores, their margin, configured-threshold margins, near-threshold status, and gap evidence. `track.ambiguity_score_margin` and `track.near_threshold_tolerance` classify a match as `secure`, `ambiguous`, or `gap_bridge`; classification has no break policy and therefore cannot alter `tID` assignment.
+
+`track.gap_frame` counts consecutive selected frames in which a cage may be absent. The default `0` expires an unmatched cage immediately. A positive value keeps a dormant state for at most that many selected frames; any later match records the exact gap on the observation and emits a `gap` event. Optional `track.max_gap_ps` additionally rejects a proposed bridge when the elapsed physical time between its bounding observations exceeds the limit. It is `null` by default and requires physical time on every selected frame when enabled. Snapshot indexes must remain consecutive, so an analyzed frame with no cages is represented explicitly as an empty snapshot and cannot disappear from the time axis.
 
 ### Events, lifetime, and guest residence
 
-Track events are `birth`, `death`, `type_change`, `phase_change`, `split`, `merge`, and `gap`. Births in the first selected frame and tracks still active in the last selected frame are marked left/right censored. An uncensored death ends at the first absent selected frame rather than the last frame in which the cage was seen. `cage_track.csv` stores one lifetime sample per persistent cage; `lifetime_distribution.csv` aggregates exact frame/time samples and reports censoring counts. Population rows report total, cage-type, and phase counts for every selected frame.
+Raw Track events are `birth`, `death`, `type_change`, `phase_change`, `gap`, guest/occupancy changes, and split/merge candidates. Resolved type and phase changes require directly consecutive cage observations. When the same persistent shell is recovered after one or more permitted missing-cage frames, changed labels are instead stored as `type_change_unresolved` or `phase_change_unresolved`, with the gap length/time and censoring evidence; no event time is invented inside the gap.
 
-Guest residence is calculated as contiguous observation episodes within a persistent cage. A cage gap splits an episode even if the same guest is present before and after it. One guest may contribute residence episodes to multiple cages because occupancy itself is non-exclusive.
+A split or merge is first recorded as `split_candidate` or `merge_candidate` with water-conservation, PBC-aware center-displacement, and topology evidence. Overlap produced by neighboring cages that retain their own persistent IDs is marked `candidate_stable_neighbors`, while branches lacking the configured number of source/target waters unique to that branch are marked `candidate_shared_water_only`; neither status is confirmable. A supported candidate becomes `split_confirmed` or `merge_confirmed` only after every assigned destination shell again satisfies the unchanged water-overlap, topology, and optional center-distance criteria in the next selected frame. Confirmation therefore requires independent branch-water contribution and one-additional-frame persistence. It remains conservative lineage evidence rather than a mechanistic reaction assignment, and primary Hungarian matching is unchanged.
+
+Births in the first selected frame and tracks still active in the last selected frame are left/right censored. Physical disappearance occurs somewhere after the last observed sample and no later than the first absent sample, so it is interval-bounded rather than assigned an exact time. `observed_span_ps` is last-observed minus first-observed time. `lifetime_lower_ps` is that observed span. `lifetime_upper_ps` is the interval from the selected frame preceding first observation to the selected frame following last observation when both bounds exist; otherwise it is null. `occupancy_time_ps` is a sampled-state integral: interior samples use half the preceding plus half the following time interval, while an endpoint sample uses its one adjacent interval. A one-frame input has zero measurable sampled duration. `gap_time_ps` sums elapsed observation-to-observation spans across accepted explicit bridges. The compatibility `lifetime_ps` retains its former first-observation-to-first-absence convention.
+
+`lifetime_distribution.csv` remains a descriptive distribution of compatibility duration samples and is not labeled censor-aware. `statistics/lifetime_survival.csv` reports two discrete-time endpoint-convention tables on the selected-frame grid. `first_absence` places a completed lifetime at its first absent selected frame (the interval upper endpoint and compatibility `lifetime_ps` convention); `last_observed` places it at its last observed frame (the interval lower endpoint). These are bracketing sensitivity estimates, not a claim that the unobserved continuous death time is exact. Right-censored tracks enter at their observed lower duration; left-censored tracks and samples without physical time are excluded and counted explicitly. Both tables report Greenwood variance, standard error, and bounded 95% normal-approximation intervals.
+
+Guest identity sets are compared only between directly consecutive observations of one water-shell track. SQQ emits `guest_enter`, `guest_exit`, or `guest_exchange`, plus empty/single/multiple occupancy-class changes and the exact before/after identity composition. A changed guest set across an accepted cage gap becomes `unresolved_across_gap`, because its event time cannot be assigned. Guest residence lifetime and exact occupancy-state residence use the same observed-span, interval-bound, sampled-time, and censoring conventions as cage lifetime. A recognition gap splits the visible residence into separate segments; the adjacent segment boundaries are reported as `left_gap_unresolved`/`right_gap_unresolved`, their finite visible spans remain lower bounds, and `residence_lifetime_upper_ps` is null rather than treating a missing cage as proof of guest absence. One guest can contribute residence lifetimes to several cages because the underlying polyhedron occupancy is non-exclusive; guest changes never create a cage `tID`.
 
 ### Analyze integration
 
-Analyze has a dedicated tracking sink independent of optional rendering. It converts each successful `FrameResult` immediately to a compact snapshot and feeds one `TrackingAccumulator` per topology group; it does not retain all frame results. For every complete selected-frame sequence, Analyze writes `track_state.json` and six normalized CSV tables under `track/`, whether or not `sqq-render` is selected. When rendering is enabled, the completed persistent-ID result is passed to `RenderSession`, which atomically rewrites cage-center (`C`) and cage-membership (`M`) TSV records before publication. A failed frame never gets silently compressed out of a continuous trajectory: that topology group's persistent state is skipped with a diagnostic while already valid per-frame scientific outputs remain available.
+Analyze has a dedicated tracking sink independent of optional rendering. A worker reduces each successful `FrameResult` to a compact snapshot before publishing its frame files and transfers the snapshot instead of the complete result; it does not retain all frame results. Snapshot-validation errors are carried separately from the scientific task status: Analyze preserves valid per-frame output and disables only that topology group's persistent state, whereas raw Track treats the same error as fatal. For every complete selected-frame sequence, Analyze writes `track_state.json`, six compatibility CSV tables, additive statistics, and a cage-type transition network under `track/`, whether or not `sqq-render` is selected. When rendering is enabled, the completed persistent-ID result is passed to `RenderSession`, which atomically rewrites cage-center (`C`) and cage-membership (`M`) TSV records before publication. A failed frame never gets silently compressed out of a continuous trajectory: that topology group's persistent state is skipped with a diagnostic while already valid per-frame scientific outputs remain available.
 
-The versioned JSON state contains frame stamps, configuration, tracks/observations, and events. Schema version 2 is written; version 1 can be migrated on read. A future matching configuration cannot be retroactively applied in `--source` mode because the assignments have already been made; Track reports the stored settings.
+The versioned JSON state contains frame stamps, configuration, tracks/observations, events, and optional render-source provenance. Schema version 4 is written. Schema 2/3 observations can recover threshold margins and partial status diagnostics only from their archived evidence and archived thresholds. Schema 1 did not archive effective thresholds, so its raw evidence remains readable but threshold-dependent diagnostics stay `unavailable`; current defaults are never substituted retroactively. Migration also converts an archived type/phase change whose destination observation bridges a gap into the corresponding unresolved event. A future matching configuration cannot be retroactively applied in `--source` mode because the assignments have already been made; Track reports the stored settings.
 
 ### Track workflow and targets
 
 `sqq track` has two mutually exclusive data paths:
 
 - raw `-i` input reuses Analyze readers, frame selection, engine dispatch, and `-dt`, then tracks the resulting stream;
-- `--source` imports an existing 0.5.1 Analyze `track/track_state.json` and its complete `sqq_render/` bundle without rerunning frame science.
+- `--source` imports an existing Analyze `track/track_state.json` and its complete `sqq_render/` bundle without rerunning frame science.
 
 Source mode reads the Analyze engine from `sqq_config_resolved.yaml`, preserves the original `sqq-py` or `sqq-cpp` identity in terminal and newly resolved metadata, and applies C++ half/quasi capability normalization when the source engine is SQQ-CPP.
 
@@ -798,17 +991,19 @@ Source mode reads the Analyze engine from `sqq_config_resolved.yaml`, preserves 
 sqq track --source ./result_sqq --target all -o ./result_track
 ```
 
-With neither option, exactly one state is discovered from the current directory. Raw Track accepts one trajectory or one stacked GRO because its target is one physical time series. It is currently serial: `-w` / `--worker` is normalized to one and the backend to `serial`. Track has a fixed configuration/state/CSV/target-render output set; `--output-type` does not alter it. A source containing several topology groups must be narrowed to one `result_A`/`result_B` directory.
+With neither option, exactly one state is discovered from the current directory. Raw Track accepts one trajectory or one stacked GRO because its target is one physical time series. Before frame analysis, it resolves the exact effective time used at runtime for every selected frame: stored reader time takes precedence, while a missing time uses `input.first_file_time_ps + raw_frame_index * input.frame_time_step_ps`. The complete effective sequence must be finite and nondecreasing, so mixed stored/fallback time metadata cannot fail only after an expensive prefix has run. Raw Track is currently serial: `-w` / `--worker` is normalized to one and the backend to `serial`. Track has a fixed configuration/state/CSV/target-render output set; `--output-type` does not alter it. A source containing several topology groups must be narrowed to one `result_A`/`result_B` directory.
 
 `--target` accepts `all`, canonical or compact cage types, `sI`/`sII`/`sH`/boundary categories, and persistent IDs. A phase target automatically resolves `find_cluster` to `on` and requires SQQ-Py; SQQ-CPP phase targets fail before analysis. Source mode cannot add phase labels retroactively, so imported state must already contain them. Comma-separated mixed targets are de-duplicated and written to independent `all/`, `type_<type>/`, `phase_<phase>/`, or `cage_<tID>/` directories. Type and phase targets include the full lifecycle of any track that matched at least once, permitting residence and transition analysis outside the matching frames. Persistent-ID targets validate that the requested ID exists. A generated Track renderer passes its complete initial target-ID list to one view update, so target count does not multiply complete redraws.
 
-The run-level `track/` directory contains state plus `cage_observation.csv`, `cage_track.csv`, `cage_event.csv`, `cage_population.csv`, `guest_residence.csv`, and `lifetime_distribution.csv`. Each target directory contains filtered copies, `track_info.md`, and `sqq_render/{sqq_track.gro,sqq_track.xtc,sqq_track.membership.tsv,sqq_track.vmd.tcl}`. A raw-input persistent-ID target with pre-birth frames uses two passes: the first establishes its cross-frame `tID`; the second reanalyzes only the required prefix through the birth frame, follows the birth-cage water set backwards through dispersed, connected, ring, half/quasi, and cage states, writes `precursor_state.csv` and `water_history.csv`, and adds precursor membership to that target's VMD package. A target already present in the first selected frame has no precursor interval. Imported state lacks full pre-cage graph/ring/patch objects and writes an explicit unavailable record instead.
+The run-level `track/` directory contains state plus `cage_observation.csv`, `cage_track.csv`, `cage_event.csv`, `cage_population.csv`, `guest_residence.csv`, and `lifetime_distribution.csv`. `statistics/` adds `tracking_quality.csv`, `lifetime_survival.csv`, `cage_lineage.csv`, `guest_event.csv`, `guest_residence_lifetime.csv`, `occupancy_state_lifetime.csv`, and `occupancy_transition.csv`. `network/` always contains directed node/edge CSV tables; an optional PNG is written only when transitions exist and Matplotlib is usable. Reciprocal cage-type directions remain separate. Edge rates use accumulated directly observed source-state exposure, never first-to-last event span. Each target directory contains target-filtered copies of these tables, `track_info.md`, and `sqq_render/{sqq_track.gro,sqq_track.xtc,sqq_track.membership.tsv,sqq_track.vmd.tcl}`. A raw-input persistent-ID target with pre-birth frames uses two passes: the first establishes its cross-frame `tID`; the second reanalyzes only the required prefix through the birth frame, follows the birth-cage water set backwards through dispersed, connected, ring, half/quasi, and cage states, writes `precursor_state.csv` and `water_history.csv`, and adds precursor membership to that target's VMD package. A target already present in the first selected frame has no precursor interval. Imported state lacks full pre-cage graph/ring/patch objects and writes an explicit unavailable record instead.
 
 The shared Tcl renderer recognizes persistent IDs in both Analyze and Track packages. `sqq target save` atomically writes the current selected ID or comma-separated IDs to `sqq_target.txt` beside the render files for reuse in a later `--target` command.
 
 ### Streaming and validation
 
-The accumulator retains frame stamps, normalized observations, events, and only active/dormant cage states; it does not retain the snapshot sequence. The 10,000-frame regression completed in about 5 seconds with roughly 10 MiB traced Python peak allocation and 57 MiB peak process working set on the validation host. Scientific tests cover membership change, orthorhombic PBC translation, type/phase change, birth/death, split/merge, guest episodes, deterministic IDs, exact `-dt` selection, gap 0/1, state/CSV round trips, source/raw CLI, and mixed targets. Both Track paths finish through the shared final `Tracking Results` and feature-aware `Citation Recommendation` page described above.
+The accumulator retains frame stamps, normalized observations, events, and only active/dormant cage states; it does not retain the snapshot sequence. Immutable observation views and derived table inputs are computed once per result, without a process-wide unbounded cache of parsed track IDs. A new Analyze render source stores SHA-256 identities for its four files together with atom count, fixed-topology atom identity, component signature, selected-frame/time mapping, persistent cage mapping, and Track-configuration identity. Source Track validates the Tcl manifest, nonempty files, GRO/XTC atom agreement, XTC/membership/state frame agreement, topology-stable guest atom membership, frame times, cage identities, and saved provenance before any target package is published. Legacy states without provenance receive the same structural and semantic validation but cannot provide cryptographic source binding.
+
+Validation covers stable and ambiguous matches, physical/frame gaps, PBC translation, resolved and gap-unresolved type/phase changes, shared-neighbor exclusion, candidate/confirmed lineage, guest entry/exit/exchange, gap-censored occupancy residence, interval/censoring fields, directed reciprocal transitions, deterministic IDs, and v1/v2/v3/v4 state migration. Both Track paths finish through the shared final `Tracking Results` page described above.
 
 ## Guest Occupancy
 
@@ -869,7 +1064,7 @@ sqq_render/
   sqq_cage.vmd.tcl          # VMD loader and interactive commands
 ```
 
-Every completed Analyze sequence owns the following tracking state and six CSV tables independently of `sqq-render`:
+Every completed Analyze sequence owns the following tracking state, compatibility tables, and additive statistics independently of `sqq-render`:
 
 ```text
 track/
@@ -880,6 +1075,18 @@ track/
   cage_population.csv
   guest_residence.csv
   lifetime_distribution.csv
+  statistics/
+    tracking_quality.csv
+    lifetime_survival.csv
+    cage_lineage.csv
+    guest_event.csv
+    guest_residence_lifetime.csv
+    occupancy_state_lifetime.csv
+    occupancy_transition.csv
+  network/
+    cage_transition_nodes.csv
+    cage_transition_edges.csv
+    cage_transition_network.png  # optional
 ```
 
 For 2-26 topology groups, the requested root owns the batch manifest and each `result_<letter>/` owns the corresponding group files, including its own `sqq_render/` when selected. Per-frame Markdown and optional membership/order TSV files are routed to the group's `info/`; selected structure output is routed below `gro/<frame>/`. The same separation rule applies to serial and process-parallel trajectory frames. If `summary-xlsx` and `summary-csv` are both selected, `summary.xlsx` and `summary/` coexist in the same group root.
@@ -894,7 +1101,7 @@ Every newly generated Analyze Tcl embeds a comment-only JSON render-package mani
 
 `sqq vmd -h` adds locator usage above the same command guide printed by Tcl `sqq help`, `sqq -h`, and `sqq --help`; one Python definition generates both outputs.
 
-`sqq_cage.vmd.tcl` resolves its neighboring files relative to the script path and validates the four-file package before renderer initialization. Sourcing prints the shared SQQ Banner, performs one synchronous membership pass, loads the GRO and XTC with VMD `waitfor all`, validates the frame counts, constructs the default view, and returns only after the renderer is ready or has failed explicitly. This avoids event-loop scheduling overhead and the misleading interval in which VMD appeared idle while no molecule had been loaded. One disposal path closes handles, removes SQQ traces/graphics/representations, and deletes a molecule only when the script owns it. Re-sourcing invokes that path before installing new state. Initialization failure preserves its original error after disposal. Successful initialization prints the ready frame count, default view, concise public command list, and `sqq -h` entry. The user keeps all four files together and sources only the Tcl script:
+`sqq_cage.vmd.tcl` resolves its neighboring files relative to the script path and validates the four-file package before renderer initialization. Sourcing prints the shared SQQ Banner followed by `SQQ VMD Renderer: loading files, please wait...`, performs one synchronous membership pass, loads the GRO and XTC with VMD `waitfor all`, validates the frame counts, constructs the default view, and returns only after the renderer is ready or has failed explicitly. This avoids event-loop scheduling overhead and the misleading interval in which VMD appeared idle while no molecule had been loaded. One disposal path closes handles, removes SQQ traces/graphics/representations, and deletes a molecule only when the script owns it. Re-sourcing invokes that path before installing new state. Initialization failure preserves its original error after disposal. Successful initialization prints the ready frame count, default view, concise public command list, and `sqq -h` entry. The user keeps all four files together and sources only the Tcl script:
 
 ```tcl
 source {path/to/result/sqq_render/sqq_cage.vmd.tcl}
@@ -914,7 +1121,21 @@ sqq help | sqq -h | sqq --help
 
 Families are `cage`, `guest`, `phase`, `cluster`, `domain`, and `component`. In `show`, every family token begins a group and consumes at least one following target up to the next family token; one command may therefore contain several additive groups, such as `sqq show cage 512 guest 512 phase sI`. Cage targets are `all`, a canonical/generic cage label, its delimiter-free alias, or an exact persistent ID such as `t133`; fallback frame-local IDs remain readable when a partial sequence cannot publish Track state. Guest targets reuse the cage target namespace and mean guests assigned to all cages, to a cage type, or to one exact cage ID. Phase accepts `all`, `sI`, `sII`, `sH`, `boundary`, `ambiguous`, `unclassified`, and `isolated`; cluster/domain accept `all` or exact frame-local IDs. Component accepts `all`, `water`, `guest`, `additive`, `environment`, `other`, or an exact residue name. `sqq show component ...` and `sqq color component ...` expose full-frame context without changing the startup view, which remains opaque `sqq show cage all` with context hidden. `color` deliberately remains a one-family command. Bare inferred forms from 0.3.4 remain removed.
 
-The renderer stores the active view as deduplicated family/target state. On source or reset, it contains a synthetic, replaceable `cage all` default. The first `sqq show ...` replaces the default; each later `show` merges every supplied family group without clearing existing layers. Labels are an independent state and default off; `sqq show label` toggles them unless an explicit `on`/`off` is supplied. `sqq pick center` and `sqq pick guest` are mutually exclusive modes. Center mode draws one yellow graphics sphere and pickpoint for each current-frame cage center and enters VMD Atom Label mode, because Query mode only prints information and does not dispatch the graphics callback required by SQQ. The callback tag is read from VMD pickpoint metadata instead of assuming it equals the graphics ID. Selecting a yellow center identifies the exact cage, while water-atom clicks are ignored. Guest mode enters VMD Pick mode, maps any picked guest atom to its complete molecule, then highlights the molecule and every cage membership; a guest with no cage membership clears the transient selection and is not highlighted. Both modes make the unselected context transparent. A persistent yellow DynamicBonds layer highlights selected cages, while guest mode adds a persistent orange CPK layer for the selected guest. Pick callbacks update these layers with `mol modselect` and do not delete the representation currently owned by VMD's mouse event. `sqq target save` atomically writes the selected persistent cage ID or IDs to `sqq_target.txt`. `off` leaves pick mode. A frame change clears the transient selection and rebuilds the current-frame centers, guest map, and view while retaining the chosen pick mode. `sqq clear` removes custom selection, color, label, and pick state and restores opaque `cage all`.
+Unknown cage, exact cage-ID, guest-selection, cluster-ID, and domain-ID targets are checked against the complete loaded trajectory and rejected. A recognized phase name remains valid when the current frame has no matching members. If cluster analysis was not run, valid phase/cluster/domain category selections simply return no membership.
+
+Default cage colors are stable:
+
+| Cage type | VMD ColorID | Default color |
+| --- | ---: | --- |
+| `5¹²` | 7 | Green |
+| `5¹²6²` | 0 | Blue |
+| `5¹²6³` | 1 | Red |
+| `5¹²6⁴` | 3 | Orange |
+| `5¹²6⁸` | 11 | Purple |
+| `4³5⁶6³` | 10 | Cyan |
+| Other cage types | 2 | Gray |
+
+The renderer stores the active view as deduplicated family/target state. On source or reset, it contains a synthetic, replaceable `cage all` default. The first `sqq show ...` replaces the default; each later `show` merges every supplied family group without clearing existing layers. Labels are an independent state and default off; `sqq show label` toggles them unless an explicit `on`/`off` is supplied. `sqq pick center` and `sqq pick guest` are mutually exclusive modes. Center mode draws one yellow graphics sphere and pickpoint for each current-frame cage center and enters VMD Atom Label mode, because Query mode only prints information and does not dispatch the graphics callback required by SQQ. The callback tag is read from VMD pickpoint metadata instead of assuming it equals the graphics ID. Selecting a yellow center identifies the exact cage, while water-atom clicks are ignored. Guest mode enters VMD Pick mode, maps any picked guest atom to its complete molecule, then highlights the molecule and every cage membership; a guest with no cage membership clears the transient selection and is not highlighted. Both modes make the unselected context transparent. A persistent yellow DynamicBonds layer highlights selected cages, while guest mode adds a persistent orange CPK layer for the selected guest. Pick callbacks update these layers with `mol modselect` and do not delete the representation currently owned by VMD's mouse event. `sqq target save` atomically writes the selected persistent cage ID or IDs to `sqq_target.txt`. `sqq pick off` leaves SQQ pick mode but does not restore the previous VMD mouse mode. A frame change clears the transient selection and rebuilds the current-frame centers, guest map, and view while retaining the chosen pick mode. `sqq clear` removes custom selection, color, label, and pick state and restores opaque `cage all`.
 
 Multi-atom guests retain the complete molecule, and one guest may belong to several cages. Cage representations use DynamicBonds; guest representations use CPK. Cage and guest colors have independent override maps. Cross-family rendering always follows `phase -> cluster -> domain -> cage -> guest`, so guests remain visible regardless of command order. This family order is separate from the cage-topology order: a single cage layer uses a 0.125 angstrom cylinder radius (0.250 angstrom diameter); multiple cage layers remain bounded from 0.125 through 0.130 angstrom and are ordered as nonstandard below `512 < 51262 < 51263 < 51264 < 435663 < 51268`, with exact-ID highlights last. Cage identifiers use persistent Track IDs when state publication succeeds; cluster and domain identifiers remain frame-local.
 

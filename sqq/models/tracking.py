@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from functools import cached_property
 import re
 from typing import Iterable, Literal, Mapping
 
@@ -14,10 +15,27 @@ EventKind = Literal[
     "death",
     "type_change",
     "phase_change",
+    "type_change_unresolved",
+    "phase_change_unresolved",
     "gap",
+    # ``split``/``merge`` remain readable for pre-0.5.6 track-state files.
     "split",
     "merge",
+    "split_candidate",
+    "merge_candidate",
+    "split_confirmed",
+    "merge_confirmed",
+    "guest_enter",
+    "guest_exit",
+    "guest_exchange",
+    "occupancy_change",
+    "empty_to_occupied",
+    "occupied_to_empty",
+    "single_to_multiple",
+    "multiple_to_single",
+    "unresolved_across_gap",
 ]
+MatchStatus = Literal["unavailable", "new", "secure", "ambiguous", "gap_bridge"]
 TargetKind = Literal["all", "cage_type", "phase", "track"]
 Row = dict[str, object]
 
@@ -26,6 +44,7 @@ __all__ = [
     "CageTrack",
     "EventKind",
     "FrameStamp",
+    "MatchStatus",
     "Row",
     "TargetKind",
     "TargetSelection",
@@ -73,9 +92,23 @@ class TrackingConfig:
     min_shared_waters: int = 3
     max_center_distance_nm: float | None = None
     gap_frame: int = 0
+    max_gap_ps: float | None = None
     guest_tiebreak: bool = True
+    ambiguity_score_margin: float = 1.0
+    near_threshold_tolerance: float = 0.05
 
     def __post_init__(self) -> None:
+        # YAML ``true``/``false`` must not be silently promoted to 1.0/0.0.
+        for name in (
+            "min_jaccard",
+            "min_shared_fraction",
+            "max_center_distance_nm",
+            "max_gap_ps",
+            "ambiguity_score_margin",
+            "near_threshold_tolerance",
+        ):
+            if isinstance(getattr(self, name), bool):
+                raise ValueError(f"{name} must be a number, not true/false.")
         for name in ("min_jaccard", "min_shared_fraction"):
             value = float(getattr(self, name))
             if not np.isfinite(value) or not 0.0 <= value <= 1.0:
@@ -100,8 +133,23 @@ class TrackingConfig:
         if gap != self.gap_frame or gap < 0:
             raise ValueError("gap_frame must be a nonnegative integer.")
         object.__setattr__(self, "gap_frame", gap)
+        if self.max_gap_ps is not None:
+            maximum_gap = float(self.max_gap_ps)
+            if not np.isfinite(maximum_gap) or maximum_gap <= 0.0:
+                raise ValueError("max_gap_ps must be finite and positive when provided.")
+            object.__setattr__(self, "max_gap_ps", maximum_gap)
         if not isinstance(self.guest_tiebreak, bool):
             raise ValueError("guest_tiebreak must be true or false.")
+        ambiguity_margin = float(self.ambiguity_score_margin)
+        if not np.isfinite(ambiguity_margin) or ambiguity_margin < 0.0:
+            raise ValueError("ambiguity_score_margin must be finite and nonnegative.")
+        object.__setattr__(self, "ambiguity_score_margin", ambiguity_margin)
+        tolerance = float(self.near_threshold_tolerance)
+        if not np.isfinite(tolerance) or not 0.0 <= tolerance <= 1.0:
+            raise ValueError(
+                "near_threshold_tolerance must be finite and between 0 and 1."
+            )
+        object.__setattr__(self, "near_threshold_tolerance", tolerance)
 
     @classmethod
     def from_mapping(cls, values: Mapping[str, object] | None) -> "TrackingConfig":
@@ -116,14 +164,28 @@ class TrackingConfig:
             "min_shared_waters",
             "max_center_distance_nm",
             "gap_frame",
+            "max_gap_ps",
             "guest_tiebreak",
+            "ambiguity_score_margin",
+            "near_threshold_tolerance",
         }
         unknown = sorted(set(values).difference(supported))
         if unknown:
             raise ValueError(
                 "Unsupported tracking configuration field(s): " + ", ".join(unknown)
             )
+        for name in (
+            "min_jaccard",
+            "min_shared_fraction",
+            "max_center_distance_nm",
+            "max_gap_ps",
+            "ambiguity_score_margin",
+            "near_threshold_tolerance",
+        ):
+            if isinstance(values.get(name), bool):
+                raise ValueError(f"{name} must be a number, not true/false.")
         maximum = values.get("max_center_distance_nm")
+        maximum_gap = values.get("max_gap_ps")
         return cls(
             min_jaccard=float(values.get("min_jaccard", 0.50)),
             min_shared_fraction=float(values.get("min_shared_fraction", 0.60)),
@@ -132,8 +194,15 @@ class TrackingConfig:
                 None if maximum in (None, "") else float(maximum)
             ),
             gap_frame=values.get("gap_frame", 0),  # type: ignore[arg-type]
+            max_gap_ps=(
+                None if maximum_gap in (None, "") else float(maximum_gap)
+            ),
             guest_tiebreak=_strict_mapping_bool(
                 values.get("guest_tiebreak", True), "guest_tiebreak"
+            ),
+            ambiguity_score_margin=float(values.get("ambiguity_score_margin", 1.0)),
+            near_threshold_tolerance=float(
+                values.get("near_threshold_tolerance", 0.05)
             ),
         )
 
@@ -144,7 +213,10 @@ class TrackingConfig:
             "min_shared_waters": self.min_shared_waters,
             "max_center_distance_nm": self.max_center_distance_nm,
             "gap_frame": self.gap_frame,
+            "max_gap_ps": self.max_gap_ps,
             "guest_tiebreak": self.guest_tiebreak,
+            "ambiguity_score_margin": self.ambiguity_score_margin,
+            "near_threshold_tolerance": self.near_threshold_tolerance,
         }
 
 
@@ -311,9 +383,25 @@ class CageObservation:
     guest_ids: tuple[str, ...]
     match_jaccard: float | None = None
     match_shared_fraction: float | None = None
+    match_shared_waters: int | None = None
     match_center_distance_nm: float | None = None
     match_topology_similarity: float | None = None
+    match_candidate_count: int = 0
+    match_score: float | None = None
+    match_runner_up_score: float | None = None
+    match_score_margin: float | None = None
+    match_jaccard_margin: float | None = None
+    match_shared_fraction_margin: float | None = None
+    match_shared_waters_margin: int | None = None
+    match_center_distance_margin_nm: float | None = None
+    match_near_threshold: bool = False
+    match_status: MatchStatus = "unavailable"
+    # ``computed`` for live diagnostics, ``migrated_partial`` when thresholds
+    # and partial evidence were both archived, and empty for births or legacy
+    # observations whose threshold-dependent diagnosis is not recoverable.
+    match_diagnostic_source: str = ""
     gap_frames: int = 0
+    gap_time_ps: float | None = None
 
 
 @dataclass(frozen=True)
@@ -350,7 +438,18 @@ class TrackEvent:
     source_phases: tuple[str, ...] = ()
     destination_phases: tuple[str, ...] = ()
     gap_frames: int = 0
+    gap_time_ps: float | None = None
     censored: bool = False
+    guest_ids_entered: tuple[str, ...] = ()
+    guest_ids_exited: tuple[str, ...] = ()
+    source_occupancy: str = ""
+    destination_occupancy: str = ""
+    guest_composition_before: tuple[str, ...] = ()
+    guest_composition_after: tuple[str, ...] = ()
+    evidence_status: str = ""
+    water_conservation: float | None = None
+    center_distance_nm: float | None = None
+    persistence_frames: int = 0
 
     @property
     def track_ids(self) -> tuple[str, ...]:
@@ -363,8 +462,11 @@ class TrackingResult:
     tracks: tuple[CageTrack, ...]
     events: tuple[TrackEvent, ...]
     config: TrackingConfig = field(default_factory=TrackingConfig)
+    source_provenance: Mapping[str, object] = field(default_factory=dict)
 
-    @property
+    # The frozen instance never changes, so the sorted view is computed once
+    # instead of on every table builder that consumes it.
+    @cached_property
     def observations(self) -> tuple[CageObservation, ...]:
         rows = (item for track in self.tracks for item in track.observations)
         return tuple(sorted(rows, key=_observation_sort_key))
@@ -389,7 +491,7 @@ class TargetSelection:
     events: tuple[TrackEvent, ...]
     config: TrackingConfig = field(default_factory=TrackingConfig)
 
-    @property
+    @cached_property
     def observations(self) -> tuple[CageObservation, ...]:
         rows = (item for track in self.tracks for item in track.observations)
         return tuple(sorted(rows, key=_observation_sort_key))
@@ -419,7 +521,11 @@ def _track_number(track_id: str) -> int:
 
 
 def _observation_sort_key(item: CageObservation) -> tuple[int, int, str]:
-    return item.frame_index, _track_number(item.track_id), item.local_cage_id
+    return (
+        item.frame_index,
+        _track_number(item.track_id),
+        item.local_cage_id,
+    )
 
 
 def _as_sequence(value: object, label: str) -> tuple[object, ...]:

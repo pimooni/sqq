@@ -64,7 +64,7 @@ def read_frames(
         topology_path = (
             None if topology is None else Path(topology).expanduser()
         )
-        from .io.trajectory import read_frames as read_input_frames
+        from .io.input.trajectory import read_frames as read_input_frames
 
         yield from read_input_frames(
             paths,
@@ -92,7 +92,7 @@ def analyze_frame(
     try:
         resolved = _coerce_config(config, engine=engine)
         mutable_config = resolved.to_mutable_dict()
-        from .runtime.frame import analyze_frame as analyze_input_frame
+        from .runtime.dispatcher import analyze_frame as analyze_input_frame
 
         result = analyze_input_frame(
             frame,
@@ -174,7 +174,7 @@ def _input_paths(
             raise InputError("Input source must be a path or iterable of paths.") from exc
     if not raw:
         raise InputError("Input source contains no paths.")
-    from .io.trajectory import expand_inputs
+    from .io.input.trajectory import expand_inputs
 
     if len(raw) == 1:
         return expand_inputs(raw[0], pattern, recursive)

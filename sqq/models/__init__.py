@@ -1,5 +1,14 @@
 """Stable public data-model API."""
 
+from .cage_type import (
+    CAGE_REPORT_GROUPS,
+    KNOWN_CAGE_TYPES,
+    TARGET_FACE_COUNTS,
+    cage_type_for_counts,
+    canonical_cage_face_label,
+    canonical_cage_type,
+    parse_cage_face_label,
+)
 from .order import ClusterOrderValue, F3F4Result, HydrateOrderResult, WaterOrder
 from .phase import HydrateCluster, HydrateDomain, HydrateMotif
 from .result import FrameResult
@@ -10,6 +19,7 @@ from .tracking import (
     CageTrack,
     EventKind,
     FrameStamp,
+    MatchStatus,
     Row,
     TargetKind,
     TargetSelection,
@@ -22,6 +32,9 @@ from .tracking import (
 )
 
 __all__ = [
+    "CAGE_REPORT_GROUPS",
+    "KNOWN_CAGE_TYPES",
+    "TARGET_FACE_COUNTS",
     "Atom",
     "Frame",
     "Water",
@@ -49,7 +62,12 @@ __all__ = [
     "TargetSpec",
     "TargetSelection",
     "EventKind",
+    "MatchStatus",
     "Row",
     "TargetKind",
     "guest_id",
+    "cage_type_for_counts",
+    "canonical_cage_face_label",
+    "canonical_cage_type",
+    "parse_cage_face_label",
 ]

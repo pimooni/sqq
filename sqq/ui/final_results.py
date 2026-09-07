@@ -1,10 +1,4 @@
-"""Build the final SQQ terminal results screen.
-
-This module deliberately has no dependency on the Analyze workflow, pandas, or
-the output writers.  Callers pass the resolved run metadata, resolved
-configuration, and a small mapping of final statistics.  Values in
-``statistics`` take precedence over their legacy ``run_info`` equivalents.
-"""
+"""Build the final SQQ terminal results screen."""
 
 from __future__ import annotations
 
@@ -17,8 +11,9 @@ from pathlib import Path
 from typing import Any, TextIO
 
 from .. import __version__
-from ..citation import build_citation_recommendation
 from ..io.render.inspect import inspect_render_script, render_launch_commands
+from ..presentation.citation import build_citation_recommendation
+from .banner import banner_for_engine
 from .formatting import format_started
 from .run_header import (
     compact_additional_search,
@@ -46,14 +41,10 @@ def render_final_results(
     *,
     ansi: bool = True,
 ) -> str:
-    """Return the complete final terminal screen without a trailing newline.
+    """Return the final terminal screen without a trailing newline.
 
-    Canonical statistic keys are ``requested_frames``, ``analyzed_frames``,
-    ``successful_frames``, ``failed_frames``, ``total_seconds``,
-    ``analysis_seconds``, ``write_seconds``, ``status``, and ``result_path``.
-    Current ``run_info`` spellings remain accepted as fallbacks.  Optional
-    ``executed_features``, ``executed_order_parameters``, and
-    ``completed_outputs`` entries make citation generation authoritative.
+    Final statistics override equivalent run metadata.  Optional execution
+    metadata controls feature-aware citation text.
     """
     _require_mapping("run_info", run_info)
     _require_mapping("config", config)
@@ -61,7 +52,11 @@ def render_final_results(
 
     totals = _result_totals(run_info, statistics)
     track_run = _is_track_run(run_info)
-    lines: list[str] = [_bold("Basic Information", ansi)]
+    lines: list[str] = [
+        banner_for_engine(_engine_selector(run_info, config)),
+        "",
+        _bold("Basic Information", ansi),
+    ]
     _append_basic_information(lines, run_info, config)
 
     lines.extend(["", _bold("Configuration", ansi)])
@@ -98,6 +93,9 @@ def render_final_results(
         _add_present_field(lines, "Tracks", _lookup(run_info, "track_count"))
     if totals["status"] not in {"completed", "ok", "successful"} or totals["failed"]:
         _add_field(lines, "Status", totals["status"])
+    failure_preview = _failure_preview(run_info)
+    if failure_preview:
+        _add_field(lines, "Failures", failure_preview)
 
     diagnostics = _diagnostic_messages(statistics)
     if diagnostics:
@@ -112,6 +110,23 @@ def render_final_results(
     lines.append(f"  {citation.publication}")
     lines.append(f"  {citation.github}")
     return "\n".join(lines)
+
+
+def _failure_preview(run_info: Mapping[str, Any]) -> str:
+    """Return the first per-frame failure so the reason is visible on screen."""
+    raw = run_info.get("failures", ())
+    if not isinstance(raw, Iterable) or isinstance(raw, (str, bytes, Mapping)):
+        return ""
+    failures = [item for item in raw if isinstance(item, Mapping)]
+    if not failures:
+        return ""
+    first = failures[0]
+    frame = " ".join(str(first.get("frame", "")).split())
+    error = " ".join(str(first.get("error", "")).split()) or "analysis failed"
+    preview = f"{frame}: {error}" if frame else error
+    if len(failures) > 1:
+        preview += f"; +{len(failures) - 1} more (see sqq_config_resolved.yaml)"
+    return preview
 
 
 def _diagnostic_messages(statistics: Mapping[str, Any]) -> tuple[str, ...]:
@@ -287,7 +302,7 @@ def _append_configuration(
     run_info: Mapping[str, Any],
     config: Mapping[str, Any],
 ) -> None:
-    selector = _first(_lookup(run_info, "engine_selector"), _lookup(config, "mode"), "py")
+    selector = _engine_selector(run_info, config)
     _add_field(
         lines,
         "SQQ",
@@ -383,7 +398,7 @@ def _append_track_configuration(
     if not isinstance(track_config, Mapping):
         track_config = {}
 
-    selector = _first(_lookup(run_info, "engine_selector"), _lookup(config, "mode"), "py")
+    selector = _engine_selector(run_info, config)
     _add_field(
         lines,
         "SQQ",
@@ -407,12 +422,18 @@ def _append_track_configuration(
         3,
     )
     gap = _first(track_config.get("gap_frame"), 0)
+    gap_ps = _first(track_config.get("max_gap_ps"), "none")
+    gap_display = (
+        f"{gap} frames; no ps limit"
+        if str(gap_ps).casefold() == "none"
+        else f"{gap} frames / {gap_ps} ps"
+    )
     _add_field(
         lines,
         "Track matching",
         (
             f"Jaccard >={jaccard}; shared >={shared_fraction} / "
-            f"{shared_water} waters; gap {gap} frames"
+            f"{shared_water} waters; gap {gap_display}"
         ),
     )
     maximum_distance = _first(
@@ -423,16 +444,30 @@ def _append_track_configuration(
         lines,
         "Track options",
         (
-            f"center distance {maximum_distance} nm; guest tie-break "
-            f"{_on_off(_as_bool(track_config.get('guest_tiebreak'), True))}"
+            f"center {maximum_distance} nm; guest tie-break "
+            f"{_on_off(_as_bool(track_config.get('guest_tiebreak'), True))}; "
+            f"ambiguity margin {track_config.get('ambiguity_score_margin', 1.0)}"
         ),
     )
-    _add_field(lines, "Output", "Track CSV, sqq-render")
+    _add_field(lines, "Output", "Track tables, statistics, network, sqq-render")
 
 
 def _is_track_run(run_info: Mapping[str, Any]) -> bool:
     command = _lookup(run_info, "command")
     return command is not _MISSING and str(command).strip().lower() == "track"
+
+
+def _engine_selector(
+    run_info: Mapping[str, Any], config: Mapping[str, Any]
+) -> str:
+    """Return the original CLI-compatible selector used by the run banner."""
+    selector = _first(
+        _lookup(run_info, "engine_selector"),
+        _nested_lookup(config, "run", "engine_selector"),
+        _lookup(config, "mode"),
+        "py",
+    )
+    return str(selector).strip().lower() or "py"
 
 
 def _result_totals(

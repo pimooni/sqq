@@ -12,7 +12,16 @@ def native_available() -> bool:
     return True
 
 
+def require_native() -> None:
+    """Raise the standard SQQ-CPP availability error before any frame runs.
+
+    Workflows call this once in preflight so a missing or mismatched native
+    extension fails immediately instead of failing every frame individually.
+    """
+    _load_native_module()
+
+
 analyze_frame = analyze_frame_cpp
 
 
-__all__ = ["analyze_frame", "analyze_frame_cpp", "native_available"]
+__all__ = ["analyze_frame", "analyze_frame_cpp", "native_available", "require_native"]

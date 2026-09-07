@@ -8,9 +8,9 @@ import sys
 from pathlib import Path
 
 from . import __release_date__, __version__
-from .banner import HELP_BANNER
 from .config import ORDER_PARAMETER_CHOICES
 from .exceptions import SQQError
+from .ui.banner import HELP_BANNER
 from .workflow.analyze import analyze
 from .workflow.init import initialize_config
 from .workflow.track import track
@@ -323,9 +323,13 @@ def main(argv: list[str] | None = None) -> int:
 
 
 def _run_user_command(command, args: argparse.Namespace) -> int:
-    """Render expected user errors as one line unless debugging is enabled."""
+    """Render expected user errors as one line unless debugging is enabled.
+
+    A command may return its own non-zero status (Analyze does so when every
+    requested frame failed); ``None`` means success.
+    """
     try:
-        command(args)
+        status = command(args)
     except (
         SQQError,
         OSError,
@@ -337,7 +341,7 @@ def _run_user_command(command, args: argparse.Namespace) -> int:
         message = " ".join(str(exc).split()) or type(exc).__name__
         _write_cli_error(f"Error: {message}\n")
         return 2
-    return 0
+    return int(status or 0)
 
 
 def _debug_enabled() -> bool:

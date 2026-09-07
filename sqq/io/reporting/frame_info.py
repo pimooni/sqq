@@ -17,10 +17,13 @@ from ...config import (
     output_enabled,
     q_degrees_from_order_parameters,
 )
-from ...core.cage import parse_cage_face_label
-from ...display import graph_mode_display
+from ...models.cage_type import parse_cage_face_label
 from ...models import CagePatch, FrameResult
-from ..occupancy import guest_composition_label, guest_lookup as build_guest_lookup
+from ...presentation.graph_mode import graph_mode_display
+from ...presentation.occupancy import (
+    guest_composition_label,
+    guest_lookup as build_guest_lookup,
+)
 from .tables import (
     atom_resname_counts,
     cage_display_label,
@@ -1010,6 +1013,8 @@ def write_membership(result: FrameResult, frame_dir: Path) -> None:
             }
         )
     data = pd.DataFrame(rows)
+    # The staging directory exists only when an earlier writer created it.
+    frame_dir.mkdir(parents=True, exist_ok=True)
     data.to_csv(frame_dir / f"{result.frame.name}_membership.tsv", sep="\t", index=False)
 
 
@@ -1045,6 +1050,7 @@ def write_order_parameter(
         if q_degrees:
             row["q_neighbors"] = item.q_neighbors
         rows.append(row)
+    frame_dir.mkdir(parents=True, exist_ok=True)
     pd.DataFrame(rows).to_csv(path, sep="\t", index=False)
 
 

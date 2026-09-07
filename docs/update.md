@@ -1,5 +1,57 @@
 # SQQ Update Notes
 
+## Version 0.5.6
+
+### Short Summary
+
+Version 0.5.6 extends the existing water-shell-first `sqq track` analysis with matching-quality diagnostics, interval-aware duration reporting, conservative candidate/confirmed lineage events, directed cage-type transition statistics, guest/occupancy dynamics, and provenance-bound source validation. The deterministic candidate gates, scoring formula, Hungarian assignment, and default persistent `tID` results are preserved. It introduces no VMD command or rendering change. The release is dated Sep 7, 2026.
+
+### Main Changes
+
+1. Matching audit without identity changes
+   - Records qualifying-candidate count, assigned/runner-up score and margin, acceptance-threshold margins, near-threshold state, and physical/frame gap evidence for every accepted continuation.
+   - Classifies accepted matches as `secure`, `ambiguous`, or `gap_bridge` using `track.ambiguity_score_margin` and `track.near_threshold_tolerance`; both settings are diagnostic only.
+   - Adds observation-level `statistics/tracking_quality.csv` and per-track minimum/mean evidence plus ambiguity/gap counts to `cage_track.csv`.
+
+2. Duration and censoring definitions
+   - Separates observed frames/span, sampled occupancy time, lifetime lower/upper bounds, frame/physical gaps, left/right censoring, and duration status. The compatibility `lifetime_ps` column remains available with its former sampled endpoint convention.
+   - Treats an ordinary disappearance as interval-bounded between selected observations instead of an exact physical death time.
+   - Adds optional `track.max_gap_ps`; its default `null` preserves frame-only gap behavior.
+   - Treats guest and exact-occupancy residence boundaries adjacent to a recognition gap as unresolved lower bounds, with explicit left/right gap flags and no invented finite upper lifetime.
+   - Keeps `lifetime_distribution.csv` descriptive and adds two discrete-time endpoint-convention tables to `statistics/lifetime_survival.csv`: `first_absence` uses the interval upper endpoint and `last_observed` the lower endpoint. Left-censored and time-unavailable samples are excluded and counted explicitly; right-censored samples remain in the risk set through their observed lower duration.
+
+3. Temporal events and aggregate networks
+   - Replaces newly generated undifferentiated split/merge events with `split_candidate`/`merge_candidate` evidence and one-additional-frame `split_confirmed`/`merge_confirmed` events. Archived state containing legacy `split`/`merge` remains readable.
+   - Prevents ordinary persistent-neighbor overlap and shared-water-only branches from becoming confirmed lineage; confirmation rechecks destination water shells, topology, independent branch contributions, and optional PBC-aware distance.
+   - Separates directly observed `type_change`/`phase_change` from `type_change_unresolved`/`phase_change_unresolved` across permitted cage-recognition gaps.
+   - Adds `statistics/cage_lineage.csv` and directed `network/cage_transition_nodes.csv`/`cage_transition_edges.csv`; reciprocal directions remain independent and rates use directly observed source-state exposure.
+   - Writes `network/cage_transition_network.png` only when transitions exist and an optional plotting backend is usable; the CSV representation is unconditional.
+
+4. Guest and occupancy dynamics
+   - Compares topology-stable guest IDs across directly consecutive observations and records entry, exit, exchange, exact identity-composition change, and empty/single/multiple occupancy changes.
+   - Marks changes across an allowed cage gap as `unresolved_across_gap` rather than assigning a false event time.
+   - Adds `statistics/guest_event.csv`, `guest_residence_lifetime.csv`, `occupancy_state_lifetime.csv`, and `occupancy_transition.csv`, including explicit gap-censored residence boundaries and using the existing non-exclusive polyhedron occupancy definition.
+
+5. Compatibility and output ownership
+   - Advances Track state to schema 4. Schema 2/3 recovers partial diagnostics only from archived thresholds and evidence; schema 1 preserves raw evidence but leaves threshold-dependent diagnosis unavailable because its effective thresholds were not archived. Archived cross-gap changes migrate to unresolved events.
+   - Binds newly generated Analyze state to the complete render source through SHA-256 file identities plus topology, component, atom-count, frame/time, cage-identity, and Track-configuration fingerprints. Source Track validates the package before writing target output; legacy states remain structurally validated.
+   - Writes the additive `statistics/` and `network/` directories at run level and inside every independently filtered Track target directory.
+   - Leaves raw per-frame cage recognition, phase labels, guest occupancy assignment, rendering, and the primary Track identity algorithm unchanged.
+
+6. Robustness and scalability
+   - Solves disconnected candidate components independently without changing the global assignment contract; the 1x1 fast path retains the same candidate-versus-dummy decision as the dense solver.
+   - Transfers compact Track snapshots from workers instead of complete frame results. Snapshot validation is separate from scientific frame status: Analyze preserves valid frame output and omits only the affected Track state, while raw Track fails.
+   - Validates the complete effective raw-Track time sequence before analysis, including mixed stored and configured fallback times.
+   - Preflights the SQQ-CPP native extension once before output creation, returns status 1 when every Analyze frame fails, and shows the first failure on the final page; partial non-strict success remains status 0.
+   - Builds Track table inputs once, removes the unbounded parsed-track-ID cache, keeps `track_info.md` replacement crash-safe under the run-owned output lock, and inspects source XTC files without writing an offsets cache.
+
+7. Code structure
+   - Optimized the code structure.
+
+8. Release metadata
+   - Updates the Python package, configuration schema, native fallback, help, README, and design documentation to `0.5.6`, released Sep 7, 2026.
+   - Reprints the same selector-aware SQQ Banner above the completed terminal summary, including the dedicated `-e 00` and `-e 99` variants.
+
 ## Version 0.5.5
 
 ### Short Summary
@@ -350,7 +402,7 @@ Version 0.4.1 replaces the memory-amplifying cage-state representation in both S
 
 6. Release and provenance
    - Synchronizes `pyproject.toml`, Python package metadata, YAML schema, CMake project, and native-core version at `0.4.1` with release date Aug 1, 2026.
-   - Documents the sparse search as an independent SQQ implementation of standard graph-incidence and backtracking techniques. No TRACE or other `ref_code` source is copied into SQQ.
+   - Documents the sparse search as an independent SQQ implementation of standard graph-incidence and backtracking techniques.
 
 ### Compatibility and Result Impact
 
@@ -1406,8 +1458,8 @@ Version 0.2.3 adds true process-based multi-core analysis for independent GRO/XY
 2. Corrected and bounded implementation
    - MCG accepts five **or more** coordinating waters, builds connectivity only from qualifying MCG edges, and applies MCG-1/MCG-3 as one-pass degree filters before deterministic connected components.
    - DHOP evaluates each undirected central O-O bond once, accumulates the equivalent directed-center counts for both endpoints, accepts counts 11 or 12, applies the three-qualified-neighbor criterion, includes the first neighbor shell, and reports the largest tagged-water component.
-   - Orthorhombic-PBC cutoff candidates use deterministic cell lists followed by exact float64 minimum-image checks. Dynamic adjacency sets remove the fixed neighbor and atom-index array limits in the reference companion program.
-   - The implementation intentionally does not copy the companion code's hard-coded residue names, O(N^2) loops, uninitialized arrays, exactly-five-water MCG test, truncated Perl neighbor readers, or non-qualifying guest-distance links.
+   - Orthorhombic-PBC cutoff candidates use deterministic cell lists followed by exact float64 minimum-image checks. Dynamic adjacency sets remove fixed neighbor and atom-index array limits.
+   - Configurable residue selection, bounded spatial search, initialized dynamic state, at-least-five-water MCG qualification, and qualifying guest-distance links replace fixed assumptions.
 
 3. Output and compatibility
    - Per-frame `*_info.md` adds `Hydrate Nucleation Order Parameters` immediately after the existing F3/F4/Q_l section, reporting largest cluster size and member type. An unavailable MCG guest selection is `N/A`, distinct from a valid zero-sized cluster.

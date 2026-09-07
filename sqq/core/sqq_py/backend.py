@@ -10,19 +10,19 @@ from ...config import (
     q_degrees_from_order_parameters,
 )
 from ...models import Cage, CagePatch, Frame, FrameResult, Guest, HydrateOrderResult, Water
-from ..cage import find_cages
-from ..graph import build_water_graph
-from ..phase import analyze_hydrate_clusters
-from ..ice import classify_ice_waters
-from ..order import (
+from .cage import find_cages
+from .graph import build_water_graph
+from .phase import analyze_hydrate_clusters
+from .ice import classify_ice_waters
+from .order import (
     compute_dhop_order,
     compute_mcg_order,
     compute_order_parameters,
     fixed_neighbor_shortfall_warning,
 )
-from ..half_quasi import find_cage_patches
-from ..ring import find_rings
-from ..ring_topology import build_ring_topology_index
+from .half_quasi import find_cage_patches
+from .ring import find_rings
+from .ring_topology import build_ring_topology_index
 
 
 def analyze_frame(

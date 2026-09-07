@@ -1,9 +1,9 @@
 """Public namespace for the SQQ-Py scientific kernel."""
 
-from ..cage import find_cages
-from ..graph import build_water_graph
-from ..half_quasi import find_cage_patches
-from ..ring import find_rings
+from .cage import find_cages
+from .graph import build_water_graph
+from .half_quasi import find_cage_patches
+from .ring import find_rings
 from .backend import (
     analyze_frame,
     analyze_frame_py,

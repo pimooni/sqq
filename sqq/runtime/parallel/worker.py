@@ -7,7 +7,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
-from ...io.lammps import (
+from ...io.input.lammps import (
     LAMMPS_TRAJECTORY_SUFFIXES,
     LammpsInputConfig,
     close_lammps_universe,
@@ -16,14 +16,14 @@ from ...io.lammps import (
     normalize_lammps_config,
     open_lammps_universe,
 )
-from ...io.trajectory import (
+from ...io.input.trajectory import (
     close_mdanalysis_universe,
     frame_from_mdanalysis_universe,
     open_mdanalysis_universe,
     trajectory_atom_metadata,
 )
 from ..contracts import FrameTask, RunContext, TaskOutcome
-from ..frame_task import execute_frame_task
+from ..task import execute_frame_task
 from .events import QueueStageEmitter
 
 

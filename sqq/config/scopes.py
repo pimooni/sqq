@@ -70,7 +70,7 @@ def normalize_analysis_scopes(config: dict[str, Any]) -> None:
     raw_lammps = input_config.get("lammps", {})
     if not isinstance(raw_lammps, dict):
         raise ValueError("input.lammps must be a mapping.")
-    from ..io.lammps import normalize_lammps_config
+    from ..io.input.lammps import normalize_lammps_config
 
     lammps_values = dict(raw_lammps)
     settings = normalize_lammps_config(lammps_values)
@@ -417,7 +417,7 @@ def normalize_analysis_scopes(config: dict[str, Any]) -> None:
     order["parameters"] = list(
         normalize_order_parameters(order.get("parameters", ["f3", "f4"]))
     )
-    from ..core.order.steinhardt import normalize_q_neighbor_mode, resolve_q_neighbor_count
+    from ..core.sqq_py.order.steinhardt import normalize_q_neighbor_mode, resolve_q_neighbor_count
 
     q_neighbor_mode = normalize_q_neighbor_mode(str(order.get("q_neighbor_mode", "graph")))
     order["q_neighbor_mode"] = q_neighbor_mode
@@ -598,7 +598,7 @@ def resolve_cage_report_types(
     max_faces: int,
 ) -> tuple[str, ...] | None:
     """Resolve report groups/types; auto/all return every cage in the search scope."""
-    from ..core.cage import (
+    from ..models.cage_type import (
         CAGE_REPORT_GROUPS,
         TARGET_FACE_COUNTS,
         canonical_cage_type,

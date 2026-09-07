@@ -149,6 +149,7 @@ class RunProgressDisplay:
         include_patch_stage: bool = True,
         unit: str = "Frames",
         execution: str | None = None,
+        title: str = "Analysis Progress",
     ) -> None:
         self.total = total
         self.total_started_at = total_started_at
@@ -159,6 +160,7 @@ class RunProgressDisplay:
         self.failed = 0
         self.unit = str(unit or "Frames")
         self.execution = str(execution).strip() if execution else ""
+        self.title = str(title or "Analysis Progress")
         self.current_index: int | None = None
         self.current_file = "waiting"
         self.stage = "waiting"
@@ -251,7 +253,7 @@ class RunProgressDisplay:
             if self._last_static_state is not None and self.completed < self.total:
                 return
             if self._last_static_state is None:
-                self._stream.write("Analysis Progress\n")
+                self._stream.write(f"{self.title}\n")
                 if self.execution:
                     self._stream.write(
                         terminal_field_line("Execution", self.execution) + "\n"
@@ -287,7 +289,7 @@ class RunProgressDisplay:
         connector_indent = " " * (TERMINAL_LABEL_WIDTH + 2)
         height = shutil.get_terminal_size(fallback=(120, 40)).lines
         if height < 24:
-            lines = ["Analysis Progress"]
+            lines = [self.title]
             if self.execution:
                 lines.append(terminal_field_line("Execution", self.execution))
             lines.extend([
@@ -295,7 +297,7 @@ class RunProgressDisplay:
                 terminal_field_line("Stage / total", self._compact_time_text()),
             ])
         else:
-            lines = ["Analysis Progress"]
+            lines = [self.title]
             if self.execution:
                 lines.append(terminal_field_line("Execution", self.execution))
             if self.total > 1:

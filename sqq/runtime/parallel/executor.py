@@ -19,7 +19,7 @@ from typing import Any
 from ...io.render import RenderSession
 from ...io.reporting import failed_row
 from ..contracts import FrameTask, RunPlan, TaskOutcome, TaskStatus
-from ..frame_task import execute_frame_task
+from ..task import execute_frame_task
 from .events import EventSink, StageEventKind, drain_stage_events, emit_event
 from .policy import (
     limited_math_threads,

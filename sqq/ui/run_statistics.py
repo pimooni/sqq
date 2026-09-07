@@ -5,8 +5,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Mapping
 
-from ..citation import completed_citation_evidence
 from ..config import normalize_output_types
+from ..presentation.citation import completed_citation_evidence
 
 
 def completed_run_statistics(

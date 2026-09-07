@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from ...banner import SQQ_BANNER
+from ...ui.banner import SQQ_BANNER
 from .manifest import render_manifest_block
 from .models import (
     RenderFileReference,

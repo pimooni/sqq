@@ -6,7 +6,7 @@ from copy import deepcopy
 from typing import Any
 
 DEFAULT_MODE = "py"
-CONFIG_SCHEMA_VERSION = "0.5.5"
+CONFIG_SCHEMA_VERSION = "0.5.6"
 DEFAULT_ORDER_PARAMETERS = ("f3", "f4")
 CPP_MODE = "cpp"
 CPP_MODES = frozenset({"99", CPP_MODE})
@@ -266,7 +266,10 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "min_shared_waters": 3,
         "max_center_distance_nm": None,
         "gap_frame": 0,
+        "max_gap_ps": None,
         "guest_tiebreak": True,
+        "ambiguity_score_margin": 1.0,
+        "near_threshold_tolerance": 0.05,
     },
     "debug": {"use_networkx_checks": False},
 }

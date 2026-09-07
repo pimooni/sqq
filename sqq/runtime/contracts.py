@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from ..models import Frame, FrameResult
+from ..models.tracking import TrackFrameSnapshot
 
 
 class InputKind(str, Enum):
@@ -74,6 +75,8 @@ class RunContext:
     input_kind: InputKind = InputKind.GRO
     retain_results: bool = False
     stream_results: bool = False
+    # Request compact tracking snapshots without retaining full frame results.
+    tracking_snapshots: bool = False
     group_configs: Mapping[str | int, Mapping[str, Any]] = field(default_factory=dict)
     group_output_roots: Mapping[str | int, Path] = field(default_factory=dict)
     group_fragment_dirs: Mapping[str | int, Path] = field(default_factory=dict)
@@ -110,8 +113,11 @@ class TaskOutcome:
     status: TaskStatus
     row: Mapping[str, Any]
     result: FrameResult | None = None
+    snapshot: TrackFrameSnapshot | None = None
     error_type: str | None = None
     error_message: str | None = None
+    # Snapshot failure does not invalidate a successful per-frame analysis.
+    snapshot_error: str | None = None
 
     @property
     def ok(self) -> bool:
@@ -129,6 +135,8 @@ class RunPlan:
     requested_graph_modes: Mapping[str | int, str] = field(default_factory=dict)
     effective_graph_modes: Mapping[str | int, str] = field(default_factory=dict)
     output_roots: tuple[Path, ...] = ()
+    # Selected-frame times in task order; empty when unavailable.
+    frame_times_ps: tuple[float | None, ...] = ()
 
 
 __all__ = [
