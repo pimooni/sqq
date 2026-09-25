@@ -6,7 +6,7 @@
 
 **SQQ (Shell Quant Qualifier): Python Joint Toolkit for Water-Shell Topology Analysis.**
 
-Current development version: **0.5.7** (Sep 25, 2026; Mid-Autumn Day)
+Current release version: **0.5.7** (Sep 25, 2026; Mid-Autumn Day)
 
 SQQ identifies water-network rings, cages, hydrate phases, guest occupancy, order parameters, and persistent cage tracks from molecular-dynamics structures and trajectories. It provides the complete SQQ-Py workflow and a focused native SQQ-CPP cage engine.
 
