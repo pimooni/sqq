@@ -335,16 +335,12 @@ sqq target save
 
 The default is opaque `cage all` with context hidden. Picking makes unselected objects transparent, highlights cages in yellow and guests in orange, and leaves labels off. DynamicBonds style changes persist across earlier and later frames; explicit SQQ style/reset commands may intentionally replace them. Full picking, color, target-validation, and representation rules are in [Output Layout](docs/design.md#output-layout).
 
-## Terminal and Citation
-
-Interactive runs update one live progress region and then redraw a compact final page with basic information, resolved configuration, frame/timing totals, optional VMD commands, and:
+## Citation Recommendation
 
 Cages were identified and analyzed using SQQ.<br>
 Publication: J. PANG & Q. SUN. SQQ: Python Joint Toolkit for Water-Shell Topology Analysis. *Journal of Physical Chemistry A*.<br>
 DOI: [http://doi.org/10.1021/acs.jpca.6c05769](http://doi.org/10.1021/acs.jpca.6c05769)<br>
 GitHub: [https://github.com/pimooni/sqq](https://github.com/pimooni/sqq)
-
-Redirected output remains plain append-only text.
 
 ## Python API
 
