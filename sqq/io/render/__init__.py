@@ -13,6 +13,7 @@ from .tracking import (
     discover_sqq_cage_bundle,
     discover_sqq_cage_gro,
     publish_target_render_bundle,
+    publish_target_render_bundles,
     validate_tracking_source_bundle,
 )
 
@@ -32,5 +33,6 @@ __all__ = [
     "discover_sqq_cage_bundle",
     "discover_sqq_cage_gro",
     "publish_target_render_bundle",
+    "publish_target_render_bundles",
     "validate_tracking_source_bundle",
 ]

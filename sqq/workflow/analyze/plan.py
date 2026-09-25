@@ -143,6 +143,7 @@ def _build_gro_batch_plan(
         policy=policy,
         topology_groups=task_indexes,
         sampling={
+            "requested_frames": len(sources),
             "selected_frames": len(tasks),
             "total_frames": len(sources),
             "failed_sources": len(groups.failures),
@@ -277,7 +278,11 @@ def _build_independent_file_plan(
             input_kind=InputKind.GRO_BATCH,
         ),
         policy=policy,
-        sampling={"selected_frames": len(tasks), "total_frames": len(tasks)},
+        sampling={
+            "requested_frames": len(tasks),
+            "selected_frames": len(tasks),
+            "total_frames": len(tasks),
+        },
         requested_graph_modes={"run": requested},
         effective_graph_modes={"run": effective},
         output_roots=(output_root,),
@@ -383,6 +388,7 @@ def _selection_metadata(selection: Any, task_count: int) -> dict[str, Any]:
         "native_frame_interval_ps": selection.native_interval_ps,
         "delta_time_ps": selection.delta_time_ps,
         "raw_frame_step": selection.raw_frame_step,
+        "requested_frames": task_count,
         "selected_frames": task_count,
         "total_frames": selection.total_frames,
     }

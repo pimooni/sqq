@@ -446,6 +446,15 @@ def validate_render_fragment(path: Path, atom_count: int) -> None:
         lines = Path(path).read_text(encoding="ascii").splitlines()
     except (OSError, UnicodeError) as exc:
         raise ValueError(f"Invalid SQQ cage GRO fragment: {path}") from exc
+    validate_render_fragment_lines(lines, path, atom_count)
+
+
+def validate_render_fragment_lines(
+    lines: list[str],
+    path: Path,
+    atom_count: int,
+) -> None:
+    """Validate already-read fragment lines (shared by the single-pass writer)."""
     if len(lines) != atom_count + 3:
         raise ValueError(
             f"SQQ cage fragment {path} is incomplete: expected "

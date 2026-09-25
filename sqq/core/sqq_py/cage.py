@@ -11,7 +11,7 @@ import numpy as np
 
 from ...models import Cage, CagePatch, Frame, Guest, Ring, guest_id
 from ...models.cage_type import cage_type_for_counts
-from ..common.geometry import pbc_aware_centroid, unwrap_connected_nodes
+from ..common.geometry import connected_centroid, pbc_aware_centroid, unwrap_connected_nodes
 from ..common.pbc import minimum_image
 from .spatial import PointSpatialIndex
 from .ring_topology import (
@@ -930,8 +930,7 @@ def cage_center(frame: Frame, rings: list[Ring]) -> np.ndarray:
     """Compute a locally unwrapped oxygen centroid for a cage."""
     nodes = sorted({node for ring in rings for node in ring.nodes})
     edges = sorted({edge for ring in rings for edge in ring.edges})
-    unwrapped = unwrap_connected_nodes(frame, nodes, edges)
-    return np.mean([unwrapped[node] for node in nodes], axis=0)
+    return connected_centroid(frame, nodes, edges)
 
 
 def assigned_guests(

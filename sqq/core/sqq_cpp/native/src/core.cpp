@@ -17,7 +17,7 @@
 #include <unordered_set>
 
 #ifndef SQQ_VERSION
-#define SQQ_VERSION "0.5.6"
+#define SQQ_VERSION "0.5.7"
 #endif
 
 namespace sqq_cpp {
@@ -26,6 +26,80 @@ namespace {
 using Edge = std::pair<int, int>;
 constexpr double kEpsilon = 1.0e-12;
 constexpr double kPi = 3.141592653589793238462643383279502884;
+
+/*
+Native scientific-kernel contract
+---------------------------------
+
+Index and coordinate rules
+--------------------------
+
+* Atom and water identifiers are zero-based topology positions.  They are not
+  GRO serial numbers, residue numbers, or transient positions in a filtered
+  selection.  Consequently, every returned membership can be joined with the
+  Python-side frame without an identity conversion.
+* All distance tests use the orthorhombic minimum image supplied by the shared
+  frame contract.  A nonperiodic axis is never wrapped.  Coordinates remain in
+  full double precision while decisions are made; output formatting is a later
+  workflow concern.
+* Equality thresholds are scientific contract values, not performance knobs.
+  Spatial bins and candidate lists may reject obviously distant pairs, but the
+  final accepted edge must still pass the original exact distance or hydrogen-
+  bond test.
+* Published ordinary cage centers are reduced by the shared adapter after the
+  native cage set is known.  The native volume centroid is retained only for
+  opt-in geometry validation.  This separation keeps Py/CPP tracking tie-breaks
+  deterministic without weakening native topology or occupancy calculations.
+
+Determinism and canonical identity
+----------------------------------
+
+Container iteration order must never become observable.  Edges are stored as
+sorted endpoint pairs, ring directions are canonicalized, memberships are
+sorted, and final objects use stable comparison keys.  When two candidates
+have equal scientific scores, their canonical topology and membership decide
+the order.  Do not replace an ordered boundary with unordered iteration unless
+the result is explicitly sorted before it reaches deduplication, ID assignment,
+serialization, or the Python adapter.
+
+The ring search reports unique chordless cycles in the configured size range.
+Rotations and reverse traversal describe the same ring and must collapse to one
+canonical record.  Cage identity is the complete accepted face set together
+with its topology, not the seed that happened to discover it.  Deduplication
+therefore occurs only after closure and validation; pruning a duplicate-looking
+partial branch can remove a distinct valid cage.
+
+Cage-search invariants
+----------------------
+
+The sparse growth state stores only the local open boundary, face membership,
+and edge-incidence changes required by that branch.  Global ring-edge incidence
+is shared read-only.  A closed shell is publishable only when every shell edge
+has incidence two, the face complex is connected, and the Euler relation is
+satisfied.  Optional scientific validation adds geometry checks after mandatory
+topology validation; it never substitutes a geometric guess for shell closure.
+
+Search guards are diagnostic failure limits.  A positive state limit that is
+reached must fail the complete frame instead of returning a partial cage list.
+Unlimited guards remain exact.  Likewise, cell lists, indexed closure lookup,
+and component decomposition are admissible only when they preserve every
+candidate that the unindexed definition would inspect.
+
+Before changing this file, verify all of the following:
+1. Py and CPP receive the same normalized water, guest, box, and graph-mode
+   inputs for the comparison fixture.
+2. Accepted edge, ring, cage-water, cage-face, type, isomer, and occupancy sets
+   remain equal; aggregate counts alone are not a sufficient parity check.
+3. Failure paths publish no partial scientific result and preserve the original
+   diagnostic instead of replacing it with cleanup noise.
+4. Any new native field is added to the Python binding and normalized model as
+   one explicit contract change, with no language-specific fallback.
+
+These notes document constraints already enforced by the implementation.  They
+are deliberately adjacent to the low-level helpers because seemingly harmless
+changes to indexing, wrapping, iteration order, or floating-point reduction can
+otherwise surface much later as different cage IDs or Track assignments.
+*/
 
 Vec3 operator+(const Vec3& a, const Vec3& b) { return {a.x + b.x, a.y + b.y, a.z + b.z}; }
 Vec3 operator-(const Vec3& a, const Vec3& b) { return {a.x - b.x, a.y - b.y, a.z - b.z}; }

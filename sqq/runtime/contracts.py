@@ -77,6 +77,9 @@ class RunContext:
     stream_results: bool = False
     # Request compact tracking snapshots without retaining full frame results.
     tracking_snapshots: bool = False
+    # Raw Track spools precursor records here until every requested persistent
+    # ID has appeared, so the required pre-birth prefix is never analyzed twice.
+    precursor_spool_dir: Path | None = None
     group_configs: Mapping[str | int, Mapping[str, Any]] = field(default_factory=dict)
     group_output_roots: Mapping[str | int, Path] = field(default_factory=dict)
     group_fragment_dirs: Mapping[str | int, Path] = field(default_factory=dict)

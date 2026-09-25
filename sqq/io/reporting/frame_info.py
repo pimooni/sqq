@@ -9,12 +9,11 @@ import re
 from typing import Any
 import unicodedata
 
-from ... import __release_date__, __version__
+from ... import __version__
 from ...config import (
     DEFAULT_MODE,
     is_cpp_mode,
     normalize_order_parameters,
-    output_enabled,
     q_degrees_from_order_parameters,
 )
 from ...models.cage_type import parse_cage_face_label
@@ -31,11 +30,9 @@ from .tables import (
     guest_composition_sort_key,
     guest_resname_order,
     format_cage_type_counts,
-    hydrate_cluster_detail_records,
     hydrate_domain_records,
     hydrate_motif_records,
     ordered_cage_types,
-    patch_breakdown,
     patch_counts,
     patch_display_label,
     present_cage_types,

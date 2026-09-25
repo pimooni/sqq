@@ -1,26 +1,24 @@
+<p align="center">
+  <img src="docs/title_pic.png" alt="SQQ" width="100%">
+</p>
+
 # SQQ
 
 **SQQ (Shell Quant Qualifier): Python Joint Toolkit for Water-Shell Topology Analysis.**
 
-Current development version: **0.5.6** (Sep 7, 2026)
+Current development version: **0.5.7** (Sep 25, 2026; Mid-Autumn Day)
 
 SQQ identifies water-network rings, cages, hydrate phases, guest occupancy, order parameters, and persistent cage tracks from molecular-dynamics structures and trajectories. It provides the complete SQQ-Py workflow and a focused native SQQ-CPP cage engine.
 
 Detailed definitions are in [docs/design.md](docs/design.md); release history is in [docs/update.md](docs/update.md).
 
-## Changed in 0.5.6
+## Changed in 0.5.7
 
-- Added Track matching-quality diagnostics without changing candidate gates, assignment scores, or persistent `tID` results.
-- Added frame- and time-aware lifetime bounds, censoring status, gap evidence, and survival tables.
-- Added candidate/confirmed cage lineage events and directed cage-type transition tables.
-- Added guest entry, exit, exchange, residence, and occupancy-state statistics.
-- Made changes and residence boundaries across recognition gaps explicitly unresolved.
-- Added provenance-bound validation for imported Analyze render packages.
-- Improved Track scalability with exact component-wise assignment and compact worker snapshots.
-- Hardened legacy-state migration, effective-time preflight, CPP startup, and failure reporting.
-- Optimized the code structure.
+- Reduced memory use for long trajectories and large Track runs.
+- Faster render output, imported-result validation, and tracking of selected cages.
+- Clearer progress and warnings, with unchanged scientific results for the same input.
 
-See [Version 0.5.6](docs/update.md#version-056) for complete release notes.
+See [Version 0.5.7](docs/update.md#version-057) for complete release notes.
 
 ## Acknowledgements
 
@@ -236,11 +234,11 @@ SQQ builds an `hbond`, `oo`, or explicit-pair water graph; finds rings and half/
 | `sI,sII,sH` | Tracks in each phase | `phase_sI/`, etc. |
 | `t133` | One persistent lifecycle | `cage_t133/` |
 
-Mixed targets are written independently, and type/phase targets retain complete selected lifecycles. Phase targets require SQQ-Py cluster labels; imported state cannot create missing labels retroactively.
+Mixed targets are written independently, and type/phase targets retain complete selected lifecycles. Phase targets require SQQ-Py cluster labels; imported state cannot create missing labels retroactively. A target that matches no cage is still written (empty tables, render package without selections) and is named in the final `Warnings` row.
 
-Matching remains water-shell-first; guest exchange does not create a cage ID. Version 0.5.6 diagnostics and derived statistics do not change the default `tID` assignment. Raw Track is currently serial and is required for pre-cage precursor history.
+Matching remains water-shell-first; guest exchange does not create a cage ID. Each continuation is checked against the track's most recently observed shell, so gradual water exchange can preserve an ID while every adjacent or gap-bounding pair still passes the configured thresholds even after overlap with the initial shell reaches zero. Version 0.5.6 diagnostics and derived statistics do not change the default `tID` assignment. Raw Track is currently serial and is required for pre-cage precursor history; since 0.5.7 that history is reconstructed from compact per-frame records spooled during the single analysis pass, so the prefix is not analyzed twice.
 
-Raw Track validates the final effective time of every selected frame before analysis, including configured fallback times for frames without stored time. Analyze keeps valid per-frame scientific output if snapshot reduction is unsuitable, but omits that topology group's persistent Track state with a warning. Schema 2/3 state can recover partial diagnostics from archived thresholds; schema 1 retains its raw evidence without inventing threshold-dependent classifications.
+Raw Track validates the final effective time of every selected frame before analysis, including configured fallback times for frames without stored time. Times may be irregular or equal but cannot decrease; physical gaps and duration statistics use those actual times, while `gap_frame` remains a selected-frame count. Analyze keeps valid per-frame scientific output if snapshot reduction is unsuitable, but omits that topology group's persistent Track state with a warning. Schema 2/3 state can recover partial diagnostics from archived thresholds; schema 1 retains its raw evidence without inventing threshold-dependent classifications.
 
 Only directly consecutive observations produce resolved type, phase, guest, or occupancy changes. A change across a permitted recognition gap is recorded as unresolved, and affected residence segments remain gap-censored lower bounds. Split/merge confirmation additionally requires persistent destination shells and independent branch-water contributions; overlap between already persistent neighboring cages is retained only as non-confirmable candidate evidence.
 
@@ -260,7 +258,11 @@ result_track/track/
 
 See [Cross-Frame Cage Tracking](docs/design.md#cross-frame-cage-tracking) for exact matching, duration, event, network, and source/raw definitions.
 
-New Analyze state binds its matching configuration and complete render package to topology, component, atom, cage, selected-frame/time, and SHA-256 provenance. `sqq track --source` validates those records before publishing any target result; older states remain readable through structural validation.
+Track target GRO/XTC files may be hard-linked to avoid duplicate trajectory data. Treat them as immutable SQQ output: deleting or atomically replacing one path is safe, but editing a hard-linked file in place can also alter a sibling target package.
+
+New Analyze state binds its matching configuration and complete render package to topology, component, atom, cage, selected-frame/time, and SHA-256 provenance; the digests are taken while the package is written. `sqq track --source` re-hashes and validates those records before publishing any target result; older states remain readable through structural validation.
+
+Track workflow memory is bounded by active/dormant matching state rather than the complete observation history: observations and events use a run-private disk spool, the JSON state and observation-level tables are streamed record by record, and per-target tables reuse the run-level rows. The public in-memory tracking API remains available for programmatic use. The release gate includes a real 1.417 GB / 1,001-frame LAMMPS run plus exact SQQ-Py/SQQ-CPP Track-output comparisons; no scientific tolerance is widened for these optimizations.
 
 ## Outputs
 
@@ -337,11 +339,10 @@ The default is opaque `cage all` with context hidden. Picking makes unselected o
 
 Interactive runs update one live progress region and then redraw a compact final page with basic information, resolved configuration, frame/timing totals, optional VMD commands, and:
 
-```text
-Cages were identified and analyzed using SQQ.
-Publication: J. Pang & Q. Sun, SQQ: Python Joint Toolkit for Water-Shell Topology Analysis, in submission.
-GitHub     : https://github.com/pimooni/sqq
-```
+Cages were identified and analyzed using SQQ.<br>
+Publication: J. PANG & Q. SUN. SQQ: Python Joint Toolkit for Water-Shell Topology Analysis. *Journal of Physical Chemistry A*.<br>
+DOI: [http://doi.org/10.1021/acs.jpca.6c05769](http://doi.org/10.1021/acs.jpca.6c05769)<br>
+GitHub: [https://github.com/pimooni/sqq](https://github.com/pimooni/sqq)
 
 Redirected output remains plain append-only text.
 
@@ -355,7 +356,7 @@ frame = next(read_frames("frame.gro", config=config))
 result = analyze_frame(frame, config)
 ```
 
-These public functions use the same readers, configuration resolution, validation, and engines as the CLI. They return immutable resolved configuration, `Frame`, and `FrameResult` objects and raise typed SQQ exceptions.
+These public functions use the same readers, configuration resolution, validation, and engines as the CLI. They return immutable resolved configuration, `Frame`, and `FrameResult` objects and raise typed SQQ exceptions. `sqq.api` and `sqq.models` are the stable import surfaces; workflow, runtime, and I/O module paths are implementation details and may move between releases. Track record classes in `sqq.models` are slotted immutable dataclasses: use `dataclasses.fields`/`dataclasses.asdict` for generic inspection rather than `vars()` or weak references. Their name-based pickle state remains readable from 0.5.6.
 
 ## Current Limits
 
@@ -364,8 +365,9 @@ These public functions use the same readers, configuration resolution, validatio
 - Closed cages use 4/5/6 faces; 7-member rings remain available to ring/quasi analysis.
 - SQQ-CPP omits public ring, half/quasi, cluster/phase, ice, Q_l/MCG/DHOP, and related category output.
 - Domain/cluster IDs are frame-local; Track assigns persistent IDs to cages, not grains.
-- Source Track cannot reconstruct pre-cage history; use raw Track when required.
+- Source Track cannot reconstruct pre-cage history; use raw Track when required. A Track result is not itself a valid `--source`.
 - Raw Track accepts one physical trajectory or stacked GRO system; select incompatible Analyze groups separately.
+- Exit status is 0 for a completed run (even with some failed non-strict frames), 1 when every requested frame failed, and 2 for configuration, input, or runtime errors.
 
 ## Documentation
 

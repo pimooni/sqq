@@ -278,6 +278,7 @@ def summary_dashboard_table(data: pd.DataFrame, run_info: dict[str, Any], config
             ["Citation Recommendation", ""],
             ["Recommended text", citation.sentence],
             ["Publication", citation.publication.removeprefix("Publication: ")],
+            ["DOI", citation.doi.removeprefix("DOI        : ")],
             ["GitHub", citation.github.removeprefix("GitHub     : ")],
         ]
     )

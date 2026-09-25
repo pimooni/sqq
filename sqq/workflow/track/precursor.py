@@ -1,4 +1,13 @@
-"""Persistent-cage precursor reconstruction for the Track workflow."""
+"""Persistent-cage precursor reconstruction for the Track workflow.
+
+Precursor history follows the water set of a persistent cage backwards through
+the frames before its birth. The per-frame facts needed for that (water-oxygen
+identities, coordinates, water-water edges, ring/half-cage/quasi-cage/cage
+water sets, and the render atom mapping) form one JSON-safe *precursor record*.
+The first raw-Track pass spools these records while it analyzes, so the prefix
+never has to be re-analyzed; when no spool exists the prefix is re-analyzed
+through the shared runner and reduced to the same records.
+"""
 
 from __future__ import annotations
 
@@ -9,20 +18,27 @@ from dataclasses import replace
 import os
 from pathlib import Path
 from time import perf_counter
-from typing import Any, Iterable, Mapping, Sequence
+from typing import Any, Iterable, Iterator, Mapping, Sequence
 
 import numpy as np
 
 from ...config import DEFAULT_MODE, is_cpp_mode
-from ...core.common.geometry import pbc_aware_centroid
+from ...core.common.pbc import minimum_image
 from ...io.render import TRACK_MEMBERSHIP_NAME, TRACK_RENDER_DIRECTORY
-from ...io.render.frame import visualization_atoms
 from ...io.tracking import (
     add_precursor_membership,
     append_track_info_section,
     target_directory_name,
 )
-from ...models import FrameResult
+from ...io.tracking.precursor_record import (
+    PRECURSOR_RECORD_FORMAT,
+    PRECURSOR_RECORD_VERSION,
+    PrecursorRecord,
+    precursor_record_from_result,
+    precursor_record_path,
+    read_precursor_record,
+    write_precursor_record,
+)
 from ...models.tracking import TargetSelection
 from ...runtime.contracts import FrameTask, RunPlan, TaskOutcome
 from ...runtime.session import AnalysisEvent, AnalysisRunner, AnalysisSink
@@ -45,6 +61,8 @@ PrecursorData = tuple[
     list[dict[str, object]],
     dict[int, tuple[tuple[int, ...], tuple[float, float, float]]],
 ]
+
+# --- outputs ------------------------------------------------------------------------
 
 
 def write_precursor_outputs(
@@ -93,19 +111,113 @@ def write_precursor_outputs(
         _write_csv(target_dir / "water_history.csv", water, _WATER_HISTORY_FIELDS)
 
 
-class _PrecursorSink(AnalysisSink):
-    """Classify the target water set in every prefix frame, in frame order."""
+# --- histories ----------------------------------------------------------------------
+
+
+def raw_precursor_histories(
+    selections: Sequence[TargetSelection],
+    plan: RunPlan,
+    config: Mapping[str, Any],
+) -> dict[str, PrecursorData]:
+    """Classify the pre-birth prefix of every persistent-ID target.
+
+    Spooled records from the first pass are used when they exist for every
+    required frame; otherwise the prefix is re-analyzed through the shared
+    runner and reduced to the same records, so both paths produce identical
+    tables.
+    """
+    targets: dict[str, tuple[int, frozenset[int]]] = {}
+    output: dict[str, PrecursorData] = {}
+    for selection in selections:
+        if selection.target.kind != "track":
+            continue
+        if len(selection.tracks) != 1:
+            raise ValueError(
+                f"Persistent target {selection.target.value} must select exactly one cage."
+            )
+        track = selection.tracks[0]
+        birth = track.first
+        if birth.frame_index <= 0:
+            output[track.track_id] = ([], [], {})
+            continue
+        targets[track.track_id] = (
+            int(birth.frame_index),
+            frozenset(int(value) for value in birth.water_atomids),
+        )
+        output[track.track_id] = ([], [], {})
+    if not targets:
+        return output
+
+    last_required = max(item[0] for item in targets.values())
+    spool = plan.context.precursor_spool_dir
+    records = _spooled_records(spool, last_required) if spool is not None else None
+    if records is None:
+        _reanalyze_and_classify(
+            plan,
+            config,
+            last_required,
+            targets,
+            output,
+        )
+        return output
+    for frame_index, record in enumerate(records):
+        _classify_into(record, frame_index, targets, output)
+    return output
+
+
+def _spooled_records(
+    spool: Path,
+    last_required: int,
+) -> Iterator[PrecursorRecord] | None:
+    """Return a lazy ordered reader when the complete required prefix exists."""
+    if any(
+        not precursor_record_path(spool, index).is_file()
+        for index in range(last_required + 1)
+    ):
+        return None
+
+    def records() -> Iterator[PrecursorRecord]:
+        for frame_index in range(last_required + 1):
+            record = read_precursor_record(spool, frame_index)
+            if record is None:
+                raise RuntimeError(
+                    "A validated precursor record disappeared while it was being read: "
+                    f"frame {frame_index}."
+                )
+            yield record
+
+    return records()
+
+
+def _classify_into(
+    record: PrecursorRecord,
+    frame_index: int,
+    targets: Mapping[str, tuple[int, frozenset[int]]],
+    output: dict[str, PrecursorData],
+) -> None:
+    for track_id, (birth_index, water_ids) in targets.items():
+        if frame_index > birth_index:
+            continue
+        state, water_rows = _classify_precursor_record(record, frame_index, track_id, water_ids)
+        states, waters, render_frames = output[track_id]
+        states.append(state)
+        waters.extend(water_rows)
+        if frame_index < birth_index:
+            render_frames[frame_index] = _precursor_render_frame(record, water_ids)
+
+
+class _PrecursorRecordSink(AnalysisSink):
+    """Classify each fallback frame immediately without retaining its record."""
 
     def __init__(
         self,
+        atom_scope: str,
         targets: Mapping[str, tuple[int, frozenset[int]]],
         output: dict[str, PrecursorData],
-        *,
-        atom_scope: str,
     ) -> None:
-        self.targets = dict(targets)
-        self.output = output
         self.atom_scope = atom_scope
+        self.targets = targets
+        self.output = output
         self.consumed = 0
 
     def start(self, plan: RunPlan) -> None:
@@ -118,20 +230,12 @@ class _PrecursorSink(AnalysisSink):
                 f"{outcome.error_message or 'analysis result unavailable'}"
             )
         frame_index = int(task.frame_index)
-        analyzed = outcome.result
-        for track_id, (birth_index, water_ids) in self.targets.items():
-            if frame_index > birth_index:
-                continue
-            state, water_rows = _classify_precursor_frame(
-                analyzed, frame_index, track_id, water_ids
-            )
-            states, waters, render_frames = self.output[track_id]
-            states.append(state)
-            waters.extend(water_rows)
-            if frame_index < birth_index:
-                render_frames[frame_index] = _precursor_render_frame(
-                    analyzed, water_ids, atom_scope=self.atom_scope
-                )
+        record = precursor_record_from_result(
+            outcome.result,
+            frame_index,
+            atom_scope=self.atom_scope,
+        )
+        _classify_into(record, frame_index, self.targets, self.output)
         self.consumed += 1
 
     def finish(self, plan: RunPlan, outcomes: Sequence[TaskOutcome]) -> None:
@@ -160,35 +264,14 @@ class _PrecursorProgressSink:
             self.display.complete_frame(False)
 
 
-def raw_precursor_histories(
-    selections: Sequence[TargetSelection],
+def _reanalyze_and_classify(
     plan: RunPlan,
     config: Mapping[str, Any],
-) -> dict[str, PrecursorData]:
-    """Reanalyze the required pre-birth prefix without retaining full results."""
-    targets: dict[str, tuple[int, frozenset[int]]] = {}
-    output: dict[str, PrecursorData] = {}
-    for selection in selections:
-        if selection.target.kind != "track":
-            continue
-        if len(selection.tracks) != 1:
-            raise ValueError(
-                f"Persistent target {selection.target.value} must select exactly one cage."
-            )
-        track = selection.tracks[0]
-        birth = track.first
-        if birth.frame_index <= 0:
-            output[track.track_id] = ([], [], {})
-            continue
-        targets[track.track_id] = (
-            int(birth.frame_index),
-            frozenset(int(value) for value in birth.water_atomids),
-        )
-        output[track.track_id] = ([], [], {})
-    if not targets:
-        return output
-
-    last_required = max(item[0] for item in targets.values())
+    last_required: int,
+    targets: Mapping[str, tuple[int, frozenset[int]]],
+    output: dict[str, PrecursorData],
+) -> None:
+    """Re-run and immediately classify a prefix whose spool is incomplete."""
     prefix_tasks = tuple(
         sorted(
             (task for task in plan.tasks if int(task.frame_index) <= last_required),
@@ -212,15 +295,16 @@ def raw_precursor_histories(
             retain_results=False,
             stream_results=True,
             tracking_snapshots=False,
+            precursor_spool_dir=None,
             fragment_dir=None,
             group_fragment_dirs={},
         ),
         policy=replace(plan.policy, strict=True),
     )
-    sink = _PrecursorSink(
+    sink = _PrecursorRecordSink(
+        str(config.get("render", {}).get("atom_scope", "full")),
         targets,
         output,
-        atom_scope=str(config.get("render", {}).get("atom_scope", "full")),
     )
     progress = RunProgressDisplay(
         total=len(prefix_tasks),
@@ -248,88 +332,78 @@ def raw_precursor_histories(
             "Precursor tracing returned "
             f"{len(outcomes)} frames; expected {len(prefix_tasks)}."
         )
-    return output
+
+
+# --- record classification -----------------------------------------------------------
+
+
+def _record_oxygen_positions(record: PrecursorRecord) -> dict[int, int]:
+    """Map water identity (atom index + 1) to its position in the record arrays."""
+    return {int(index) + 1: position for position, index in enumerate(record["oxygen_index"])}
 
 
 def _precursor_render_frame(
-    result: FrameResult,
+    record: PrecursorRecord,
     target_water_ids: frozenset[int],
-    *,
-    atom_scope: str,
 ) -> tuple[tuple[int, ...], tuple[float, float, float]]:
-    atom_by_id = {int(atom.index) + 1: atom for atom in result.frame.atoms}
-    source_indexes = tuple(
-        int(atom_by_id[water_id].index)
-        for water_id in sorted(target_water_ids)
-        if water_id in atom_by_id
-    )
-    if len(source_indexes) != len(target_water_ids):
+    positions = _record_oxygen_positions(record)
+    ordered_ids = sorted(target_water_ids)
+    if any(water_id not in positions for water_id in ordered_ids):
         raise ValueError(
             "A precursor target water is absent from the trajectory topology."
         )
-    render_index = {
-        int(atom.index): index
-        for index, atom in enumerate(
-            visualization_atoms(result, atom_scope=atom_scope)
+    render_index = record["render_index"]
+    atom_indexes: list[int] = []
+    for water_id in ordered_ids:
+        value = render_index[positions[water_id]]
+        if value is None:
+            raise ValueError(
+                "A precursor target water is absent from the SQQ render topology."
+            )
+        atom_indexes.append(int(value))
+    coordinates = record["oxygen_xyz"]
+    box = None if record.get("box") is None else np.asarray(record["box"], dtype=float)
+    anchor = np.asarray(coordinates[positions[ordered_ids[0]]], dtype=float)
+    points = [anchor]
+    for water_id in ordered_ids[1:]:
+        delta = minimum_image(
+            np.asarray(coordinates[positions[water_id]], dtype=float) - anchor, box
         )
-    }
-    try:
-        atom_indexes = tuple(render_index[index] for index in source_indexes)
-    except KeyError as exc:
-        raise ValueError(
-            "A precursor target water is absent from the SQQ render topology."
-        ) from exc
-    center_nm = np.asarray(
-        pbc_aware_centroid(result.frame, list(source_indexes)), dtype=float
-    )
-    if result.frame.box is not None:
-        box = np.asarray(result.frame.box, dtype=float).reshape(-1)
-        if (
-            len(box) >= 3
-            and np.all(np.isfinite(box[:3]))
-            and np.all(box[:3] > 0.0)
-        ):
-            center_nm = np.mod(center_nm, box[:3])
+        points.append(anchor + delta)
+    center_nm = np.mean(np.asarray(points, dtype=float), axis=0)
+    if box is not None:
+        center_nm = np.mod(center_nm, box)
     center_angstrom = tuple(float(value) * 10.0 for value in center_nm)
-    return atom_indexes, (
-        center_angstrom[0], center_angstrom[1], center_angstrom[2]
-    )
+    return tuple(atom_indexes), (center_angstrom[0], center_angstrom[1], center_angstrom[2])
 
 
-def _classify_precursor_frame(
-    result: FrameResult,
+def _classify_precursor_record(
+    record: PrecursorRecord,
     frame_index: int,
     track_id: str,
     target_atomids: frozenset[int],
 ) -> tuple[dict[str, object], list[dict[str, object]]]:
-    atom_by_id = {int(atom.index) + 1: atom for atom in result.frame.atoms}
+    positions = _record_oxygen_positions(record)
+    oxygen_index = record["oxygen_index"]
     index_by_id = {
-        atomid: int(atom_by_id[atomid].index)
+        atomid: int(oxygen_index[positions[atomid]])
         for atomid in target_atomids
-        if atomid in atom_by_id
+        if atomid in positions
     }
     target_indexes = frozenset(index_by_id.values())
     edges = {
-        tuple(sorted((int(left), int(right))))
-        for left, right in result.graph.edges
+        (int(left), int(right))
+        for left, right in record["edges"]
         if left in target_indexes and right in target_indexes
     }
     components = _connected_components(target_indexes, edges)
-    rings = [
-        ring for values in result.rings.values() for ring in values
-        if set(ring.nodes).issubset(target_indexes)
-    ]
-    half = [
-        patch for patch in result.half_cages
-        if set(patch.waters).issubset(target_indexes)
-    ]
-    quasi = [
-        patch for patch in result.quasi_cages
-        if set(patch.waters).issubset(target_indexes)
-    ]
+    rings = [nodes for nodes in record["rings"] if set(nodes).issubset(target_indexes)]
+    half = [waters for waters in record["half_cages"] if set(waters).issubset(target_indexes)]
+    quasi = [waters for waters in record["quasi_cages"] if set(waters).issubset(target_indexes)]
     cages = [
-        cage for cage in (result.all_cages or result.cages)
-        if _cage_atomids(result, cage.waters) == target_atomids
+        waters
+        for waters in record["cages"]
+        if frozenset(int(index) + 1 for index in waters) == target_atomids
     ]
     if cages:
         state_name = "cage"
@@ -345,8 +419,8 @@ def _classify_precursor_frame(
         state_name = "dispersed"
     common = {
         "status": "available", "reason": "", "track_id": track_id,
-        "frame_index": frame_index, "frame": result.frame.name,
-        "time_ps": result.frame.time_ps, "state": state_name,
+        "frame_index": frame_index, "frame": record["frame_name"],
+        "time_ps": record["time_ps"], "state": state_name,
     }
     state_row: dict[str, object] = {
         **common,
@@ -360,38 +434,44 @@ def _classify_precursor_frame(
         "quasi_cage_count": len(quasi),
         "cage_count": len(cages),
     }
-    degree = defaultdict(int)
+    degree: dict[int, int] = defaultdict(int)
     for left, right in edges:
         degree[left] += 1
         degree[right] += 1
     water_rows: list[dict[str, object]] = []
     for atomid in sorted(target_atomids):
-        atom = atom_by_id.get(atomid)
+        position = positions.get(atomid)
+        if position is None:
+            water_rows.append(
+                {
+                    **common,
+                    "water_atomid": atomid,
+                    "present": False,
+                    "atom_index": "",
+                    "resid": "",
+                    "x_nm": "",
+                    "y_nm": "",
+                    "z_nm": "",
+                    "target_degree": 0,
+                }
+            )
+            continue
+        index = int(oxygen_index[position])
+        xyz = record["oxygen_xyz"][position]
         water_rows.append(
             {
                 **common,
                 "water_atomid": atomid,
-                "present": atom is not None,
-                "atom_index": "" if atom is None else int(atom.index),
-                "resid": "" if atom is None else int(atom.resid),
-                "x_nm": "" if atom is None else float(atom.xyz[0]),
-                "y_nm": "" if atom is None else float(atom.xyz[1]),
-                "z_nm": "" if atom is None else float(atom.xyz[2]),
-                "target_degree": 0 if atom is None else degree[int(atom.index)],
+                "present": True,
+                "atom_index": index,
+                "resid": int(record["oxygen_resid"][position]),
+                "x_nm": float(xyz[0]),
+                "y_nm": float(xyz[1]),
+                "z_nm": float(xyz[2]),
+                "target_degree": degree[index],
             }
         )
     return state_row, water_rows
-
-
-def _cage_atomids(result: FrameResult, waters: Iterable[int]) -> frozenset[int]:
-    atomid_by_index = {
-        int(atom.index): int(atom.index) + 1 for atom in result.frame.atoms
-    }
-    return frozenset(
-        atomid_by_index[int(index)]
-        for index in waters
-        if int(index) in atomid_by_index
-    )
 
 
 def _connected_components(
@@ -450,4 +530,15 @@ def _write_csv(
         temporary.unlink(missing_ok=True)
 
 
-__all__ = ["PrecursorData", "raw_precursor_histories", "write_precursor_outputs"]
+__all__ = [
+    "PRECURSOR_RECORD_FORMAT",
+    "PRECURSOR_RECORD_VERSION",
+    "PrecursorData",
+    "PrecursorRecord",
+    "precursor_record_from_result",
+    "precursor_record_path",
+    "raw_precursor_histories",
+    "read_precursor_record",
+    "write_precursor_outputs",
+    "write_precursor_record",
+]

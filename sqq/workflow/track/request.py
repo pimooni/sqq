@@ -36,7 +36,15 @@ _TRACK_ID = re.compile(r"^t0*([1-9][0-9]*)$", re.IGNORECASE)
 def prepare_target_capabilities(
     config: dict[str, Any],
     targets: Sequence[TargetSpec],
+    *,
+    raw_input: bool = True,
 ) -> None:
+    """Resolve engine capabilities required by phase targets.
+
+    Only raw input runs the hydrate-cluster analysis that produces phase
+    labels; imported state is read as saved, so the effective configuration of
+    a ``--source`` run must not claim that cluster search was enabled.
+    """
     if not any(target.kind == "phase" for target in targets):
         return
     if is_cpp_mode(config.get("mode", DEFAULT_MODE)):
@@ -44,7 +52,8 @@ def prepare_target_capabilities(
             "Phase targets require SQQ-Py hydrate-cluster classification; "
             "use -e py or -e 00."
         )
-    config.setdefault("hydrate_cluster", {})["enabled"] = True
+    if raw_input:
+        config.setdefault("hydrate_cluster", {})["enabled"] = True
 
 
 def update_track_config(

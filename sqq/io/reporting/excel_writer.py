@@ -112,6 +112,19 @@ def format_summary_dashboard_sheet(worksheet) -> None:
             if row[1].value not in (None, ""):
                 row[1].font = Font(color="111827", bold=False)
                 row[1].alignment = Alignment(horizontal="left", vertical="top", wrap_text=True)
+                if row[0].value == "Publication" and isinstance(row[1].value, str):
+                    journal = "Journal of Physical Chemistry A"
+                    if journal in row[1].value:
+                        try:
+                            from openpyxl.cell.rich_text import CellRichText, TextBlock
+                            from openpyxl.cell.text import InlineFont
+                        except ImportError:
+                            row[1].font = Font(color="111827", italic=True)
+                        else:
+                            before, after = row[1].value.split(journal, 1)
+                            row[1].value = CellRichText(
+                                before, TextBlock(InlineFont(i=True), journal), after
+                            )
 
 
 def format_table_header(worksheet) -> None:

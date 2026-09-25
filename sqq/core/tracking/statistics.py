@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections import Counter, defaultdict
 from math import inf
 import re
-from typing import Iterable, Mapping, Sequence
+from typing import Callable, Iterable, Iterator, Mapping, Sequence
 
 from ...models.tracking import (
     CageObservation,
@@ -34,6 +34,8 @@ __all__ = [
     "guest_event_rows",
     "guest_residence_lifetime_rows",
     "guest_residence_rows",
+    "iter_observation_rows",
+    "iter_tracking_quality_rows",
     "lifetime_distribution_rows",
     "lifetime_rows",
     "lifetime_survival_rows",
@@ -41,13 +43,22 @@ __all__ = [
     "occupancy_state_lifetime_rows",
     "occupancy_transition_rows",
     "population_rows",
+    "segment_row",
+    "segment_track",
     "tracking_quality_rows",
 ]
 
 def observation_rows(data: TrackingResult | TargetSelection) -> list[Row]:
+    return list(iter_observation_rows(data))
+
+
+def iter_observation_rows(
+    data: TrackingResult | TargetSelection,
+) -> Iterator[Row]:
+    """Yield one row per observation without materializing the whole table."""
     target = _target_label(data)
-    return [
-        {
+    for item in data.observations:
+        yield {
             "target": target,
             "track_id": item.track_id,
             "frame_index": item.frame_index,
@@ -82,8 +93,6 @@ def observation_rows(data: TrackingResult | TargetSelection) -> list[Row]:
             "gap_frames": item.gap_frames,
             "gap_time_ps": item.gap_time_ps,
         }
-        for item in data.observations
-    ]
 
 def lifetime_rows(data: TrackingResult | TargetSelection) -> list[Row]:
     """Return one sample row per persistent cage."""
@@ -393,9 +402,18 @@ def guest_residence_rows(data: TrackingResult | TargetSelection) -> list[Row]:
 
 def tracking_quality_rows(data: TrackingResult | TargetSelection) -> list[Row]:
     """Return one diagnostics row for every accepted cross-frame match."""
+    return list(iter_tracking_quality_rows(data))
+
+
+def iter_tracking_quality_rows(
+    data: TrackingResult | TargetSelection,
+) -> Iterator[Row]:
+    """Yield the diagnostics rows without materializing the whole table."""
     target = _target_label(data)
-    return [
-        {
+    for item in data.observations:
+        if item.match_status not in {"secure", "ambiguous", "gap_bridge"}:
+            continue
+        yield {
             "target": target,
             "track_id": item.track_id,
             "frame_index": item.frame_index,
@@ -422,9 +440,6 @@ def tracking_quality_rows(data: TrackingResult | TargetSelection) -> list[Row]:
             "match_status": item.match_status,
             "diagnostic_source": item.match_diagnostic_source,
         }
-        for item in data.observations
-        if item.match_status in {"secure", "ambiguous", "gap_bridge"}
-    ]
 
 def guest_event_rows(data: TrackingResult | TargetSelection) -> list[Row]:
     """Return guest identity entry, exit, exchange, and unresolved-gap events."""
@@ -472,9 +487,6 @@ def guest_residence_lifetime_rows(
     positions = {frame.frame_index: index for index, frame in enumerate(data.frames)}
     rows: list[Row] = []
     for track in data.tracks:
-        track_positions = {positions[item.frame_index] for item in track.observations}
-        first_track_position = positions[track.first.frame_index]
-        last_track_position = positions[track.last.frame_index]
         by_guest: dict[str, list[CageObservation]] = defaultdict(list)
         for item in track.observations:
             for guest_id in item.guest_ids:
@@ -482,66 +494,13 @@ def guest_residence_lifetime_rows(
         for guest_id in sorted(by_guest):
             residences = _contiguous_episodes(by_guest[guest_id], positions)
             for residence_index, residence in enumerate(residences, start=1):
-                first, last = residence[0], residence[-1]
-                first_position = positions[first.frame_index]
-                last_position = positions[last.frame_index]
-                left_censored = bool(
-                    track.left_censored and first.frame_index == track.first.frame_index
-                )
-                right_censored = bool(
-                    track.right_censored and last.frame_index == track.last.frame_index
-                )
-                left_gap_unresolved = (
-                    first_position > first_track_position
-                    and first_position - 1 not in track_positions
-                )
-                right_gap_unresolved = (
-                    last_position < last_track_position
-                    and last_position + 1 not in track_positions
-                )
-                gap_censored = left_gap_unresolved or right_gap_unresolved
-                lower = _time_difference(first.time_ps, last.time_ps)
-                upper = _interval_upper_bound(
-                    data.frames,
-                    first_position,
-                    last_position,
-                    left_censored=left_censored or left_gap_unresolved,
-                    right_censored=right_censored or right_gap_unresolved,
-                )
                 rows.append(
                     {
                         "target": target,
                         "track_id": track.track_id,
                         "guest_id": guest_id,
                         "residence_index": residence_index,
-                        "start_frame_index": first.frame_index,
-                        "end_frame_index": last.frame_index,
-                        "start_time_ps": first.time_ps,
-                        "end_time_ps": last.time_ps,
-                        "observed_frames": len(residence),
-                        "observed_span_ps": lower,
-                        "residence_lifetime_lower_ps": lower,
-                        "residence_lifetime_upper_ps": upper,
-                        "residence_time_ps": _sampled_occupancy_time(
-                            data.frames,
-                            (positions[item.frame_index] for item in residence),
-                        ),
-                        "cage_types": ",".join(
-                            _unique(item.cage_type for item in residence)
-                        ),
-                        "phases": ",".join(
-                            _unique(
-                                phase for item in residence for phase in item.phase_labels
-                            )
-                        ),
-                        "duration_status": _residence_duration_status(
-                            lower, upper, left_censored, right_censored, gap_censored
-                        ),
-                        "left_censored": left_censored,
-                        "right_censored": right_censored,
-                        "left_gap_unresolved": left_gap_unresolved,
-                        "right_gap_unresolved": right_gap_unresolved,
-                        "gap_censored": gap_censored,
+                        **segment_row(track, residence, data.frames, positions),
                     }
                 )
     return rows
@@ -554,48 +513,11 @@ def occupancy_state_lifetime_rows(
     positions = {frame.frame_index: index for index, frame in enumerate(data.frames)}
     rows: list[Row] = []
     for track in data.tracks:
-        track_positions = {positions[item.frame_index] for item in track.observations}
-        first_track_position = positions[track.first.frame_index]
-        last_track_position = positions[track.last.frame_index]
-        residences: list[list[CageObservation]] = []
-        for item in track.observations:
-            previous = residences[-1][-1] if residences else None
-            if (
-                previous is None
-                or positions[item.frame_index] != positions[previous.frame_index] + 1
-                or tuple(sorted(item.guest_ids)) != tuple(sorted(previous.guest_ids))
-            ):
-                residences.append([item])
-            else:
-                residences[-1].append(item)
+        residences = segment_track(
+            track, positions, key=lambda item: tuple(sorted(item.guest_ids))
+        )
         for residence_index, residence in enumerate(residences, start=1):
-            first, last = residence[0], residence[-1]
-            first_position = positions[first.frame_index]
-            last_position = positions[last.frame_index]
-            left_censored = bool(
-                track.left_censored and first.frame_index == track.first.frame_index
-            )
-            right_censored = bool(
-                track.right_censored and last.frame_index == track.last.frame_index
-            )
-            left_gap_unresolved = (
-                first_position > first_track_position
-                and first_position - 1 not in track_positions
-            )
-            right_gap_unresolved = (
-                last_position < last_track_position
-                and last_position + 1 not in track_positions
-            )
-            gap_censored = left_gap_unresolved or right_gap_unresolved
-            lower = _time_difference(first.time_ps, last.time_ps)
-            upper = _interval_upper_bound(
-                data.frames,
-                first_position,
-                last_position,
-                left_censored=left_censored or left_gap_unresolved,
-                right_censored=right_censored or right_gap_unresolved,
-            )
-            composition = tuple(sorted(first.guest_ids))
+            composition = tuple(sorted(residence[0].guest_ids))
             rows.append(
                 {
                     "target": target,
@@ -603,37 +525,106 @@ def occupancy_state_lifetime_rows(
                     "occupancy_state": _occupancy_class(composition),
                     "guest_composition": ",".join(composition),
                     "residence_index": residence_index,
-                    "start_frame_index": first.frame_index,
-                    "end_frame_index": last.frame_index,
-                    "start_time_ps": first.time_ps,
-                    "end_time_ps": last.time_ps,
-                    "observed_frames": len(residence),
-                    "observed_span_ps": lower,
-                    "residence_lifetime_lower_ps": lower,
-                    "residence_lifetime_upper_ps": upper,
-                    "residence_time_ps": _sampled_occupancy_time(
-                        data.frames,
-                        (positions[item.frame_index] for item in residence),
-                    ),
-                    "cage_types": ",".join(
-                        _unique(item.cage_type for item in residence)
-                    ),
-                    "phases": ",".join(
-                        _unique(
-                            phase for item in residence for phase in item.phase_labels
-                        )
-                    ),
-                    "duration_status": _residence_duration_status(
-                        lower, upper, left_censored, right_censored, gap_censored
-                    ),
-                    "left_censored": left_censored,
-                    "right_censored": right_censored,
-                    "left_gap_unresolved": left_gap_unresolved,
-                    "right_gap_unresolved": right_gap_unresolved,
-                    "gap_censored": gap_censored,
+                    **segment_row(track, residence, data.frames, positions),
                 }
             )
     return rows
+
+
+def segment_track(
+    track: CageTrack,
+    positions: Mapping[int, int],
+    *,
+    key: Callable[[CageObservation], object],
+) -> list[list[CageObservation]]:
+    """Split a track into maximal runs of directly consecutive frames sharing ``key``.
+
+    A recognition gap always ends a segment, and so does a change of the key
+    value (guest composition, cage type, phase, ...). This is the one
+    segmentation used by every residence-style table.
+    """
+    segments: list[list[CageObservation]] = []
+    for item in track.observations:
+        previous = segments[-1][-1] if segments else None
+        if (
+            previous is None
+            or positions[item.frame_index] != positions[previous.frame_index] + 1
+            or key(item) != key(previous)
+        ):
+            segments.append([item])
+        else:
+            segments[-1].append(item)
+    return segments
+
+
+def segment_row(
+    track: CageTrack,
+    segment: Sequence[CageObservation],
+    frames: Sequence[FrameStamp],
+    positions: Mapping[int, int],
+) -> Row:
+    """Return the shared duration, censoring, and gap fields of one segment.
+
+    The segment is a run of observations of ``track``. Left/right censoring
+    is inherited from the track when the segment touches the track boundary;
+    a segment boundary adjacent to a frame in which the cage was not observed
+    is reported as an unresolved gap and keeps only its visible lower bound.
+    """
+    track_positions = {positions[item.frame_index] for item in track.observations}
+    first_track_position = positions[track.first.frame_index]
+    last_track_position = positions[track.last.frame_index]
+    first, last = segment[0], segment[-1]
+    first_position = positions[first.frame_index]
+    last_position = positions[last.frame_index]
+    left_censored = bool(
+        track.left_censored and first.frame_index == track.first.frame_index
+    )
+    right_censored = bool(
+        track.right_censored and last.frame_index == track.last.frame_index
+    )
+    left_gap_unresolved = (
+        first_position > first_track_position
+        and first_position - 1 not in track_positions
+    )
+    right_gap_unresolved = (
+        last_position < last_track_position
+        and last_position + 1 not in track_positions
+    )
+    gap_censored = left_gap_unresolved or right_gap_unresolved
+    lower = _time_difference(first.time_ps, last.time_ps)
+    upper = _interval_upper_bound(
+        frames,
+        first_position,
+        last_position,
+        left_censored=left_censored or left_gap_unresolved,
+        right_censored=right_censored or right_gap_unresolved,
+    )
+    return {
+        "start_frame_index": first.frame_index,
+        "end_frame_index": last.frame_index,
+        "start_time_ps": first.time_ps,
+        "end_time_ps": last.time_ps,
+        "observed_frames": len(segment),
+        "observed_span_ps": lower,
+        "residence_lifetime_lower_ps": lower,
+        "residence_lifetime_upper_ps": upper,
+        "residence_time_ps": _sampled_occupancy_time(
+            frames,
+            (positions[item.frame_index] for item in segment),
+        ),
+        "cage_types": ",".join(_unique(item.cage_type for item in segment)),
+        "phases": ",".join(
+            _unique(phase for item in segment for phase in item.phase_labels)
+        ),
+        "duration_status": _residence_duration_status(
+            lower, upper, left_censored, right_censored, gap_censored
+        ),
+        "left_censored": left_censored,
+        "right_censored": right_censored,
+        "left_gap_unresolved": left_gap_unresolved,
+        "right_gap_unresolved": right_gap_unresolved,
+        "gap_censored": gap_censored,
+    }
 
 def occupancy_transition_rows(
     data: TrackingResult | TargetSelection,

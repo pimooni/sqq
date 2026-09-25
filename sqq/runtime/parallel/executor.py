@@ -121,7 +121,7 @@ def _execute_serial(
                     _cleanup_failed_plan(plan)
                     raise
             if plan.context.stream_results and not plan.context.retain_results:
-                outcome = replace(outcome, result=None)
+                outcome = replace(outcome, result=None, snapshot=None)
             outcomes.append(outcome)
             _safe_emit(
                 event_sink,
@@ -215,7 +215,7 @@ def _execute_concurrent(
                         if outcome_sink is not None:
                             outcome_sink(outcome)
                         if not plan.context.retain_results:
-                            outcome = replace(outcome, result=None)
+                            outcome = replace(outcome, result=None, snapshot=None)
                         outcomes[task_index] = outcome
                         next_publish += 1
                 except BaseException as exc:

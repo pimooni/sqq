@@ -6,7 +6,7 @@ from copy import deepcopy
 from typing import Any
 
 DEFAULT_MODE = "py"
-CONFIG_SCHEMA_VERSION = "0.5.6"
+CONFIG_SCHEMA_VERSION = "0.5.7"
 DEFAULT_ORDER_PARAMETERS = ("f3", "f4")
 CPP_MODE = "cpp"
 CPP_MODES = frozenset({"99", CPP_MODE})

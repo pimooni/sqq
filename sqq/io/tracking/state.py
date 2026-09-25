@@ -5,11 +5,12 @@ from __future__ import annotations
 from collections import Counter
 from dataclasses import replace
 import csv
+import hashlib
 import json
 import os
 from pathlib import Path
 import re
-from typing import Iterable, Mapping, Sequence
+from typing import Callable, Iterable, Mapping, Sequence
 from uuid import uuid4
 
 import numpy as np
@@ -20,15 +21,15 @@ from ...core.tracking import (
     guest_event_rows,
     guest_residence_lifetime_rows,
     guest_residence_rows,
+    iter_observation_rows,
+    iter_tracking_quality_rows,
     lifetime_distribution_rows,
     lifetime_rows,
     lifetime_survival_rows,
-    observation_rows,
     occupancy_state_lifetime_rows,
     occupancy_transition_rows,
     population_rows,
     select_targets,
-    tracking_quality_rows,
 )
 from ...models.tracking import (
     CageObservation,
@@ -224,9 +225,11 @@ __all__ = [
     "discover_track_state",
     "add_precursor_membership",
     "read_tracking_result",
+    "rewrite_membership_for_targets",
     "rewrite_membership_track_ids",
     "serialize_tracking_result",
     "target_directory_name",
+    "build_target_tables",
     "write_target_selection",
     "write_track_info",
     "write_track_outputs",
@@ -306,20 +309,71 @@ def deserialize_tracking_result(payload: Mapping[str, object]) -> TrackingResult
 
 
 def write_tracking_result(result: TrackingResult, path: str | Path) -> Path:
-    """Atomically write ``track_state.json`` or an explicit JSON path."""
+    """Atomically write ``track_state.json`` or an explicit JSON path.
+
+    The file is streamed track by track and event by event in exactly the
+    layout of ``json.dumps(serialize_tracking_result(result), indent=2)``, so
+    neither the complete dictionary tree nor the complete text is ever held in
+    memory at once.
+    """
+    if not isinstance(result, TrackingResult):
+        raise TypeError("result must be a TrackingResult.")
     target = Path(path)
     if target.exists() and target.is_dir():
         target = target / TRACK_STATE_NAME
     elif not target.suffix:
         target = target / TRACK_STATE_NAME
-    text = json.dumps(
-        serialize_tracking_result(result),
-        ensure_ascii=False,
-        indent=2,
-        allow_nan=False,
-    )
-    _atomic_write_text(target, text + "\n")
+    target.parent.mkdir(parents=True, exist_ok=True)
+    temporary = _temporary_path(target)
+    try:
+        with temporary.open("w", encoding="utf-8", newline="\n") as handle:
+            _stream_tracking_result(result, handle)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, target)
+    finally:
+        temporary.unlink(missing_ok=True)
     return target
+
+
+def _json_text(value: object) -> str:
+    return json.dumps(value, ensure_ascii=False, indent=2, allow_nan=False)
+
+
+def _stream_tracking_result(result: TrackingResult, handle) -> None:
+    """Write the schema-4 state with ``indent=2`` layout without materializing it."""
+
+    def nested(value: object, depth: int) -> str:
+        # A value placed after ``"key": `` keeps its first line in place and
+        # indents every following line to the surrounding depth.
+        lines = _json_text(value).split("\n")
+        prefix = "  " * depth
+        return "\n".join([lines[0], *(prefix + line for line in lines[1:])])
+
+    def stream_list(items, depth: int) -> None:
+        first = True
+        for item in items:
+            handle.write("\n" if first else ",\n")
+            first = False
+            prefix = "  " * depth
+            handle.write("\n".join(prefix + line for line in _json_text(item).split("\n")))
+        if first:
+            handle.write("]")
+        else:
+            handle.write("\n" + "  " * (depth - 1) + "]")
+
+    handle.write("{\n")
+    handle.write(f'  "format": {_json_text(_STATE_FORMAT)},\n')
+    handle.write(f'  "version": {_json_text(_STATE_VERSION)},\n')
+    handle.write(f'  "tracking_config": {nested(result.config.to_dict(), 1)},\n')
+    handle.write(f'  "source_provenance": {nested(dict(result.source_provenance), 1)},\n')
+    handle.write('  "frames": [')
+    stream_list((_frame_to_dict(frame) for frame in result.frames), 2)
+    handle.write(',\n  "tracks": [')
+    stream_list((_track_to_dict(track) for track in result.tracks), 2)
+    handle.write(',\n  "events": [')
+    stream_list((_event_to_dict(event) for event in result.events), 2)
+    handle.write("\n}\n")
 
 
 def read_tracking_result(source: str | Path | None = None) -> TrackingResult:
@@ -393,18 +447,27 @@ def target_directory_name(target: TargetSpec) -> str:
 
 TrackTables = dict[str, list[Row]]
 
+# Observation-level tables grow with every observation; they are streamed
+# straight from the tracking data into their CSV files instead of being kept
+# as row dictionaries next to the (much smaller) per-track and aggregate tables.
+_STREAMED_TABLES: dict[str, Callable[[TrackingResult | TargetSelection], Iterable[Row]]] = {
+    "cage_observation.csv": iter_observation_rows,
+    "statistics/tracking_quality.csv": iter_tracking_quality_rows,
+}
+
 
 def build_track_tables(data: TrackingResult | TargetSelection) -> TrackTables:
-    """Build every Track table once, keyed by its relative output path.
+    """Build the materialized Track tables once, keyed by relative output path.
 
     Derived tables (lifetime distribution, survival, transition nodes, the
     Markdown summary) reuse the shared per-track and edge rows instead of
-    recomputing them for every consumer.
+    recomputing them for every consumer. The observation-level tables listed
+    in ``_STREAMED_TABLES`` are not part of the result; ``write_tracking_tables``
+    streams them directly.
     """
     lifetimes = lifetime_rows(data)
     edges = cage_transition_edge_rows(data)
     return {
-        "cage_observation.csv": observation_rows(data),
         "cage_track.csv": lifetimes,
         "lifetime_distribution.csv": lifetime_distribution_rows(
             data, samples=lifetimes
@@ -412,7 +475,6 @@ def build_track_tables(data: TrackingResult | TargetSelection) -> TrackTables:
         "cage_event.csv": event_rows(data),
         "cage_population.csv": population_rows(data),
         "guest_residence.csv": guest_residence_rows(data),
-        "statistics/tracking_quality.csv": tracking_quality_rows(data),
         "statistics/guest_event.csv": guest_event_rows(data),
         "statistics/guest_residence_lifetime.csv": guest_residence_lifetime_rows(data),
         "statistics/occupancy_state_lifetime.csv": occupancy_state_lifetime_rows(data),
@@ -441,7 +503,9 @@ def write_tracking_tables(
     written: dict[str, Path] = {}
     for relative_name, fields in _TABLE_FIELDS.items():
         path = root / relative_name
-        _atomic_write_csv(path, tables[relative_name], fields)
+        streamed = _STREAMED_TABLES.get(relative_name)
+        rows = streamed(data) if streamed is not None else tables[relative_name]
+        _atomic_write_csv(path, rows, fields)
         written[relative_name] = path
     plot = write_cage_transition_plot(
         data,
@@ -467,15 +531,77 @@ def write_track_info(
     return path
 
 
+# Tables whose rows belong to exactly one track: a target table is the
+# run-level table filtered by track ID with the ``target`` column relabelled.
+_TRACK_SCOPED_TABLES = (
+    "cage_track.csv",
+    "guest_residence.csv",
+    "statistics/guest_residence_lifetime.csv",
+    "statistics/occupancy_state_lifetime.csv",
+)
+
+
+def build_target_tables(
+    selection: TargetSelection,
+    run_tables: TrackTables | None = None,
+) -> TrackTables:
+    """Build the tables of one target, reusing run-level rows where possible.
+
+    Every per-track row of a target equals the run-level row with ``target``
+    relabelled, so those tables are filtered instead of recomputed. Frame-level
+    and aggregate tables (population, events, lineage, transitions,
+    distributions) depend on the selected set and are rebuilt from the
+    selection. Observation-level tables are streamed per target from the
+    selection itself and are never held as rows.
+    """
+    if run_tables is None:
+        return build_track_tables(selection)
+    track_ids = {track.track_id for track in selection.tracks}
+    label = selection.target.value
+
+    def filtered(name: str) -> list[Row]:
+        return [
+            {**row, "target": label}
+            for row in run_tables[name]
+            if row["track_id"] in track_ids
+        ]
+
+    lifetimes = filtered("cage_track.csv")
+    edges = cage_transition_edge_rows(selection)
+    tables: TrackTables = {name: filtered(name) for name in _TRACK_SCOPED_TABLES}
+    tables.update(
+        {
+            "lifetime_distribution.csv": lifetime_distribution_rows(
+                selection, samples=lifetimes
+            ),
+            "cage_event.csv": event_rows(selection),
+            "cage_population.csv": population_rows(selection),
+            "statistics/guest_event.csv": guest_event_rows(selection),
+            "statistics/occupancy_transition.csv": occupancy_transition_rows(selection),
+            "statistics/lifetime_survival.csv": lifetime_survival_rows(
+                selection, samples=lifetimes
+            ),
+            "statistics/cage_lineage.csv": cage_lineage_rows(selection),
+            "network/cage_transition_nodes.csv": cage_transition_node_rows(
+                selection, edges=edges
+            ),
+            "network/cage_transition_edges.csv": edges,
+        }
+    )
+    return tables
+
+
 def write_target_selection(
     selection: TargetSelection,
     track_root: str | Path,
+    *,
+    run_tables: TrackTables | None = None,
 ) -> Path:
     """Write normalized tables and metadata for one Track target."""
     root = Path(track_root)
     directory = _safe_child(root, target_directory_name(selection.target))
     directory.mkdir(parents=True, exist_ok=True)
-    tables = build_track_tables(selection)
+    tables = build_target_tables(selection, run_tables)
     write_tracking_tables(selection, directory, tables=tables)
     write_track_info(selection, directory, tables=tables)
     return directory
@@ -495,7 +621,7 @@ def write_track_outputs(
     written[TRACK_STATE_NAME] = write_tracking_result(result, root / TRACK_STATE_NAME)
     written[TRACK_INFO_NAME] = write_track_info(result, root, tables=tables)
     for selection in select_targets(result, targets):
-        directory = write_target_selection(selection, root)
+        directory = write_target_selection(selection, root, run_tables=tables)
         written[target_directory_name(selection.target)] = directory
     return written
 
@@ -503,117 +629,251 @@ def write_track_outputs(
 def rewrite_membership_track_ids(
     path: str | Path,
     data: TrackingResult | TargetSelection,
-) -> Path:
-    """Atomically map cage C/M records in a copied TSV to persistent IDs."""
+    *,
+    return_digest: bool = False,
+) -> Path | tuple[Path, str]:
+    """Atomically map cage C/M records in a copied TSV to persistent IDs.
+
+    With ``return_digest`` the SHA-256 of the rewritten file is returned as
+    well, computed from the bytes as they are written.
+    """
     target = Path(path)
-    observations = data.observations
-    mapping: dict[tuple[int, str, str], str] = {}
-    for item in observations:
-        key = (
-            int(item.frame_index),
-            _compact_object_id(item.local_cage_id),
-            str(item.cage_type),
-        )
-        previous = mapping.setdefault(key, item.track_id)
-        if previous != item.track_id:
+    digests = rewrite_membership_for_targets(target, ((target, data),))
+    if return_digest:
+        return target, digests[0]
+    return target
+
+
+def rewrite_membership_for_targets(
+    source: str | Path,
+    targets: Sequence[tuple[str | Path, TrackingResult | TargetSelection]],
+) -> list[str]:
+    """Write persistent-ID membership TSVs in bounded target batches.
+
+    A normal request uses one source pass. Very large requests are split into
+    bounded batches so they cannot exhaust file descriptors or retain every
+    target mapping simultaneously. A complete ``TrackingResult`` keeps every
+    cage record; a ``TargetSelection`` drops cages of unselected tracks. Each
+    destination is written atomically and SHA-256 digests are returned in
+    target order. The source may itself be one destination (in-place rewrite).
+    """
+    source_path = Path(source)
+    if not targets:
+        return []
+    indexed = [
+        (index, Path(destination), data)
+        for index, (destination, data) in enumerate(targets)
+    ]
+    identities: dict[str, Path] = {}
+    for _index, destination, _data in indexed:
+        identity = os.path.normcase(str(destination.resolve(strict=False)))
+        previous = identities.get(identity)
+        if previous is not None:
             raise ValueError(
-                f"Frame {item.frame_index} cage {key[2]}:{key[1]} maps to both "
-                f"{previous} and {item.track_id}."
+                "Membership target destinations must be unique: "
+                f"{previous} and {destination}."
             )
-    expected_persistent = {
-        (int(item.frame_index), str(item.track_id), str(item.cage_type))
-        for item in observations
-    }
-    temporary = _temporary_path(target)
+        identities[identity] = destination
+
+    source_identity = os.path.normcase(str(source_path.resolve(strict=False)))
+    # An in-place destination must be processed last so earlier batches still
+    # read the original unfiltered source.
+    indexed.sort(
+        key=lambda item: (
+            os.path.normcase(str(item[1].resolve(strict=False))) == source_identity,
+            item[0],
+        )
+    )
+    digests = [""] * len(indexed)
+    batch_size = max(1, int(_MEMBERSHIP_TARGET_BATCH_SIZE))
+    for start in range(0, len(indexed), batch_size):
+        batch = indexed[start : start + batch_size]
+        for index, digest in _rewrite_membership_target_batch(source_path, batch):
+            digests[index] = digest
+    return digests
+
+
+_MEMBERSHIP_TARGET_BATCH_SIZE = 128
+
+
+def _rewrite_membership_target_batch(
+    source_path: Path,
+    targets: Sequence[
+        tuple[int, Path, TrackingResult | TargetSelection]
+    ],
+) -> list[tuple[int, str]]:
+    """Rewrite one bounded batch from one source pass."""
+    indexed_writers = [
+        (index, _MembershipTargetWriter(destination, data))
+        for index, destination, data in targets
+    ]
+    writers = [writer for _index, writer in indexed_writers]
+    frame_stamps = tuple(writers[0].data.frames)
+    for writer in writers[1:]:
+        if tuple(writer.data.frames) != frame_stamps:
+            raise ValueError("All membership targets must share the same tracking frames.")
+    frame_by_render: dict[int, int] = {}
     try:
-        with target.open("r", encoding="utf-8", newline="") as source_handle:
+        with source_path.open("r", encoding="utf-8", newline="") as source_handle:
             reader = csv.DictReader(source_handle, delimiter="\t")
             required = {"record", "render_frame", "family", "cage_id", "cage_type"}
             if reader.fieldnames is None or not required.issubset(reader.fieldnames):
-                raise ValueError(f"Invalid SQQ membership TSV: {target}")
+                raise ValueError(f"Invalid SQQ membership TSV: {source_path}")
             fields = list(reader.fieldnames)
-            frame_by_render: dict[int, int] = {}
-            frame_stamps = tuple(data.frames)
-            seen_persistent: set[tuple[int, str, str]] = set()
-            with temporary.open("w", encoding="ascii", newline="") as output:
-                writer = csv.DictWriter(
-                    output,
-                    fieldnames=fields,
-                    delimiter="\t",
-                    lineterminator="\n",
-                    extrasaction="raise",
-                )
-                writer.writeheader()
-                for row in reader:
-                    record = row.get("record")
-                    render_index = int(row["render_frame"])
-                    if record == "F":
-                        if render_index < 0 or render_index >= len(frame_stamps):
-                            raise ValueError(
-                                f"Membership render frame {render_index} has no "
-                                "tracking frame."
-                            )
-                        if render_index in frame_by_render:
-                            raise ValueError(
-                                f"Membership render frame {render_index} is repeated."
-                            )
-                        stamp = frame_stamps[render_index]
-                        frame_by_render[render_index] = stamp.frame_index
-                        raw_time = row.get("time_ps", "-")
-                        if stamp.time_ps is not None and raw_time not in {None, "", "-"}:
-                            if abs(float(raw_time) - stamp.time_ps) > max(
-                                1.0e-6, abs(stamp.time_ps) * 1.0e-9
-                            ):
-                                raise ValueError(
-                                    f"Membership time for render frame {render_index} "
-                                    "does not match tracking state."
-                                )
-                    elif (
-                        (record == "C" and row.get("family") == "cage")
-                        or (
-                            record == "M"
-                            and row.get("family") in {"cage", "guest"}
+            for writer in writers:
+                writer.open(fields)
+            for row in reader:
+                record = row.get("record")
+                render_index = int(row["render_frame"])
+                if record == "F":
+                    if render_index < 0 or render_index >= len(frame_stamps):
+                        raise ValueError(
+                            f"Membership render frame {render_index} has no "
+                            "tracking frame."
                         )
-                    ):
-                        if render_index not in frame_by_render:
+                    if render_index in frame_by_render:
+                        raise ValueError(
+                            f"Membership render frame {render_index} is repeated."
+                        )
+                    stamp = frame_stamps[render_index]
+                    frame_by_render[render_index] = stamp.frame_index
+                    raw_time = row.get("time_ps", "-")
+                    if stamp.time_ps is not None and raw_time not in {None, "", "-"}:
+                        if abs(float(raw_time) - stamp.time_ps) > max(
+                            1.0e-6, abs(stamp.time_ps) * 1.0e-9
+                        ):
                             raise ValueError(
-                                f"Cage membership precedes frame record {render_index}."
+                                f"Membership time for render frame {render_index} "
+                                "does not match tracking state."
                             )
-                        frame_index = frame_by_render[render_index]
-                        cage_id = str(row.get("cage_id", ""))
-                        cage_type = str(row.get("cage_type", ""))
-                        counts_as_cage = row.get("family") == "cage"
-                        key = (frame_index, cage_id, cage_type)
-                        track_id = mapping.get(key)
-                        if track_id is None and _TRACK_ID.fullmatch(cage_id):
-                            if (frame_index, cage_id, cage_type) not in expected_persistent:
-                                if isinstance(data, TargetSelection):
-                                    continue
-                                raise ValueError(
-                                    f"Persistent membership {cage_id} does not match "
-                                    f"tracking state in frame {frame_index}."
-                                )
-                            if counts_as_cage:
-                                seen_persistent.add((frame_index, cage_id, cage_type))
-                        elif track_id is None:
-                            if isinstance(data, TargetSelection):
-                                continue
-                            raise ValueError(
-                                f"No persistent ID for cage {cage_type}:{cage_id} "
-                                f"in frame {frame_index}."
-                            )
-                        else:
-                            row["cage_id"] = track_id
-                            if counts_as_cage:
-                                seen_persistent.add((frame_index, track_id, cage_type))
-                    writer.writerow(row)
-                output.flush()
-                os.fsync(output.fileno())
+                    for writer in writers:
+                        writer.write_row(row)
+                    continue
+                cage_row = (record == "C" and row.get("family") == "cage") or (
+                    record == "M" and row.get("family") in {"cage", "guest"}
+                )
+                if not cage_row:
+                    for writer in writers:
+                        writer.write_row(row)
+                    continue
+                if render_index not in frame_by_render:
+                    raise ValueError(
+                        f"Cage membership precedes frame record {render_index}."
+                    )
+                frame_index = frame_by_render[render_index]
+                for writer in writers:
+                    writer.write_cage_row(row, frame_index)
+            for writer in writers:
+                writer.finish()
         if len(frame_by_render) != len(frame_stamps):
             raise ValueError(
                 "Membership TSV and tracking state have different frame records."
             )
-        missing_cages = expected_persistent.difference(seen_persistent)
+        for writer in writers:
+            writer.verify_complete()
+        for writer in writers:
+            writer.publish()
+    finally:
+        for writer in writers:
+            writer.cleanup()
+    return [(index, writer.digest) for index, writer in indexed_writers]
+
+
+class _MembershipTargetWriter:
+    """Per-target state of the single-pass membership rewrite."""
+
+    def __init__(
+        self,
+        destination: Path,
+        data: TrackingResult | TargetSelection,
+    ) -> None:
+        self.destination = destination
+        self.data = data
+        self.selective = isinstance(data, TargetSelection)
+        self.mapping: dict[tuple[int, str, str], str] = {}
+        observations = data.observations
+        for item in observations:
+            key = (
+                int(item.frame_index),
+                _compact_object_id(item.local_cage_id),
+                str(item.cage_type),
+            )
+            previous = self.mapping.setdefault(key, item.track_id)
+            if previous != item.track_id:
+                raise ValueError(
+                    f"Frame {item.frame_index} cage {key[2]}:{key[1]} maps to both "
+                    f"{previous} and {item.track_id}."
+                )
+        self.expected_persistent = {
+            (int(item.frame_index), str(item.track_id), str(item.cage_type))
+            for item in observations
+        }
+        self.seen_persistent: set[tuple[int, str, str]] = set()
+        self.temporary = _temporary_path(destination)
+        self._raw_handle = None
+        self._output: _HashingTextWriter | None = None
+        self._writer: csv.DictWriter | None = None
+        self.digest = ""
+
+    def open(self, fields: list[str]) -> None:
+        self.destination.parent.mkdir(parents=True, exist_ok=True)
+        self._raw_handle = self.temporary.open("w", encoding="ascii", newline="")
+        self._output = _HashingTextWriter(self._raw_handle, "ascii")
+        self._writer = csv.DictWriter(
+            self._output,
+            fieldnames=fields,
+            delimiter="\t",
+            lineterminator="\n",
+            extrasaction="raise",
+        )
+        self._writer.writeheader()
+
+    def write_row(self, row: dict[str, object]) -> None:
+        assert self._writer is not None
+        self._writer.writerow(row)
+
+    def write_cage_row(self, row: dict[str, object], frame_index: int) -> None:
+        assert self._writer is not None
+        cage_id = str(row.get("cage_id", ""))
+        cage_type = str(row.get("cage_type", ""))
+        counts_as_cage = row.get("family") == "cage"
+        track_id = self.mapping.get((frame_index, cage_id, cage_type))
+        if track_id is None and _TRACK_ID.fullmatch(cage_id):
+            if (frame_index, cage_id, cage_type) not in self.expected_persistent:
+                if self.selective:
+                    return
+                raise ValueError(
+                    f"Persistent membership {cage_id} does not match "
+                    f"tracking state in frame {frame_index}."
+                )
+            if counts_as_cage:
+                self.seen_persistent.add((frame_index, cage_id, cage_type))
+            self._writer.writerow(row)
+            return
+        if track_id is None:
+            if self.selective:
+                return
+            raise ValueError(
+                f"No persistent ID for cage {cage_type}:{cage_id} "
+                f"in frame {frame_index}."
+            )
+        # Copy before mutating: the same source row is shared by every target.
+        mapped = dict(row)
+        mapped["cage_id"] = track_id
+        if counts_as_cage:
+            self.seen_persistent.add((frame_index, track_id, cage_type))
+        self._writer.writerow(mapped)
+
+    def finish(self) -> None:
+        assert self._output is not None and self._raw_handle is not None
+        self._output.flush()
+        os.fsync(self._output.fileno())
+        self._raw_handle.close()
+        self._raw_handle = None
+        self.digest = self._output.digest.hexdigest()
+
+    def verify_complete(self) -> None:
+        missing_cages = self.expected_persistent.difference(self.seen_persistent)
         if missing_cages:
             preview = ", ".join(
                 f"frame {frame}:{track_id}:{cage_type}"
@@ -623,10 +883,36 @@ def rewrite_membership_track_ids(
                 "Tracking state contains cages absent from membership TSV: "
                 + preview
             )
-        os.replace(temporary, target)
-    finally:
-        temporary.unlink(missing_ok=True)
-    return target
+
+    def publish(self) -> None:
+        os.replace(self.temporary, self.destination)
+
+    def cleanup(self) -> None:
+        if self._raw_handle is not None:
+            try:
+                self._raw_handle.close()
+            except OSError:
+                pass
+            self._raw_handle = None
+        self.temporary.unlink(missing_ok=True)
+
+class _HashingTextWriter:
+    """Text-file proxy that hashes the encoded bytes of everything written."""
+
+    def __init__(self, handle: object, encoding: str) -> None:
+        self._handle = handle
+        self._encoding = encoding
+        self.digest = hashlib.sha256()
+
+    def write(self, text: str) -> int:
+        self.digest.update(text.encode(self._encoding))
+        return self._handle.write(text)  # type: ignore[attr-defined]
+
+    def flush(self) -> None:
+        self._handle.flush()  # type: ignore[attr-defined]
+
+    def fileno(self) -> int:
+        return self._handle.fileno()  # type: ignore[attr-defined]
 
 
 def add_precursor_membership(
@@ -1281,17 +1567,19 @@ def _track_info_text(
         for row in lifetimes
         if row.get("lifetime_lower_ps") is not None
     ]
-    quality = tables["statistics/tracking_quality.csv"]
-    quality_counts = Counter(str(row.get("match_status", "unavailable")) for row in quality)
+    matched = [
+        item
+        for item in data.observations
+        if item.match_status in {"secure", "ambiguous", "gap_bridge"}
+    ]
+    quality_counts = Counter(str(item.match_status) for item in matched)
     match_scores = [
-        float(row["match_score"])
-        for row in quality
-        if row.get("match_score") is not None
+        float(item.match_score) for item in matched if item.match_score is not None
     ]
     match_margins = [
-        float(row["score_margin"])
-        for row in quality
-        if row.get("score_margin") is not None
+        float(item.match_score_margin)
+        for item in matched
+        if item.match_score_margin is not None
     ]
     guest_residence = tables["statistics/guest_residence_lifetime.csv"]
     guest_lifetimes = _row_numeric_values(

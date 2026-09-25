@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from collections.abc import Sequence
+from dataclasses import dataclass, field, fields
 from functools import cached_property
 import re
 from typing import Iterable, Literal, Mapping
@@ -81,6 +82,45 @@ _PHASE_ORDER = {
     "isolated": 6,
     "unassigned": 7,
 }
+
+
+def _pickle_compatible_slots(cls):
+    """Keep slotted records readable from pre-0.5.7 dataclass pickles.
+
+    Unslotted frozen dataclasses were pickled as name-to-value dictionaries.
+    Python's generated pickle hook for a frozen slotted dataclass instead
+    expects a positional sequence and silently assigns dictionary keys as
+    values.  Store names going forward and accept both representations.
+    """
+    names = tuple(item.name for item in fields(cls))
+
+    def __getstate__(self):
+        return {name: getattr(self, name) for name in names}
+
+    def __setstate__(self, state):
+        if isinstance(state, Mapping):
+            missing = [name for name in names if name not in state]
+            if missing:
+                raise ValueError(
+                    "Pickled tracking record is missing field(s): "
+                    + ", ".join(missing)
+                )
+            values = tuple(state[name] for name in names)
+        elif isinstance(state, (tuple, list)):
+            if len(state) != len(names):
+                raise ValueError(
+                    f"Pickled tracking record has {len(state)} values; "
+                    f"expected {len(names)}."
+                )
+            values = tuple(state)
+        else:
+            raise TypeError("Pickled tracking record state must be a mapping or sequence.")
+        for name, value in zip(names, values):
+            object.__setattr__(self, name, value)
+
+    cls.__getstate__ = __getstate__
+    cls.__setstate__ = __setstate__
+    return cls
 
 
 @dataclass(frozen=True)
@@ -220,7 +260,8 @@ class TrackingConfig:
         }
 
 
-@dataclass(frozen=True)
+@_pickle_compatible_slots
+@dataclass(frozen=True, slots=True)
 class FrameStamp:
     frame_index: int
     frame_name: str
@@ -228,7 +269,8 @@ class FrameStamp:
     source: str
 
 
-@dataclass(frozen=True)
+@_pickle_compatible_slots
+@dataclass(frozen=True, slots=True)
 class TrackCageSnapshot:
     """JSON-safe representation of one complete cage."""
 
@@ -301,7 +343,8 @@ class TrackCageSnapshot:
         )
 
 
-@dataclass(frozen=True)
+@_pickle_compatible_slots
+@dataclass(frozen=True, slots=True)
 class TrackFrameSnapshot:
     """Frame metadata and cages consumed by the serial tracker."""
 
@@ -367,7 +410,8 @@ class TrackFrameSnapshot:
         )
 
 
-@dataclass(frozen=True)
+@_pickle_compatible_slots
+@dataclass(frozen=True, slots=True)
 class CageObservation:
     track_id: str
     frame_index: int
@@ -404,10 +448,11 @@ class CageObservation:
     gap_time_ps: float | None = None
 
 
-@dataclass(frozen=True)
+@_pickle_compatible_slots
+@dataclass(frozen=True, slots=True)
 class CageTrack:
     track_id: str
-    observations: tuple[CageObservation, ...]
+    observations: Sequence[CageObservation]
     left_censored: bool
     right_censored: bool
 
@@ -424,7 +469,8 @@ class CageTrack:
         return sum(item.gap_frames for item in self.observations)
 
 
-@dataclass(frozen=True)
+@_pickle_compatible_slots
+@dataclass(frozen=True, slots=True)
 class TrackEvent:
     event_id: str
     kind: EventKind
@@ -458,16 +504,21 @@ class TrackEvent:
 
 @dataclass(frozen=True)
 class TrackingResult:
-    frames: tuple[FrameStamp, ...]
-    tracks: tuple[CageTrack, ...]
-    events: tuple[TrackEvent, ...]
+    frames: Sequence[FrameStamp]
+    tracks: Sequence[CageTrack]
+    events: Sequence[TrackEvent]
     config: TrackingConfig = field(default_factory=TrackingConfig)
     source_provenance: Mapping[str, object] = field(default_factory=dict)
+    _observation_view: Sequence[CageObservation] | None = field(
+        default=None, repr=False, compare=False
+    )
 
     # The frozen instance never changes, so the sorted view is computed once
     # instead of on every table builder that consumes it.
     @cached_property
-    def observations(self) -> tuple[CageObservation, ...]:
+    def observations(self) -> Sequence[CageObservation]:
+        if self._observation_view is not None:
+            return self._observation_view
         rows = (item for track in self.tracks for item in track.observations)
         return tuple(sorted(rows, key=_observation_sort_key))
 
@@ -486,13 +537,18 @@ class TargetSpec:
 @dataclass(frozen=True)
 class TargetSelection:
     target: TargetSpec
-    frames: tuple[FrameStamp, ...]
-    tracks: tuple[CageTrack, ...]
-    events: tuple[TrackEvent, ...]
+    frames: Sequence[FrameStamp]
+    tracks: Sequence[CageTrack]
+    events: Sequence[TrackEvent]
     config: TrackingConfig = field(default_factory=TrackingConfig)
+    _observation_view: Sequence[CageObservation] | None = field(
+        default=None, repr=False, compare=False
+    )
 
     @cached_property
-    def observations(self) -> tuple[CageObservation, ...]:
+    def observations(self) -> Sequence[CageObservation]:
+        if self._observation_view is not None:
+            return self._observation_view
         rows = (item for track in self.tracks for item in track.observations)
         return tuple(sorted(rows, key=_observation_sort_key))
 

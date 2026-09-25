@@ -1,5 +1,58 @@
 # SQQ Update Notes
 
+## Version 0.5.7
+
+### Short Summary
+
+Version 0.5.7 is an efficiency release for the Track and render pipelines. Every optimization is output-neutral: the published GRO/XTC/membership/Tcl packages, `track_state.json` including its provenance digests, all CSV tables, and the precursor history are byte-identical to 0.5.6 output for the same input. Analyze and raw Track now spool their observation/event history to run-private disk, so workflow memory is governed by active/dormant matching state rather than trajectory-length history; render fragments are read once, and ordinary target sets read the source membership table once while unusually large sets use bounded batches. A persistent-ID target no longer re-analyzes its pre-birth prefix, and several small 0.5.6 follow-ups in terminal wording, frame accounting, and target reporting are closed. The release metadata is dated Sep 25, 2026 (Mid-Autumn Day).
+
+### Main Changes
+
+1. Bounded Track memory
+   - Appends Analyze/raw-Track observations and events to a run-private SQLite spool, exposes deterministic repeatable ordered views for reports and targets, and deletes the store only after every consumer finishes. Active/dormant matching state remains in memory; the public `track_snapshots()` and `track_cages()` APIs retain their tuple-based behavior.
+   - Writes `track_state.json` as a stream of frame, track, and event records in the unchanged `indent=2` layout, so neither the complete dictionary tree nor the complete JSON text is ever held in memory.
+   - Streams the observation-level tables `cage_observation.csv` and `statistics/tracking_quality.csv` straight from the tracking data into their CSV files; only per-track and aggregate tables are still materialized and shared between consumers, and `track_info.md` derives its matching-quality summary from the observations directly.
+   - Clears the full result and compact snapshot from each retained runtime outcome after ordered streaming consumers have processed it, avoiding a second trajectory-length snapshot sequence.
+   - Declares the per-observation record classes (`FrameStamp`, `TrackCageSnapshot`, `TrackFrameSnapshot`, `CageObservation`, `CageTrack`, `TrackEvent`, and the engine's internal state records) with `__slots__`; public records use name-based pickle state that reads the dictionary representation written by 0.5.6 and the positional representation used by early 0.5.7 development builds.
+   - Uses one deterministic engine-independent PBC-connected centroid reduction for ordinary SQQ-Py and SQQ-CPP cage output. This removes machine-epsilon accumulation-order differences from Track tie-breaks while retaining the native cage search, all full-precision coordinates, and every scientific cutoff.
+   - The former in-memory path was measured on a synthetic 300-frame x 400-cage stream (117,620 observations): slotted records reduced accumulator retention from 298 MB to 138 MB and streaming reduced output-write overhead from 1.50 GB to 42 MB. Workflow spooling removes that remaining trajectory-length observation/event retention; direct in-memory-versus-spool validation produced equal state and 83 byte-identical Track files.
+   - Real-data validation used a 1.417 GB, 1,001-frame LAMMPS trajectory. Analyze completed in 905.678 s with a 1.605 GB peak aggregate working set; source Track completed in 12.943 s with a 169.964 MB peak. Raw SQQ-Py Track over 63 selected frames completed in 663.684 s with a 244.113 MB peak and removed its private spool workspace after publication.
+
+2. Single-pass render and provenance I/O
+   - Parses each render fragment GRO exactly once while finalizing a package: the same lines feed fragment validation, the topology GRO, the membership TSV rows, and the XTC coordinates. Previously every fragment was read four times.
+   - Computes the SHA-256 of the topology GRO, membership TSV (including the persistent-ID rewrite), and Tcl script while they are written, hashes the XTC once, and passes digests, atom count, and topology identity to provenance through `RenderBundle`. Analyze-side provenance therefore reads only the membership TSV once, for its structural self-check.
+   - Hashes the source membership TSV and topology GRO while they are parsed in `--source` validation, so each is read once; the imported package is still verified in full because nothing about it is trusted.
+   - Reads the frame count of a discovered package from the `frames=N` GRO title written since compact packages exist, scanning the membership TSV only for packages without it; validation still cross-checks TSV, XTC, and state frame counts.
+
+3. Multi-target Track output without repeated work
+   - Builds per-track target tables (`cage_track.csv`, `guest_residence.csv`, `statistics/guest_residence_lifetime.csv`, `statistics/occupancy_state_lifetime.csv`) by filtering the run-level rows on track ID and relabelling `target`; only frame-level and aggregate tables (population, events, lineage, transitions, survival, distribution, network) are rebuilt per target. Target files are unchanged.
+   - Writes membership TSVs in batches of at most 128 targets (`rewrite_membership_for_targets`): ordinary requests retain one source-table pass, while larger requests use bounded additional passes instead of opening every destination and retaining every target map simultaneously. Duplicate normalized destinations are rejected; the single-target function remains a wrapper with identical validation and output.
+
+4. Precursor history without a second analysis
+   - Spools compact JSON precursor records (water-oxygen identities, residues, coordinates, render atom mapping, water-water edges, ring/half-cage/quasi-cage/cage water sets) into the run-private workspace only through the latest first appearance of the requested persistent IDs; later frames no longer perform unused record serialization or disk writes.
+   - Reconstructs `precursor_state.csv`, `water_history.csv`, and precursor membership by reading and releasing one record at a time. The former re-analysis remains an automatic fallback when a record is missing and now classifies each completed fallback frame immediately, so neither path retains the complete prefix while both continue to write identical files. The `Precursor Pass` panel appears only in the fallback.
+
+5. Shared residence segmentation
+   - Introduces `segment_track` (maximal runs of directly consecutive frames sharing a key) and `segment_row` (duration, censoring, and gap fields of one segment) in `sqq.core.tracking`; guest residence and exact occupancy-state residence tables are written on top of them with unchanged rows. The same helpers are the basis for future type or phase residence tables.
+
+6. Small 0.5.6 follow-ups
+   - Names the worker backend on the parallel progress page: `N worker threads x M threads` for the thread backend, `N processes x M threads` for processes.
+   - Stores one canonical `sampling.requested_frames` value in every run plan. GRO batches count all requested inputs, including read-only pre-scan failures; trajectories count the selected sampling grid rather than every available source frame. The final page uses that value, so `requested` cannot be smaller than `analyzed`.
+   - Warns explicitly when a Track target matches no cage and its directory therefore contains empty tables and a render package without selections; a phase target on frames without hydrate phase labels additionally states that imported state cannot add them retroactively (`--source`) or that the automatically enabled raw-input cluster search produced no phase labels.
+   - Stops `--source` Track from marking `hydrate_cluster.enabled: true` in its effective configuration for phase targets; imported state is read as saved, and only raw input runs the cluster search.
+
+7. Release metadata and hygiene
+   - Updates the Python package, configuration schema, native fallback, README, and design documentation to `0.5.7` (release metadata dated Sep 25, 2026; Mid-Autumn Day).
+   - Removes the unused imports reported by static analysis in `io/input/gro_grouping.py`, `io/reporting/{csv_writer,frame_info}.py`, `ui/banner.py`, and `workflow/analyze/command.py`, and the unused `workflow/analyze/command.py::_has_tracking_state` helper. No behavior changes; every module still imports and the output matrix is unchanged.
+   - Includes the run-private `io/tracking/precursor_record.py` and `core/tracking/spool.py` implementations in the source distribution; a clean-clone sdist build confirms both packaged paths.
+   - Defines LF text and binary artifact handling in `.gitattributes`, and documents that space-saving hard-linked target GRO/XTC files are logically immutable SQQ outputs.
+
+8. Maintenance validation
+   - Adds focused regression contracts for progressive replacement of a cage's member waters, exact matching-threshold boundaries, irregular and equal physical frame times, equal-score ambiguous candidates, and split-lineage persistence while centers cross an orthorhombic periodic boundary.
+   - Uses a fresh-root release matrix that is bound to an explicit candidate checkout, refuses to reuse old output directories, records and checks every expected exit status, keeps dependent Track cases on outputs from the same run, and separately checks configuration, warning, lock-cleanup, and render-package invariants omitted by byte comparison.
+   - The post-fix working-tree matrix completed all 39 declared positive and negative cases. The complete local suite reported 153 passed and 18 explicitly retired/skipped tests, all 124 modules imported, pyflakes was clean, and the stricter 356-file/configuration equivalence subset had zero differences from the frozen post-optimization output. The final maintenance subset added 70 passing tests with 3 capability skips; a separately committed candidate snapshot passed 27 focused tests from a clean clone and built `sqq-0.5.7.tar.gz` successfully.
+   - VMD 2.0.0a7 loaded both newly generated 1,001-frame Analyze and Track packages, executed the public SQQ commands, and retained a DynamicBonds radius modified at an intermediate frame while navigating to earlier and later frames. Repeated SQQ-Py and SQQ-CPP runs produced 38/38 exact non-timing files on a dense three-frame GRO and 36/36 on a 63-frame LAMMPS selection. A formal current-version Windows wheel remains a release packaging gate because the validation machine has no MSVC/NMake; this does not represent a scientific parity failure.
+
 ## Version 0.5.6
 
 ### Short Summary
@@ -46,7 +99,8 @@ Version 0.5.6 extends the existing water-shell-first `sqq track` analysis with m
    - Builds Track table inputs once, removes the unbounded parsed-track-ID cache, keeps `track_info.md` replacement crash-safe under the run-owned output lock, and inspects source XTC files without writing an offsets cache.
 
 7. Code structure
-   - Optimized the code structure.
+   - Reorganizes the package by responsibility without changing behavior: `sqq.io.trajectory`, `sqq.io.lammps`, `sqq.io.pairs`, and `sqq.io.gro_grouping` move to `sqq.io.input.*`; `sqq.io.gro_writer` and `sqq.io.output_cleanup` move to `sqq.io.output.{gro_writer,cleanup}`; `sqq.core.{cage,graph,ring,ring_topology,components,half_quasi,phase,ice,spatial}` and `sqq.core.order` move to `sqq.core.sqq_py.*`; `sqq.core.{geometry,pbc,selection}` move to `sqq.core.common.*`; the `sqq.core.tracking` and `sqq.io.tracking` modules become packages (`engine`, `snapshot`, `targets`, `statistics`; `state`, `network`); `sqq.io.reporting.tables` becomes a package; `sqq.citation`, `sqq.display`, and `sqq.banner` move to `sqq.presentation.citation`, `sqq.presentation.graph_mode`, and `sqq.ui.banner`.
+   - Only `sqq.api` (`load_config`, `read_frames`, `analyze_frame`) and `sqq.models` are stable import surfaces; the old module paths are removed rather than kept as aliases.
 
 8. Release metadata
    - Updates the Python package, configuration schema, native fallback, help, README, and design documentation to `0.5.6`, released Sep 7, 2026.

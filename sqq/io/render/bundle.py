@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import errno
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -20,10 +21,9 @@ from .frame import (
     _membership_token,
     _render_role,
     normalize_render_atom_scope,
-    validate_render_fragment,
+    validate_render_fragment_lines,
 )
 from .models import (
-    ANNOTATION_COLUMN,
     ANNOTATION_PREFIX,
     ATOM_PREFIX_WIDTH,
     COMPONENT_INDEX_CHUNK,
@@ -110,27 +110,39 @@ def _finalize_bundle(
         records.sort(key=lambda item: item["frame_index"])
         _validate_fragment_records(records)
         stage_dir.mkdir(parents=True, exist_ok=False)
-        _write_render_data(
-            stage_gro,
-            stage_xtc,
-            stage_membership,
-            records,
+        # Digests are taken while the data are written so provenance never has
+        # to re-read the published package.
+        topology_digest, topology_identity, membership_digest = _write_render_data(
+            stage_gro, stage_xtc, stage_membership, records
         )
         if tracking is not None:
             from ..tracking import rewrite_membership_track_ids
 
-            rewrite_membership_track_ids(stage_membership, tracking)
-        _atomic_write_text(
-            stage_script,
-            vmd_script_text(
-                gro_filename=output_names.topology,
-                xtc_filename=output_names.trajectory,
-                membership_filename=output_names.membership,
-                molecule_name=molecule_name,
-                render_kind=render_kind,
-            ),
-            encoding="ascii",
+            membership_digest = rewrite_membership_track_ids(
+                stage_membership, tracking, return_digest=True
+            )[1]
+        script_text = vmd_script_text(
+            gro_filename=output_names.topology,
+            xtc_filename=output_names.trajectory,
+            membership_filename=output_names.membership,
+            molecule_name=molecule_name,
+            render_kind=render_kind,
         )
+        _atomic_write_text(stage_script, script_text, encoding="ascii")
+        file_digests = {
+            "topology": _digest_record(stage_gro, output_names.topology, topology_digest),
+            "trajectory": _digest_record(
+                stage_xtc, output_names.trajectory, _sha256_file(stage_xtc)
+            ),
+            "membership": _digest_record(
+                stage_membership, output_names.membership, membership_digest
+            ),
+            "script": _digest_record(
+                stage_script,
+                output_names.script,
+                hashlib.sha256(script_text.encode("ascii")).hexdigest(),
+            ),
+        }
 
         _publish_render_directory(stage_dir, render_dir)
         _remove_legacy_root_render_outputs(root)
@@ -141,6 +153,9 @@ def _finalize_bundle(
             xtc_path=xtc_path,
             membership_path=membership_path,
             render_dir=render_dir,
+            file_digests=file_digests,
+            atom_count=int(records[0]["atom_count"]),
+            topology_identity=topology_identity,
         )
     except Exception:
         for path, description in (
@@ -370,7 +385,8 @@ def _validate_fragment_records(records: list[dict[str, Any]]) -> None:
         gro_path = Path(record["gro_path"])
         if not gro_path.is_file():
             raise ValueError(f"Missing SQQ cage fragment: {gro_path}")
-        validate_render_fragment(gro_path, int(record["atom_count"]))
+        # Content validation happens in the single writing pass, where each
+        # fragment is read exactly once.
 
 
 def _write_render_data(
@@ -378,10 +394,64 @@ def _write_render_data(
     xtc_path: Path,
     membership_path: Path,
     records: list[dict[str, Any]],
-) -> None:
-    _write_topology_gro(gro_path, records[0], len(records))
-    _write_membership_tsv(membership_path, records)
-    _write_xtc(xtc_path, records)
+) -> tuple[str, str, str]:
+    """Write topology, membership, and trajectory from one pass over the fragments.
+
+    Every fragment GRO is parsed exactly once: the first fragment provides the
+    topology, and each fragment's lines yield both its membership rows and its
+    XTC coordinates. Returns the SHA-256 of the topology GRO, the atom-identity
+    digest, and the SHA-256 of the membership TSV (all computed while writing).
+    """
+    frame_count = len(records)
+    topology_digest = topology_identity = ""
+    with _MembershipTsvWriter(membership_path) as membership, _XtcWriter(
+        xtc_path, int(records[0]["atom_count"])
+    ) as trajectory:
+        for render_index, record in enumerate(records):
+            lines = _fragment_lines(record)
+            validate_render_fragment_lines(
+                lines, Path(record["gro_path"]), int(record["atom_count"])
+            )
+            if render_index == 0:
+                topology_digest, topology_identity = _write_topology_gro(
+                    gro_path, record, frame_count, lines=lines
+                )
+            groups = _fragment_membership_groups(record, lines=lines)
+            positions, box = _fragment_coordinates_and_box(record, lines=lines)
+            membership.write_frame(render_index, record, groups)
+            trajectory.write_frame(render_index, record, positions, box)
+    return topology_digest, topology_identity, membership.digest
+
+
+def _digest_record(path: Path, name: str, sha256_hex: str) -> dict[str, object]:
+    return {"name": name, "size": path.stat().st_size, "sha256": sha256_hex}
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for block in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+class _HashingTextWriter:
+    """Text-file proxy that hashes the encoded bytes of everything written."""
+
+    def __init__(self, handle: Any, encoding: str) -> None:
+        self._handle = handle
+        self._encoding = encoding
+        self.digest = hashlib.sha256()
+
+    def write(self, text: str) -> int:
+        self.digest.update(text.encode(self._encoding))
+        return self._handle.write(text)
+
+    def flush(self) -> None:
+        self._handle.flush()
+
+    def fileno(self) -> int:
+        return self._handle.fileno()
 
 
 def _fragment_lines(record: dict[str, Any]) -> list[str]:
@@ -397,22 +467,39 @@ def _write_topology_gro(
     path: Path,
     record: dict[str, Any],
     frame_count: int,
-) -> None:
-    lines = _fragment_lines(record)
+    *,
+    lines: list[str] | None = None,
+) -> tuple[str, str]:
+    """Write the topology GRO; return its SHA-256 and the atom-identity digest.
+
+    The identity digest hashes the 20-character residue/atom prefix of every
+    atom record exactly as ``io.render.tracking._gro_identity`` does when it
+    re-reads a package, so both paths produce the same provenance value.
+    """
+    lines = _fragment_lines(record) if lines is None else lines
     atom_count = int(record["atom_count"])
     output = [
         f"SQQ cage topology frames={int(frame_count)}",
         f"{atom_count:5d}",
     ]
-    output.extend(line[:ATOM_PREFIX_WIDTH] for line in lines[2 : 2 + atom_count])
+    atom_lines = [line[:ATOM_PREFIX_WIDTH] for line in lines[2 : 2 + atom_count]]
+    output.extend(atom_lines)
     output.append(lines[2 + atom_count])
-    _atomic_write_text(path, "\n".join(output) + "\n", encoding="ascii")
+    text = "\n".join(output) + "\n"
+    _atomic_write_text(path, text, encoding="ascii")
+    identity = hashlib.sha256()
+    for line in atom_lines:
+        identity.update(line[:20].encode("utf-8"))
+        identity.update(b"\n")
+    return hashlib.sha256(text.encode("ascii")).hexdigest(), identity.hexdigest()
 
 
 def _fragment_coordinates_and_box(
     record: dict[str, Any],
+    *,
+    lines: list[str] | None = None,
 ) -> tuple[np.ndarray, np.ndarray]:
-    lines = _fragment_lines(record)
+    lines = _fragment_lines(record) if lines is None else lines
     atom_count = int(record["atom_count"])
     positions = np.empty((atom_count, 3), dtype=np.float32)
     for atom_index, line in enumerate(lines[2 : 2 + atom_count]):
@@ -439,281 +526,301 @@ def _fragment_coordinates_and_box(
     return positions, box
 
 
-def _write_xtc(path: Path, records: list[dict[str, Any]]) -> None:
-    try:
-        import MDAnalysis as mda
-        from MDAnalysis.coordinates.XTC import XTCWriter
-    except ImportError as exc:
-        raise RuntimeError(
-            "Writing sqq_cage.xtc requires MDAnalysis."
-        ) from exc
+class _XtcWriter:
+    """Frame-by-frame XTC writer with atomic publication."""
 
-    atom_count = int(records[0]["atom_count"])
-    universe = mda.Universe.empty(atom_count, trajectory=True)
-    timestep = universe.trajectory.ts
-    temporary = path.with_name(f".{path.name}.tmp-{os.getpid()}.xtc")
-    try:
-        with XTCWriter(
-            str(temporary),
-            atom_count,
+    def __init__(self, path: Path, atom_count: int) -> None:
+        self.path = path
+        self.atom_count = int(atom_count)
+        self.temporary = path.with_name(f".{path.name}.tmp-{os.getpid()}.xtc")
+        self._writer = None
+        self._timestep = None
+
+    def __enter__(self) -> "_XtcWriter":
+        try:
+            import MDAnalysis as mda
+            from MDAnalysis.coordinates.XTC import XTCWriter
+        except ImportError as exc:
+            raise RuntimeError(
+                "Writing sqq_cage.xtc requires MDAnalysis."
+            ) from exc
+        universe = mda.Universe.empty(self.atom_count, trajectory=True)
+        self._universe = universe
+        self._timestep = universe.trajectory.ts
+        self._writer = XTCWriter(
+            str(self.temporary),
+            self.atom_count,
             convert_units=True,
             precision=3,
-        ) as writer:
-            for render_index, record in enumerate(records):
-                positions_nm, box_nm = _fragment_coordinates_and_box(record)
-                timestep.positions = positions_nm * 10.0
-                if np.any(box_nm > 0.0):
-                    timestep.dimensions = np.asarray(
-                        [
-                            box_nm[0] * 10.0,
-                            box_nm[1] * 10.0,
-                            box_nm[2] * 10.0,
-                            90.0,
-                            90.0,
-                            90.0,
-                        ],
-                        dtype=np.float32,
-                    )
-                else:
-                    timestep.dimensions = None
-                timestep.frame = render_index
-                raw_time = record.get("time_ps")
-                timestep.time = (
-                    float(render_index) if raw_time is None else float(raw_time)
-                )
-                timestep.data["step"] = int(record["frame_index"])
-                writer.write(universe.atoms)
-        os.replace(temporary, path)
-    finally:
-        temporary.unlink(missing_ok=True)
+        )
+        return self
+
+    def write_frame(
+        self,
+        render_index: int,
+        record: dict[str, Any],
+        positions_nm: np.ndarray,
+        box_nm: np.ndarray,
+    ) -> None:
+        timestep = self._timestep
+        timestep.positions = positions_nm * 10.0
+        if np.any(box_nm > 0.0):
+            timestep.dimensions = np.asarray(
+                [
+                    box_nm[0] * 10.0,
+                    box_nm[1] * 10.0,
+                    box_nm[2] * 10.0,
+                    90.0,
+                    90.0,
+                    90.0,
+                ],
+                dtype=np.float32,
+            )
+        else:
+            timestep.dimensions = None
+        timestep.frame = render_index
+        raw_time = record.get("time_ps")
+        timestep.time = (
+            float(render_index) if raw_time is None else float(raw_time)
+        )
+        timestep.data["step"] = int(record["frame_index"])
+        self._writer.write(self._universe.atoms)
+
+    def __exit__(self, exc_type, exc, traceback) -> None:
+        try:
+            if self._writer is not None:
+                self._writer.close()
+            if exc_type is None:
+                os.replace(self.temporary, self.path)
+        finally:
+            self.temporary.unlink(missing_ok=True)
 
 
-def _write_membership_tsv(
-    path: Path,
-    records: list[dict[str, Any]],
-) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_name(f".{path.name}.tmp-{os.getpid()}")
-    header = (
+class _MembershipTsvWriter:
+    """Frame-by-frame membership TSV writer that hashes what it writes."""
+
+    _HEADER = (
         "record\trender_frame\tsource_frame\ttime_ps\tgraph_mode\tfamily\t"
         "cage_id\tcage_type\tphase\tdomain\tcluster\tatom_indices\t"
         "center_x_angstrom\tcenter_y_angstrom\tcenter_z_angstrom\n"
     )
-    try:
-        with temporary.open("w", encoding="ascii", newline="\n") as output:
-            output.write(header)
-            canonical_components: (
-                tuple[tuple[str, str, tuple[int, ...]], ...] | None
-            ) = None
-            for render_index, record in enumerate(records):
-                time_value = record.get("time_ps")
-                time_text = "-" if time_value is None else f"{float(time_value):.9g}"
-                graph_text = _tsv_field(record.get("graph_mode_display", "unknown"))
-                output.write(
-                    "\t".join(
-                        (
-                            "F",
-                            str(render_index),
-                            str(int(record["frame_index"])),
-                            time_text,
-                            graph_text,
-                            "-",
-                            "-",
-                            "-",
-                            "-",
-                            "-",
-                            "-",
-                            "-",
-                            "-",
-                            "-",
-                            "-",
-                        )
-                    )
-                    + "\n"
+
+    def __init__(self, path: Path) -> None:
+        self.path = path
+        self.temporary = path.with_name(f".{path.name}.tmp-{os.getpid()}")
+        self._raw = None
+        self._output: _HashingTextWriter | None = None
+        self._canonical_components: (
+            tuple[tuple[str, str, tuple[int, ...]], ...] | None
+        ) = None
+        self.digest = ""
+
+    def __enter__(self) -> "_MembershipTsvWriter":
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self._raw = self.temporary.open("w", encoding="ascii", newline="\n")
+        self._output = _HashingTextWriter(self._raw, "ascii")
+        self._output.write(self._HEADER)
+        return self
+
+    def __exit__(self, exc_type, exc, traceback) -> None:
+        try:
+            if self._raw is not None:
+                self._raw.close()
+            if exc_type is None:
+                assert self._output is not None
+                self.digest = self._output.digest.hexdigest()
+                os.replace(self.temporary, self.path)
+        finally:
+            self.temporary.unlink(missing_ok=True)
+
+    def write_frame(
+        self,
+        render_index: int,
+        record: dict[str, Any],
+        groups: dict[tuple[str, str], list[int]],
+    ) -> None:
+        output = self._output
+        assert output is not None
+        time_value = record.get("time_ps")
+        time_text = "-" if time_value is None else f"{float(time_value):.9g}"
+        graph_text = _tsv_field(record.get("graph_mode_display", "unknown"))
+        output.write(
+            "\t".join(
+                (
+                    "F",
+                    str(render_index),
+                    str(int(record["frame_index"])),
+                    time_text,
+                    graph_text,
+                    "-",
+                    "-",
+                    "-",
+                    "-",
+                    "-",
+                    "-",
+                    "-",
+                    "-",
+                    "-",
+                    "-",
                 )
-                for center in sorted(
-                    record.get("cage_centers", ()),
-                    key=lambda item: (
-                        str(item.get("cage_type", "")),
-                        str(item.get("cage_id", "")),
-                    ),
-                ):
-                    required = {
-                        "cage_id",
-                        "cage_type",
-                        "phase",
-                        "domain",
-                        "cluster",
-                        "center_angstrom",
-                    }
-                    missing = sorted(required.difference(center))
-                    if missing:
-                        raise ValueError(
-                            "Invalid SQQ cage-center metadata; missing "
-                            + ", ".join(missing)
-                            + "."
-                        )
-                    xyz = np.asarray(center["center_angstrom"], dtype=float)
-                    if xyz.shape != (3,) or np.any(~np.isfinite(xyz)):
-                        raise ValueError(
-                            "Invalid SQQ cage center in fragment metadata."
-                        )
+            )
+            + "\n"
+        )
+        for center in sorted(
+            record.get("cage_centers", ()),
+            key=lambda item: (
+                str(item.get("cage_type", "")),
+                str(item.get("cage_id", "")),
+            ),
+        ):
+            required = {
+                "cage_id",
+                "cage_type",
+                "phase",
+                "domain",
+                "cluster",
+                "center_angstrom",
+            }
+            missing = sorted(required.difference(center))
+            if missing:
+                raise ValueError(
+                    "Invalid SQQ cage-center metadata; missing "
+                    + ", ".join(missing)
+                    + "."
+                )
+            xyz = np.asarray(center["center_angstrom"], dtype=float)
+            if xyz.shape != (3,) or np.any(~np.isfinite(xyz)):
+                raise ValueError(
+                    "Invalid SQQ cage center in fragment metadata."
+                )
+            output.write(
+                "\t".join(
+                    (
+                        "C",
+                        str(render_index),
+                        "-",
+                        "-",
+                        "-",
+                        "cage",
+                        _membership_token(center["cage_id"]),
+                        _membership_token(center["cage_type"]),
+                        _membership_token(center["phase"]),
+                        _membership_token(center["domain"]),
+                        _membership_token(center["cluster"]),
+                        "-",
+                        *(f"{float(value):.17g}" for value in xyz),
+                    )
+                )
+                + "\n"
+            )
+        for guest in sorted(
+            record.get("guest_groups", ()),
+            key=lambda item: str(item.get("guest_id", "")),
+        ):
+            required = {"guest_id", "resname", "atom_indices"}
+            missing = sorted(required.difference(guest))
+            if missing:
+                raise ValueError(
+                    "Invalid SQQ guest-group metadata; missing "
+                    + ", ".join(missing)
+                    + "."
+                )
+            atom_indexes = sorted(
+                {int(value) for value in guest["atom_indices"]}
+            )
+            if (
+                not atom_indexes
+                or atom_indexes[0] < 0
+                or atom_indexes[-1] >= int(record["atom_count"])
+            ):
+                raise ValueError(
+                    "Invalid SQQ guest atom indexes in fragment metadata."
+                )
+            output.write(
+                "\t".join(
+                    (
+                        "G",
+                        str(render_index),
+                        "-",
+                        "-",
+                        "-",
+                        "guest",
+                        _membership_token(guest["guest_id"]),
+                        _membership_token(guest["resname"]),
+                        "-",
+                        "-",
+                        "-",
+                        ",".join(str(value) for value in atom_indexes),
+                        "-",
+                        "-",
+                        "-",
+                    )
+                )
+                + "\n"
+            )
+        components: list[tuple[str, str, tuple[int, ...]]] = []
+        for component in sorted(
+            record.get("component_groups", ()),
+            key=lambda item: (
+                str(item.get("role", "")),
+                str(item.get("resname", "")),
+            ),
+        ):
+            required = {"role", "resname", "atom_indices"}
+            missing = sorted(required.difference(component))
+            if missing:
+                raise ValueError(
+                    "Invalid SQQ component-group metadata; missing "
+                    + ", ".join(missing)
+                    + "."
+                )
+            role = _render_role(component["role"])
+            atom_indexes = sorted(
+                {int(value) for value in component["atom_indices"]}
+            )
+            if (
+                not atom_indexes
+                or atom_indexes[0] < 0
+                or atom_indexes[-1] >= int(record["atom_count"])
+            ):
+                raise ValueError(
+                    "Invalid SQQ component atom indexes in fragment metadata."
+                )
+            components.append(
+                (
+                    role,
+                    _membership_token(component["resname"]),
+                    tuple(atom_indexes),
+                )
+            )
+        component_signature = tuple(components)
+        if self._canonical_components is None:
+            self._canonical_components = component_signature
+        elif component_signature != self._canonical_components:
+            raise ValueError(
+                "SQQ render component topology changes between frames; "
+                f"frame 0 and frame {render_index} do not match."
+            )
+        if render_index == 0:
+            for role, resname, atom_indexes_tuple in components:
+                atom_indexes = list(atom_indexes_tuple)
+                for start in range(0, len(atom_indexes), COMPONENT_INDEX_CHUNK):
+                    chunk = atom_indexes[start : start + COMPONENT_INDEX_CHUNK]
                     output.write(
                         "\t".join(
                             (
-                                "C",
-                                str(render_index),
+                                "P",
+                                "0",
                                 "-",
                                 "-",
                                 "-",
-                                "cage",
-                                _membership_token(center["cage_id"]),
-                                _membership_token(center["cage_type"]),
-                                _membership_token(center["phase"]),
-                                _membership_token(center["domain"]),
-                                _membership_token(center["cluster"]),
-                                "-",
-                                *(f"{float(value):.17g}" for value in xyz),
-                            )
-                        )
-                        + "\n"
-                    )
-                for guest in sorted(
-                    record.get("guest_groups", ()),
-                    key=lambda item: str(item.get("guest_id", "")),
-                ):
-                    required = {"guest_id", "resname", "atom_indices"}
-                    missing = sorted(required.difference(guest))
-                    if missing:
-                        raise ValueError(
-                            "Invalid SQQ guest-group metadata; missing "
-                            + ", ".join(missing)
-                            + "."
-                        )
-                    atom_indexes = sorted(
-                        {int(value) for value in guest["atom_indices"]}
-                    )
-                    if (
-                        not atom_indexes
-                        or atom_indexes[0] < 0
-                        or atom_indexes[-1] >= int(record["atom_count"])
-                    ):
-                        raise ValueError(
-                            "Invalid SQQ guest atom indexes in fragment metadata."
-                        )
-                    output.write(
-                        "\t".join(
-                            (
-                                "G",
-                                str(render_index),
+                                "component",
+                                role,
+                                resname,
                                 "-",
                                 "-",
                                 "-",
-                                "guest",
-                                _membership_token(guest["guest_id"]),
-                                _membership_token(guest["resname"]),
-                                "-",
-                                "-",
-                                "-",
-                                ",".join(str(value) for value in atom_indexes),
-                                "-",
-                                "-",
-                                "-",
-                            )
-                        )
-                        + "\n"
-                    )
-                components: list[tuple[str, str, tuple[int, ...]]] = []
-                for component in sorted(
-                    record.get("component_groups", ()),
-                    key=lambda item: (
-                        str(item.get("role", "")),
-                        str(item.get("resname", "")),
-                    ),
-                ):
-                    required = {"role", "resname", "atom_indices"}
-                    missing = sorted(required.difference(component))
-                    if missing:
-                        raise ValueError(
-                            "Invalid SQQ component-group metadata; missing "
-                            + ", ".join(missing)
-                            + "."
-                        )
-                    role = _render_role(component["role"])
-                    atom_indexes = sorted(
-                        {int(value) for value in component["atom_indices"]}
-                    )
-                    if (
-                        not atom_indexes
-                        or atom_indexes[0] < 0
-                        or atom_indexes[-1] >= int(record["atom_count"])
-                    ):
-                        raise ValueError(
-                            "Invalid SQQ component atom indexes in fragment metadata."
-                        )
-                    components.append(
-                        (
-                            role,
-                            _membership_token(component["resname"]),
-                            tuple(atom_indexes),
-                        )
-                    )
-                component_signature = tuple(components)
-                if canonical_components is None:
-                    canonical_components = component_signature
-                elif component_signature != canonical_components:
-                    raise ValueError(
-                        "SQQ render component topology changes between frames; "
-                        f"frame 0 and frame {render_index} do not match."
-                    )
-                if render_index == 0:
-                    for role, resname, atom_indexes_tuple in components:
-                        atom_indexes = list(atom_indexes_tuple)
-                        for start in range(0, len(atom_indexes), COMPONENT_INDEX_CHUNK):
-                            chunk = atom_indexes[start : start + COMPONENT_INDEX_CHUNK]
-                            output.write(
-                                "\t".join(
-                                    (
-                                        "P",
-                                        "0",
-                                        "-",
-                                        "-",
-                                        "-",
-                                        "component",
-                                        role,
-                                        resname,
-                                        "-",
-                                        "-",
-                                        "-",
-                                        ",".join(str(value) for value in chunk),
-                                        "-",
-                                        "-",
-                                        "-",
-                                    )
-                                )
-                                + "\n"
-                            )
-                groups = _fragment_membership_groups(record)
-                for (family, membership), atom_indexes in sorted(groups.items()):
-                    cage_id, cage_type, phase, domain_id, cluster_id = (
-                        membership.split(":")
-                    )
-                    atoms = ",".join(str(value) for value in sorted(set(atom_indexes)))
-                    output.write(
-                        "\t".join(
-                            (
-                                "M",
-                                str(render_index),
-                                "-",
-                                "-",
-                                "-",
-                                family,
-                                cage_id,
-                                cage_type,
-                                phase,
-                                domain_id,
-                                cluster_id,
-                                atoms,
+                                ",".join(str(value) for value in chunk),
                                 "-",
                                 "-",
                                 "-",
@@ -721,15 +828,41 @@ def _write_membership_tsv(
                         )
                         + "\n"
                     )
-        os.replace(temporary, path)
-    finally:
-        temporary.unlink(missing_ok=True)
+        for (family, membership), atom_indexes in sorted(groups.items()):
+            cage_id, cage_type, phase, domain_id, cluster_id = (
+                membership.split(":")
+            )
+            atoms = ",".join(str(value) for value in sorted(set(atom_indexes)))
+            output.write(
+                "\t".join(
+                    (
+                        "M",
+                        str(render_index),
+                        "-",
+                        "-",
+                        "-",
+                        family,
+                        cage_id,
+                        cage_type,
+                        phase,
+                        domain_id,
+                        cluster_id,
+                        atoms,
+                        "-",
+                        "-",
+                        "-",
+                    )
+                )
+                + "\n"
+            )
 
 
 def _fragment_membership_groups(
     record: dict[str, Any],
+    *,
+    lines: list[str] | None = None,
 ) -> dict[tuple[str, str], list[int]]:
-    lines = _fragment_lines(record)
+    lines = _fragment_lines(record) if lines is None else lines
     atom_count = int(record["atom_count"])
     groups: dict[tuple[str, str], list[int]] = {}
     for atom_index, line in enumerate(lines[2 : 2 + atom_count]):

@@ -39,7 +39,7 @@ _PHASE_ORDER = {
 __all__ = ["snapshot_from_frame_result"]
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class _CageState:
     local_cage_id: str
     cage_type: str

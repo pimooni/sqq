@@ -38,10 +38,8 @@ from ...io.render import (
     RenderSession,
     RenderSpec,
     RenderBundle,
-    TRACK_MEMBERSHIP_NAME,
-    TRACK_RENDER_DIRECTORY,
     discover_sqq_cage_bundle,
-    publish_target_render_bundle,
+    publish_target_render_bundles,
     validate_tracking_source_bundle,
 )
 from ...io.reporting import write_run_config
@@ -52,6 +50,7 @@ from ...io.tracking import (
     target_directory_name,
     write_track_outputs,
 )
+from ...io.tracking.precursor_record import mark_precursor_spool_complete
 from ...io.input.trajectory import effective_frame_time_ps, expand_inputs
 from ...models.tracking import (
     TargetSelection,
@@ -94,12 +93,22 @@ __all__ = ["track"]
 class _TrackingAnalysisSink(AnalysisSink):
     """Link successful frame results in authoritative plan order."""
 
-    def __init__(self, accumulator: TrackingAccumulator) -> None:
+    def __init__(
+        self,
+        accumulator: TrackingAccumulator,
+        *,
+        precursor_target_ids: Sequence[str] = (),
+        precursor_spool_dir: Path | None = None,
+    ) -> None:
         self.accumulator = accumulator
+        self.precursor_target_ids = frozenset(str(value) for value in precursor_target_ids)
+        self.precursor_spool_dir = precursor_spool_dir
         self.consumed = 0
+        self._precursor_spool_closed = False
 
     def start(self, plan: RunPlan) -> None:
         self.consumed = 0
+        self._precursor_spool_closed = False
 
     def consume(self, task: FrameTask, outcome: TaskOutcome) -> None:
         if not outcome.ok:
@@ -118,6 +127,14 @@ class _TrackingAnalysisSink(AnalysisSink):
                 f"Tracking frame {task.display_name!r} did not retain its analysis result."
             )
         self.accumulator.add(snapshot)
+        if (
+            not self._precursor_spool_closed
+            and self.precursor_spool_dir is not None
+            and self.precursor_target_ids
+            and self.accumulator.has_track_ids(self.precursor_target_ids)
+        ):
+            mark_precursor_spool_complete(self.precursor_spool_dir)
+            self._precursor_spool_closed = True
         self.consumed += 1
 
     def finish(
@@ -289,7 +306,9 @@ def _prepare_track(args: Namespace) -> _TrackPreparation:
             )
             config["mode"] = source_engine
             normalize_engine_capabilities(config, emit_warnings=False)
-    _prepare_target_capabilities(config, targets)
+    _prepare_target_capabilities(
+        config, targets, raw_input=bool(getattr(args, "input", None))
+    )
     validate_cpp_cli(args, config)
     if getattr(args, "input", None) and is_cpp_mode(config.get("mode", DEFAULT_MODE)):
         # Raw Track analyzes frames; fail once here instead of per frame.
@@ -341,6 +360,15 @@ def _track_locked(
     source_state_path = prepared.source_state_path
     requested_tracking = prepared.requested_tracking
     published_render_scripts: list[str] = []
+    tracking_workspace = (
+        TemporaryDirectory(
+            prefix=".sqq-track-state-",
+            dir=output,
+            ignore_cleanup_errors=True,
+        )
+        if getattr(args, "input", None)
+        else None
+    )
 
     print_track_header(args, config, targets, started_wall)
 
@@ -358,6 +386,7 @@ def _track_locked(
                     started,
                     requested_tracking,
                     source_root=Path(temporary) / "source",
+                    tracking_spool_dir=Path(tracking_workspace.name),
                 )
                 source = None
             else:
@@ -401,6 +430,7 @@ def _track_locked(
             selections = select_targets(
                 result, (target.raw for target in targets)
             )
+            _warn_empty_selections(selections, result, source_mode=source is not None)
             guest_ids = {
                 guest_id
                 for selection in selections
@@ -423,13 +453,15 @@ def _track_locked(
                 output,
                 targets=[target.raw for target in targets],
             )
-            for selection in selections:
-                directory = written[target_directory_name(selection.target)]
-                bundle = publish_target_render_bundle(
-                    selection,
-                    directory,
-                    source_bundle,
-                )
+            # One read of the source membership TSV serves every target.
+            bundles = publish_target_render_bundles(
+                [
+                    (selection, written[target_directory_name(selection.target)])
+                    for selection in selections
+                ],
+                source_bundle,
+            )
+            for bundle in bundles:
                 if bundle.complete and bundle.script_path is not None:
                     published_render_scripts.append(str(bundle.script_path.resolve()))
 
@@ -525,6 +557,9 @@ def _track_locked(
         )
         write_run_config(output, config, run_info)
         raise
+    finally:
+        if tracking_workspace is not None:
+            tracking_workspace.cleanup()
 
 def _track_input(
     args: Namespace,
@@ -534,6 +569,7 @@ def _track_input(
     tracking_config: TrackingConfig,
     *,
     source_root: Path,
+    tracking_spool_dir: Path,
 ) -> tuple[
     TrackingResult,
     RenderBundle,
@@ -606,6 +642,14 @@ def _track_input(
             ),
         ),
     )
+    # A persistent-ID target needs the pre-birth history of its water set.
+    # Compact records are spooled only until all requested IDs have appeared;
+    # the spool lives in the temporary source root and disappears with it.
+    precursor_spool_dir = (
+        source_root / ".sqq-precursor-records"
+        if any(target.kind == "track" for target in targets)
+        else None
+    )
     plan = replace(
         plan,
         context=replace(
@@ -614,6 +658,7 @@ def _track_input(
             retain_results=False,
             stream_results=True,
             tracking_snapshots=True,
+            precursor_spool_dir=precursor_spool_dir,
             fragment_dir=render_session.fragment_dir,
         ),
         policy=replace(
@@ -625,8 +670,16 @@ def _track_input(
         ),
     )
 
-    accumulator = TrackingAccumulator(tracking_config)
-    tracking_sink = _TrackingAnalysisSink(accumulator)
+    accumulator = TrackingAccumulator(
+        tracking_config, spool_dir=tracking_spool_dir
+    )
+    tracking_sink = _TrackingAnalysisSink(
+        accumulator,
+        precursor_target_ids=tuple(
+            target.value for target in targets if target.kind == "track"
+        ),
+        precursor_spool_dir=precursor_spool_dir,
+    )
     progress = RunProgressDisplay(
         total=selected_frames,
         total_started_at=started,
@@ -653,6 +706,7 @@ def _track_input(
         bundle = render_session.finalize(tracking=result)
     except Exception:
         render_session.abort()
+        accumulator.close()
         raise
     finally:
         progress.close()
@@ -670,6 +724,40 @@ def _track_input(
         "raw_frame_step": int(plan.sampling.get("raw_frame_step", 1)),
     }
     return result, bundle, plan, metadata
+
+
+def _warn_empty_selections(
+    selections: Sequence[TargetSelection],
+    result: TrackingResult,
+    *,
+    source_mode: bool,
+) -> None:
+    """Name targets that matched no track instead of publishing them silently."""
+    empty = [selection.target for selection in selections if not selection.tracks]
+    if not empty:
+        return
+    has_phase_labels = any(
+        item.phase_labels != ("unassigned",) for item in result.observations
+    )
+    for target in empty:
+        message = (
+            f"Track target {target.raw!r} matched no cage; its directory contains "
+            "empty tables and a render package without cage selections."
+        )
+        if target.kind == "phase" and not has_phase_labels:
+            message += (
+                " The tracked frames carry no hydrate phase labels"
+                + (
+                    "; imported state cannot add them retroactively, rerun Analyze "
+                    "with --find-cluster on."
+                    if source_mode
+                    else (
+                        "; cluster search ran but produced no hydrate phase labels "
+                        "for the selected frames."
+                    )
+                )
+            )
+        warnings.warn(message, UserWarning, stacklevel=2)
 
 
 def _require_nondecreasing_frame_times(plan: RunPlan, trajectory: Path) -> None:

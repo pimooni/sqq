@@ -24,6 +24,11 @@ from ..io.render.frame import write_sqq_cage_fragment
 from ..io.render.models import FRAGMENT_DIRECTORY
 from ..io.reporting import failed_row, result_row, write_frame_info, write_membership, write_order_parameter
 from ..io.input.trajectory import effective_frame_time_ps, read_frames
+from ..io.tracking.precursor_record import (
+    precursor_record_from_result,
+    precursor_spool_is_complete,
+    write_precursor_record,
+)
 from ..models import Frame, FrameResult
 from .contracts import FrameTask, RunContext, TaskOutcome, TaskStatus
 from .dispatcher import StageCallback, analyze_frame
@@ -73,6 +78,18 @@ def execute_frame_task(
             fragment_dir,
             stage_callback,
         )
+        if (
+            run_context.precursor_spool_dir is not None
+            and not precursor_spool_is_complete(run_context.precursor_spool_dir)
+        ):
+            write_precursor_record(
+                run_context.precursor_spool_dir,
+                precursor_record_from_result(
+                    result,
+                    int(task.frame_index),
+                    atom_scope=str(config.get("render", {}).get("atom_scope", "full")),
+                ),
+            )
         keep_result = run_context.retain_results or (
             run_context.stream_results and not run_context.tracking_snapshots
         )

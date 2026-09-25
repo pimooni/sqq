@@ -36,6 +36,18 @@ def unwrap_connected_nodes(frame: Frame, nodes: list[int], edges: list[tuple[int
     return unwrapped
 
 
+def connected_centroid(
+    frame: Frame,
+    nodes: list[int],
+    edges: list[tuple[int, int]],
+) -> np.ndarray:
+    """Return a deterministic centroid of one connected PBC topology."""
+    ordered_nodes = sorted(set(nodes))
+    ordered_edges = sorted(set(edges))
+    unwrapped = unwrap_connected_nodes(frame, ordered_nodes, ordered_edges)
+    return np.mean([unwrapped[node] for node in ordered_nodes], axis=0)
+
+
 def pbc_aware_centroid(frame: Frame, atom_indices: tuple[int, ...] | list[int]) -> np.ndarray:
     """Return a molecular centroid after unwrapping every atom near one anchor."""
     if not atom_indices:

@@ -7,6 +7,7 @@ from typing import Iterable
 
 from ...models.cage_type import canonical_cage_type
 from ...models.tracking import CageTrack, TargetSelection, TargetSpec, TrackingResult
+from .spool import filtered_sequence
 
 _TRACK_PATTERN = re.compile(r"^t0*([1-9][0-9]*)$", re.IGNORECASE)
 _COMPACT_GENERIC_CAGE_PATTERN = re.compile(r"^4([0-9]+)5([0-9]+)6([0-9]+)$")
@@ -77,9 +78,18 @@ def select_targets(
             track for track in result.tracks if _track_matches(track, target)
         )
         track_ids = {track.track_id for track in selected}
-        events = tuple(
-            event for event in result.events if track_ids.intersection(event.track_ids)
-        )
+        if target.kind == "all":
+            events = result.events
+            observations = result.observations
+        else:
+            events = filtered_sequence(
+                result.events,
+                lambda event, ids=track_ids: bool(ids.intersection(event.track_ids)),
+            )
+            observations = filtered_sequence(
+                result.observations,
+                lambda observation, ids=track_ids: observation.track_id in ids,
+            )
         selections.append(
             TargetSelection(
                 target=target,
@@ -87,6 +97,7 @@ def select_targets(
                 tracks=selected,
                 events=events,
                 config=result.config,
+                _observation_view=observations,
             )
         )
     return tuple(selections)

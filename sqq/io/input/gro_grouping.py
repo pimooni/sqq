@@ -10,7 +10,7 @@ from pathlib import Path
 from string import ascii_uppercase
 from typing import Any
 
-from ...models import Atom, Frame
+from ...models import Frame
 from .trajectory import read_gro
 
 

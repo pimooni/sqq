@@ -386,6 +386,7 @@ class ParallelRunProgressDisplay:
         math_threads: int = 1,
         policy: str = "auto; reserve 1 core",
         unit: str = "Files",
+        backend: str = "process",
     ) -> None:
         self.total = total
         self.workers = workers
@@ -398,6 +399,7 @@ class ParallelRunProgressDisplay:
         self.math_threads = max(1, int(math_threads))
         self.policy = str(policy or "auto; reserve 1 core")
         self.unit = str(unit or "Files")
+        self.backend = str(backend or "process").strip().lower()
         self._active: dict[int, dict[str, Any]] = {}
         self._finished: set[int] = set()
         self._stream = sys.stdout
@@ -621,10 +623,13 @@ class ParallelRunProgressDisplay:
         )
 
     def _execution_text(self) -> str:
-        process_word = "process" if self.workers == 1 else "processes"
+        if self.backend == "thread":
+            worker_word = "worker thread" if self.workers == 1 else "worker threads"
+        else:
+            worker_word = "process" if self.workers == 1 else "processes"
         thread_word = "thread" if self.math_threads == 1 else "threads"
         return (
-            f"{self.workers} {process_word} x {self.math_threads} {thread_word} "
+            f"{self.workers} {worker_word} x {self.math_threads} {thread_word} "
             f"[{self.policy}]"
         )
 

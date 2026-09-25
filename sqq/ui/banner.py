@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from ..presentation import SQQ_AUTHOR, SQQ_TITLE
-
 _INFO_PANEL = (
     "+-----------------------------+",
     "|   Shell  Quant  Qualifier   |",

@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from dataclasses import replace
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from typing import Any
 import warnings
 
@@ -46,13 +47,30 @@ class AnalyzeTrackingSink(AnalysisSink):
         self._accumulators: dict[int | str, TrackingAccumulator] = {}
         self._expected: dict[int | str, int] = {}
         self._failed: dict[int | str, str] = {}
+        self._spool_workspaces: dict[int | str, TemporaryDirectory[str]] = {}
         self.results: dict[int | str, TrackingResult] = {}
 
-    def start(self, plan: RunPlan) -> None:
-        self._accumulators = {
-            key: TrackingAccumulator(_tracking_config(config))
-            for key, config in self._configs.items()
-        }
+    def start(self, plan: RunPlan | None) -> None:
+        self.close()
+        self._accumulators = {}
+        for key, config in self._configs.items():
+            root = None
+            if plan is not None:
+                root = (
+                    Path(plan.context.output_root)
+                    if key == "run"
+                    else Path(plan.context.group_output_roots[key])
+                )
+                root.mkdir(parents=True, exist_ok=True)
+            workspace = TemporaryDirectory(
+                prefix=".sqq-track-state-",
+                dir=root,
+                ignore_cleanup_errors=True,
+            )
+            self._spool_workspaces[key] = workspace
+            self._accumulators[key] = TrackingAccumulator(
+                _tracking_config(config), spool_dir=workspace.name
+            )
         self._expected = {key: 0 for key in self._configs}
         self._failed.clear()
         self.results.clear()
@@ -105,6 +123,15 @@ class AnalyzeTrackingSink(AnalysisSink):
                 )
                 continue
             self.results[key] = accumulator.result()
+
+    def close(self) -> None:
+        """Release all run-private tracking state after reports are written."""
+        for accumulator in self._accumulators.values():
+            accumulator.close()
+        self._accumulators.clear()
+        for workspace in self._spool_workspaces.values():
+            workspace.cleanup()
+        self._spool_workspaces.clear()
 
 
 def tracking_snapshot(task: FrameTask, outcome: TaskOutcome) -> TrackFrameSnapshot | None:

@@ -9,9 +9,10 @@ from typing import Any
 
 
 PUBLICATION_LINE = (
-    "Publication: J. Pang & Q. Sun, SQQ: Python Joint Toolkit for "
-    "Water-Shell Topology Analysis, in submission."
+    "Publication: J. PANG & Q. SUN. SQQ: Python Joint Toolkit for "
+    "Water-Shell Topology Analysis. Journal of Physical Chemistry A."
 )
+DOI_LINE = "DOI        : http://doi.org/10.1021/acs.jpca.6c05769"
 GITHUB_LINE = "GitHub     : https://github.com/pimooni/sqq"
 CITATION_SENTENCE = "Cages were identified and analyzed using SQQ."
 
@@ -27,6 +28,7 @@ class CitationRecommendation:
 
     sentence: str
     publication: str = PUBLICATION_LINE
+    doi: str = DOI_LINE
     github: str = GITHUB_LINE
 
 

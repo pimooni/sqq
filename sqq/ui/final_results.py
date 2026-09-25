@@ -108,6 +108,7 @@ def render_final_results(
     lines.extend(["", _bold("Citation Recommendation", ansi)])
     lines.append(f"  {citation.sentence}")
     lines.append(f"  {citation.publication}")
+    lines.append(f"  {citation.doi}")
     lines.append(f"  {citation.github}")
     return "\n".join(lines)
 

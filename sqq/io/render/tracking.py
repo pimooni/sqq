@@ -7,13 +7,14 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import shutil
-from typing import Mapping
+from typing import Mapping, Sequence
 import warnings
 from uuid import uuid4
 
 from ...models.tracking import TargetSelection, TrackingResult
-from ..tracking import TRACK_DIRECTORY_NAME, rewrite_membership_track_ids
+from ..tracking import TRACK_DIRECTORY_NAME, rewrite_membership_for_targets
 from .inspect import inspect_render_script
 from .models import (
     SQQ_CAGE_GRO_NAME,
@@ -89,7 +90,7 @@ def discover_sqq_cage_bundle(
                 RenderBundle(
                     gro_path=gro,
                     script_path=script,
-                    frame_count=_membership_frame_count(membership),
+                    frame_count=_bundle_frame_count(gro, membership),
                     xtc_path=xtc,
                     membership_path=membership,
                     render_dir=render_dir,
@@ -190,31 +191,57 @@ def publish_target_render_bundle(
     source_bundle: RenderBundle,
 ) -> RenderBundle:
     """Publish one self-contained four-file render package for a Track target."""
-    gro_source, xtc_source, membership_source = _required_render_paths(source_bundle)
-    target_root = Path(target_directory)
-    render_dir, gro, xtc, membership, script = TRACK_RENDER_NAMES.paths(target_root)
-    render_dir.mkdir(parents=True, exist_ok=True)
-    _atomic_link_or_copy(gro_source, gro)
-    _atomic_link_or_copy(xtc_source, xtc)
-    _atomic_copy(membership_source, membership)
-    rewrite_membership_track_ids(membership, selection)
-    _atomic_write_text(
-        script,
-        _target_vmd_script(selection, target_root.name),
-        encoding="ascii",
-    )
+    return publish_target_render_bundles(
+        ((selection, target_directory),), source_bundle
+    )[0]
 
-    # Remove obsolete root-level files from pre-package Track layouts.
-    (target_root / TRACK_GRO_NAME).unlink(missing_ok=True)
-    (target_root / TRACK_TCL_NAME).unlink(missing_ok=True)
-    return RenderBundle(
-        gro_path=gro,
-        script_path=script,
-        frame_count=source_bundle.frame_count,
-        xtc_path=xtc,
-        membership_path=membership,
-        render_dir=render_dir,
+
+def publish_target_render_bundles(
+    targets: Sequence[tuple[TargetSelection, str | Path]],
+    source_bundle: RenderBundle,
+) -> list[RenderBundle]:
+    """Publish the render packages of several targets from one source read.
+
+    The topology GRO and XTC are hard-linked (or copied) per target; the
+    membership TSV is read once and rewritten for every target in the same
+    pass; each target then receives its own default-view Tcl script.
+    """
+    if not targets:
+        return []
+    gro_source, xtc_source, membership_source = _required_render_paths(source_bundle)
+    layouts: list[tuple[TargetSelection, Path, Path, Path, Path, Path, Path]] = []
+    for selection, target_directory in targets:
+        target_root = Path(target_directory)
+        render_dir, gro, xtc, membership, script = TRACK_RENDER_NAMES.paths(target_root)
+        render_dir.mkdir(parents=True, exist_ok=True)
+        _atomic_link_or_copy(gro_source, gro)
+        _atomic_link_or_copy(xtc_source, xtc)
+        layouts.append((selection, target_root, render_dir, gro, xtc, membership, script))
+    rewrite_membership_for_targets(
+        membership_source,
+        [(membership, selection) for selection, _root, _dir, _gro, _xtc, membership, _s in layouts],
     )
+    bundles: list[RenderBundle] = []
+    for selection, target_root, render_dir, gro, xtc, membership, script in layouts:
+        _atomic_write_text(
+            script,
+            _target_vmd_script(selection, target_root.name),
+            encoding="ascii",
+        )
+        # Remove obsolete root-level files from pre-package Track layouts.
+        (target_root / TRACK_GRO_NAME).unlink(missing_ok=True)
+        (target_root / TRACK_TCL_NAME).unlink(missing_ok=True)
+        bundles.append(
+            RenderBundle(
+                gro_path=gro,
+                script_path=script,
+                frame_count=source_bundle.frame_count,
+                xtc_path=xtc,
+                membership_path=membership,
+                render_dir=render_dir,
+            )
+        )
+    return bundles
 
 
 def _target_vmd_script(selection: TargetSelection, target_name: str) -> str:
@@ -294,13 +321,28 @@ def _source_bundle_facts(
     gro, xtc, membership = _required_render_paths(bundle)
     script = _required_script_path(bundle)
     _validate_script_references(script, gro, xtc, membership)
-    atom_count, topology_identity = _gro_identity(gro)
-    xtc_atoms, xtc_frames = _xtc_shape(xtc)
-    if xtc_atoms != atom_count:
-        raise ValueError(
-            "SQQ render topology and trajectory atom counts differ: "
-            f"{atom_count} versus {xtc_atoms}."
-        )
+    # A bundle produced by this process carries digests, atom count, and
+    # topology identity from the writer; a discovered package is re-read and
+    # re-hashed in full because nothing about it can be trusted.
+    fresh = (
+        bundle.file_digests is not None
+        and bundle.atom_count is not None
+        and bundle.topology_identity is not None
+        and set(bundle.file_digests) >= {"topology", "trajectory", "membership", "script"}
+    )
+    if fresh:
+        atom_count = int(bundle.atom_count)  # type: ignore[arg-type]
+        topology_identity = str(bundle.topology_identity)
+        xtc_frames = bundle.frame_count
+        topology_digest: str | None = None
+    else:
+        atom_count, topology_identity, topology_digest = _gro_identity(gro)
+        xtc_atoms, xtc_frames = _xtc_shape(xtc)
+        if xtc_atoms != atom_count:
+            raise ValueError(
+                "SQQ render topology and trajectory atom counts differ: "
+                f"{atom_count} versus {xtc_atoms}."
+            )
     membership_facts = _membership_facts(
         membership,
         atom_count=atom_count,
@@ -312,15 +354,20 @@ def _source_bundle_facts(
             "SQQ render trajectory, membership, and bundle frame counts differ: "
             f"{xtc_frames}, {membership_frames}, and {bundle.frame_count}."
         )
-    files = {
-        role: _file_identity(path)
-        for role, path in (
-            ("topology", gro),
-            ("trajectory", xtc),
-            ("membership", membership),
-            ("script", script),
-        )
-    }
+    if fresh:
+        files = {
+            role: dict(bundle.file_digests[role])  # type: ignore[index]
+            for role in ("topology", "trajectory", "membership", "script")
+        }
+    else:
+        files = {
+            "topology": _file_identity(gro, digest=topology_digest),
+            "trajectory": _file_identity(xtc),
+            "membership": _file_identity(
+                membership, digest=str(membership_facts["sha256"])
+            ),
+            "script": _file_identity(script),
+        }
     provenance: dict[str, object] = {
         "format": _SOURCE_PROVENANCE_FORMAT,
         "version": _SOURCE_PROVENANCE_VERSION,
@@ -375,26 +422,52 @@ def _validate_script_references(
             )
 
 
-def _gro_identity(path: Path) -> tuple[int, str]:
+def _gro_identity(path: Path) -> tuple[int, str, str]:
+    """Return atom count, atom-identity digest, and the file SHA-256 in one read."""
     try:
-        with path.open("r", encoding="utf-8") as handle:
-            if not handle.readline():
+        with path.open("rb") as handle:
+            reader = _HashingLineReader(handle)
+            if not reader.readline():
                 raise ValueError("missing title")
-            atom_count = int(handle.readline().strip())
+            atom_count = int(reader.readline().strip())
             if atom_count < 1:
                 raise ValueError("invalid atom count")
             identity = hashlib.sha256()
             for _ in range(atom_count):
-                line = handle.readline().rstrip("\r\n")
+                line = reader.readline().rstrip("\r\n")
                 if len(line) < 20:
                     raise ValueError("truncated atom record")
                 identity.update(line[:20].encode("utf-8"))
                 identity.update(b"\n")
-            if not handle.readline():
+            if not reader.readline():
                 raise ValueError("missing box")
+            reader.consume_rest()
     except (OSError, UnicodeError, ValueError) as exc:
         raise ValueError(f"Invalid or truncated SQQ topology GRO: {path}") from exc
-    return atom_count, identity.hexdigest()
+    return atom_count, identity.hexdigest(), reader.digest.hexdigest()
+
+
+class _HashingLineReader:
+    """Iterate decoded lines of a binary file while hashing the raw bytes."""
+
+    def __init__(self, handle: object, encoding: str = "utf-8") -> None:
+        self._handle = handle
+        self._encoding = encoding
+        self.digest = hashlib.sha256()
+
+    def readline(self) -> str:
+        raw = self._handle.readline()  # type: ignore[attr-defined]
+        self.digest.update(raw)
+        return raw.decode(self._encoding)
+
+    def __iter__(self):
+        for raw in self._handle:  # type: ignore[attr-defined]
+            self.digest.update(raw)
+            yield raw.decode(self._encoding)
+
+    def consume_rest(self) -> None:
+        for block in iter(lambda: self._handle.read(1024 * 1024), b""):  # type: ignore[attr-defined]
+            self.digest.update(block)
 
 
 def _xtc_shape(path: Path) -> tuple[int, int]:
@@ -426,8 +499,9 @@ def _membership_facts(
     guests: dict[str, tuple[str, tuple[int, ...]]] = {}
     components: dict[tuple[str, str], set[int]] = {}
     current_sources: dict[int, int] = {}
-    with path.open("r", encoding="utf-8", newline="") as handle:
-        reader = csv.DictReader(handle, delimiter="\t")
+    with path.open("rb") as binary_handle:
+        hashing = _HashingLineReader(binary_handle)
+        reader = csv.DictReader(hashing, delimiter="\t")
         required = {
             "record",
             "render_frame",
@@ -529,6 +603,7 @@ def _membership_facts(
         "component_signature_sha256": _json_digest(component_rows),
         "frame_mapping_sha256": _json_digest(frames),
         "cage_mapping_sha256": _json_digest(sorted(cages)),
+        "sha256": hashing.digest.hexdigest(),
     }
 
 
@@ -563,15 +638,18 @@ def _membership_atom_indexes(
     return indexes
 
 
-def _file_identity(path: Path) -> dict[str, object]:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for block in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(block)
+def _file_identity(path: Path, *, digest: str | None = None) -> dict[str, object]:
+    """Return the provenance record of one file, hashing it unless already done."""
+    if digest is None:
+        hasher = hashlib.sha256()
+        with path.open("rb") as handle:
+            for block in iter(lambda: handle.read(1024 * 1024), b""):
+                hasher.update(block)
+        digest = hasher.hexdigest()
     return {
         "name": path.name,
         "size": path.stat().st_size,
-        "sha256": digest.hexdigest(),
+        "sha256": digest,
     }
 
 
@@ -624,6 +702,27 @@ def _validate_source_provenance(
                 "SQQ render source does not match track_state.json provenance: "
                 f"{role} file."
             )
+
+
+_GRO_TITLE_FRAMES = re.compile(r"\bframes=(\d+)\b")
+
+
+def _bundle_frame_count(gro: Path, membership: Path) -> int:
+    """Read the frame count from the GRO title; scan the TSV only when absent.
+
+    ``_write_topology_gro`` records ``frames=N`` in the title line, so a
+    discovered package normally costs one line read instead of a full
+    membership pass. Validation later cross-checks the TSV, XTC, and state.
+    """
+    try:
+        with Path(gro).open("r", encoding="utf-8", errors="replace") as handle:
+            title = handle.readline()
+    except OSError:
+        title = ""
+    match = _GRO_TITLE_FRAMES.search(title)
+    if match is not None:
+        return int(match.group(1))
+    return _membership_frame_count(membership)
 
 
 def _membership_frame_count(path: Path) -> int:
@@ -691,5 +790,6 @@ __all__ = [
     "discover_sqq_cage_bundle",
     "discover_sqq_cage_gro",
     "publish_target_render_bundle",
+    "publish_target_render_bundles",
     "validate_tracking_source_bundle",
 ]

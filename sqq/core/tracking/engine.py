@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections import Counter, defaultdict
 from dataclasses import dataclass, replace
 from math import inf
+from pathlib import Path
 import re
 from typing import Iterable, Mapping, Sequence
 
@@ -28,6 +29,7 @@ from .snapshot import (
     _snapshot_states,
     snapshot_from_frame_result,
 )
+from .spool import SpoolObservationBucket, TrackingSpool
 
 _TRACK_PATTERN = re.compile(r"^t0*([1-9][0-9]*)$", re.IGNORECASE)
 _ASSIGNMENT_TOLERANCE = 1.0e-12
@@ -35,14 +37,14 @@ _ASSIGNMENT_TOLERANCE = 1.0e-12
 __all__ = ["TrackingAccumulator", "track_cages", "track_snapshots"]
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class _TrackedState:
     state: _CageState
     track_id: str
     last_position: int
     last_time_ps: float | None
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class _Candidate:
     previous_index: int
     current_index: int
@@ -55,7 +57,7 @@ class _Candidate:
     gap_frames: int
     gap_time_ps: float | None
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class _PendingLineage:
     kind: str
     source_track_ids: tuple[str, ...]
@@ -73,11 +75,19 @@ class _PendingLineage:
 class TrackingAccumulator:
     """Incrementally track snapshots without retaining the snapshot sequence."""
 
-    def __init__(self, config: TrackingConfig | None = None) -> None:
+    def __init__(
+        self,
+        config: TrackingConfig | None = None,
+        *,
+        spool_dir: str | Path | None = None,
+    ) -> None:
         self.config = config or TrackingConfig()
         self._frames: list[FrameStamp] = []
-        self._track_observations: dict[str, list[CageObservation]] = {}
-        self._events: list[TrackEvent] = []
+        self._spool = None if spool_dir is None else TrackingSpool(spool_dir)
+        self._track_observations: dict[
+            str, list[CageObservation] | SpoolObservationBucket
+        ] = {}
+        self._events = [] if self._spool is None else self._spool.events
         self._active: list[_TrackedState] = []
         self._expired: set[str] = set()
         self._pending_lineage: list[_PendingLineage] = []
@@ -126,7 +136,9 @@ class TrackingAccumulator:
             previous_index = previous_by_current.get(current_index)
             if previous_index is None:
                 track_id = self._new_track_id()
-                self._track_observations[track_id] = []
+                self._track_observations[track_id] = self._new_observation_bucket(
+                    track_id
+                )
                 self._events.append(
                     _event(
                         "birth",
@@ -209,38 +221,62 @@ class TrackingAccumulator:
             dormant, key=lambda item: _track_number(item.track_id)
         )
 
+    def has_track_ids(self, track_ids: Iterable[str]) -> bool:
+        """Return whether every requested persistent ID has already been born."""
+        return all(str(track_id) in self._track_observations for track_id in track_ids)
+
     def result(self) -> TrackingResult:
         self._finished = True
+        if self._spool is not None:
+            self._spool.finalize()
         active_ids = {item.track_id for item in self._active}
-        tracks = tuple(
-            CageTrack(
-                track_id=track_id,
-                observations=tuple(self._track_observations[track_id]),
-                left_censored=bool(
-                    self._frames
-                    and self._track_observations[track_id][0].frame_index
-                    == self._frames[0].frame_index
-                ),
-                right_censored=track_id in active_ids,
+        tracks: list[CageTrack] = []
+        for track_id in sorted(self._track_observations, key=_track_number):
+            bucket = self._track_observations[track_id]
+            if isinstance(bucket, SpoolObservationBucket):
+                observations = bucket.sequence()
+                first_frame_index = bucket.first_frame_index
+            else:
+                observations = tuple(bucket)
+                first_frame_index = bucket[0].frame_index
+            tracks.append(
+                CageTrack(
+                    track_id=track_id,
+                    observations=observations,
+                    left_censored=bool(
+                        self._frames
+                        and first_frame_index == self._frames[0].frame_index
+                    ),
+                    right_censored=track_id in active_ids,
+                )
             )
-            for track_id in sorted(self._track_observations, key=_track_number)
-        )
         # A dormant cage expires only after its gap allowance, so its death is
         # appended later than events of the frames in between although it is
         # stamped at the first absent frame.  The stable sort restores time
         # order while preserving the within-frame emission order.
-        events = tuple(
-            replace(event, event_id=f"e{index}")
-            for index, event in enumerate(
-                sorted(self._events, key=lambda item: item.frame_index), start=1
+        if self._spool is None:
+            events = tuple(
+                replace(event, event_id=f"e{index}")
+                for index, event in enumerate(
+                    sorted(self._events, key=lambda item: item.frame_index), start=1
+                )
             )
-        )
+            observation_view = None
+        else:
+            events = self._spool.event_sequence()
+            observation_view = self._spool.observations()
         return TrackingResult(
             frames=tuple(self._frames),
-            tracks=tracks,
+            tracks=tuple(tracks),
             events=events,
             config=self.config,
+            _observation_view=observation_view,
         )
+
+    def close(self) -> None:
+        """Close an unfinished run-private spool after an aborted workflow."""
+        if self._spool is not None:
+            self._spool.close()
 
     def _validate_next(self, snapshot: TrackFrameSnapshot) -> None:
         if not self._frames:
@@ -272,14 +308,21 @@ class TrackingAccumulator:
         self._next_track_number += 1
         return track_id
 
+    def _new_observation_bucket(
+        self, track_id: str
+    ) -> list[CageObservation] | SpoolObservationBucket:
+        if self._spool is None:
+            return []
+        return self._spool.observation_bucket(track_id, _track_number(track_id))
+
     def _add_first_frame(
         self, stamp: FrameStamp, states: Sequence[_CageState]
     ) -> None:
         for state in states:
             track_id = self._new_track_id()
-            self._track_observations[track_id] = [
-                _observation(track_id, stamp, state)
-            ]
+            bucket = self._new_observation_bucket(track_id)
+            bucket.append(_observation(track_id, stamp, state))
+            self._track_observations[track_id] = bucket
             self._active.append(
                 _TrackedState(
                     state=state,

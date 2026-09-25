@@ -10,6 +10,7 @@ import numpy as np
 from ... import __version__
 from ...config import normalize_cpp_order_parameters
 from ...models import Cage, F3F4Result, Frame, FrameResult, GraphResult, Guest, Ring, Water, WaterOrder, guest_id
+from ..common.geometry import connected_centroid
 
 
 def analyze_frame_cpp(
@@ -87,7 +88,13 @@ def analyze_frame_cpp(
         raise RuntimeError("SQQ-CPP returned an invalid non-mapping result.")
     graph = _graph_result(waters, raw)
     rings, ring_by_native_index = _ring_results(raw.get("rings", ()))
-    all_cages = _cage_results(raw.get("cages", ()), ring_by_native_index, guests)
+    all_cages = _cage_results(
+        raw.get("cages", ()),
+        ring_by_native_index,
+        guests,
+        frame,
+        canonical_center=not native_options["scientific_validation"],
+    )
     cages = _reported_cages(all_cages, cage_report_types)
     f3f4 = _f3f4_result(frame, waters, raw.get("f3f4"), selected_order, config)
     warnings = [str(item) for item in raw.get("warnings", ())]
@@ -183,6 +190,9 @@ def _cage_results(
     records: Any,
     ring_by_native_index: dict[int, Ring],
     guests: list[Guest],
+    frame: Frame,
+    *,
+    canonical_center: bool,
 ) -> list[Cage]:
     normalized = sorted(
         records or (),
@@ -203,6 +213,19 @@ def _cage_results(
                 for index in record.get("ring_indices", ())
             )
         )
+        face_rings = [
+            ring_by_native_index[int(index)]
+            for index in record.get("ring_indices", ())
+        ]
+        center = (
+            connected_centroid(
+                frame,
+                [node for ring in face_rings for node in ring.nodes],
+                [edge for ring in face_rings for edge in ring.edges],
+            )
+            if canonical_center
+            else np.asarray(record.get("center", (0.0, 0.0, 0.0)), dtype=float)
+        )
         guest_ids = _guest_ids(record, guests)
         cages.append(
             Cage(
@@ -210,7 +233,7 @@ def _cage_results(
                 cage_type=cage_type,
                 rings=ring_ids,
                 waters=tuple(sorted(int(node) for node in record.get("waters", ()))),
-                center=np.asarray(record.get("center", (0.0, 0.0, 0.0)), dtype=float),
+                center=center,
                 guest_ids=guest_ids,
                 isomer=None if record.get("isomer") is None else str(record["isomer"]),
             )

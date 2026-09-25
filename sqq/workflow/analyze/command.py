@@ -46,7 +46,7 @@ from ...io.reporting import (
     write_summary,
 )
 from ...io.input.trajectory import expand_inputs, read_gro
-from ...runtime.contracts import FrameTask, InputKind, RunPlan, TaskOutcome
+from ...runtime.contracts import InputKind, RunPlan, TaskOutcome
 from ...runtime.parallel.policy import worker_policy_text
 from ...models.tracking import TrackingResult
 from ...runtime.dispatcher import analyze_frame
@@ -417,6 +417,8 @@ def _analyze_locked(
             rows_by_index,
             exc,
         )
+        if tracking_sink is not None:
+            tracking_sink.close()
         raise
 
     rows = [rows_by_index[index] for index in sorted(rows_by_index)]
@@ -477,6 +479,8 @@ def _analyze_locked(
     except Exception as exc:
         root_info.update(status="failed", error=str(exc))
         write_run_config(Path(args.output), execution_config, root_info)
+        if tracking_sink is not None:
+            tracking_sink.close()
         raise
 
     final_finished_at = datetime.now().astimezone()
@@ -492,11 +496,20 @@ def _analyze_locked(
     )
     final_config = _final_root_config(grouping, execution_config, group_configs)
     write_run_config(Path(args.output), final_config, root_info)
+    # ``requested_frames`` has one input-independent meaning: frames selected
+    # for analysis, including GRO files that failed during topology pre-scan.
+    requested_frames = int(
+        plan.sampling.get(
+            "requested_frames",
+            int(plan.sampling.get("selected_frames", len(paths)))
+            + int(plan.sampling.get("failed_sources", 0) or 0),
+        )
+    )
     statistics = completed_run_statistics(
         root_info,
         final_config,
         result_path=Path(args.output),
-        requested_frames=int(plan.sampling.get("selected_frames", len(paths))),
+        requested_frames=requested_frames,
         analysis_seconds=analysis_seconds,
         write_seconds=write_seconds,
         total_seconds=total_seconds,
@@ -508,6 +521,8 @@ def _analyze_locked(
     statistics["diagnostic_messages"] = diagnostics.consume()
     refresh_terminal()
     print_final_results(root_info, final_config, statistics)
+    if tracking_sink is not None:
+        tracking_sink.close()
     return ALL_FRAMES_FAILED_EXIT_STATUS if run_status == "failed" else 0
 
 
@@ -552,6 +567,7 @@ class _ProgressBridge:
                     math_threads=plan.policy.math_threads,
                     policy=compact_worker_policy(worker_policy_text(dict(config))),
                     unit=unit,
+                    backend=plan.policy.backend,
                 )
             )
             self._parallel = True
@@ -1193,21 +1209,6 @@ def _final_root_config(
     if grouping is not None and grouping.group_count == 1 and grouping.groups:
         return group_configs[grouping.groups[0].group_index]
     return config
-
-
-def _has_tracking_state(plan: RunPlan) -> bool:
-    if plan.topology_groups:
-        for key, task_indexes in plan.topology_groups.items():
-            if len(task_indexes) < 2:
-                continue
-            root = Path(plan.context.group_output_roots[key])
-            if (root / "track" / "track_state.json").is_file():
-                return True
-        return False
-    return len(plan.tasks) > 1 and any(
-        (root / "track" / "track_state.json").is_file()
-        for root in plan.output_roots
-    )
 
 
 def _is_multi_gro(paths: list[Path]) -> bool:

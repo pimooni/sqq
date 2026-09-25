@@ -112,7 +112,13 @@ class RenderFragment:
 
 @dataclass(frozen=True)
 class RenderBundle:
-    """Files produced by render-package finalization."""
+    """Files produced by render-package finalization.
+
+    ``file_digests`` (role -> ``{"name", "size", "sha256"}``), ``atom_count``,
+    and ``topology_identity`` are filled by the writer that produced the
+    package so provenance can be recorded without re-reading the files. They
+    are absent for packages discovered on disk, which are always re-verified.
+    """
 
     gro_path: Path | None
     script_path: Path | None
@@ -120,6 +126,9 @@ class RenderBundle:
     xtc_path: Path | None = None
     membership_path: Path | None = None
     render_dir: Path | None = None
+    file_digests: Mapping[str, Mapping[str, object]] | None = None
+    atom_count: int | None = None
+    topology_identity: str | None = None
 
     @property
     def complete(self) -> bool:
