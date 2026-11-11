@@ -94,6 +94,8 @@ _INLINE_COMMENTS: dict[tuple[str, ...], str] = {
     ("cage", "scientific_validation"): "choices: true, false",
     ("cage", "occupancy_mode"): "choices: polyhedron, center, auto",
     ("hydrate_cluster", "enabled"): "choices: true, false",
+    ("hydrate_cluster", "phase_ratio"): "choices: 0 <= value < 1; require a greater matching-neighbor fraction",
+    ("hydrate_cluster", "assignment_rule"): "choices: majority, legacy",
     ("order_parameter", "enabled"): f"choices: {', '.join(ORDER_PARAMETER_CHOICES)}",
     ("order_parameter", "q_neighbor_mode"): "choices: graph, cutoff, nearest, lammps",
     ("ice", "enabled"): "choices: true, false",

@@ -49,8 +49,9 @@ def discover_sqq_cage_bundle(
     source: str | Path | None = None,
     *,
     state_path: str | Path | None = None,
+    allow_missing: bool = False,
 ) -> RenderBundle:
-    """Find one complete Analyze render package associated with Track input."""
+    """Find an Analyze package, optionally allowing genuinely absent coordinates."""
     roots: list[Path] = []
     if source is not None:
         root = Path(source)
@@ -111,6 +112,11 @@ def discover_sqq_cage_bundle(
             "cannot be imported again; use the Analyze result directory that "
             "produced them."
         )
+    if allow_missing and not any(
+        (root / name).exists() for root in roots
+        for name in (SQQ_CAGE_GRO_NAME, SQQ_CAGE_XTC_NAME, SQQ_CAGE_MEMBERSHIP_NAME, SQQ_RENDER_SCRIPT_NAME)
+    ):
+        return RenderBundle(gro_path=None, script_path=None, frame_count=0)
     raise FileNotFoundError(
         f"Cannot find {SQQ_RENDER_DIRECTORY}/{{{SQQ_CAGE_GRO_NAME}, "
         f"{SQQ_CAGE_XTC_NAME}, {SQQ_CAGE_MEMBERSHIP_NAME}, "
@@ -122,7 +128,7 @@ def _looks_like_track_result(
     source: str | Path | None,
     state_path: str | Path | None,
 ) -> bool:
-    """Detect a Track output root, whose render packages are per-target."""
+    """Detect Track results with root-level or selected-target packages."""
     track_roots: list[Path] = []
     if state_path is not None:
         track_roots.append(Path(state_path).parent)
@@ -134,6 +140,14 @@ def _looks_like_track_result(
     for track_root in track_roots:
         if not track_root.is_dir():
             continue
+        if (track_root.parent / SQQ_RENDER_DIRECTORY / TRACK_TCL_NAME).is_file():
+            return True
+        config_path = track_root.parent / "sqq_config_resolved.yaml"
+        if config_path.is_file():
+            import yaml
+            payload = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+            if isinstance(payload, Mapping) and isinstance(payload.get("run"), Mapping) and payload["run"].get("command") == "track":
+                return True
         if any(
             (child / SQQ_RENDER_DIRECTORY / TRACK_TCL_NAME).is_file()
             for child in track_root.iterdir()

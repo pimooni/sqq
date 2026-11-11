@@ -194,7 +194,6 @@ _CAGE_TRANSITION_EDGE_FIELDS = (
 
 # Relative output path -> CSV columns, in publication order.
 _TABLE_FIELDS: dict[str, tuple[str, ...]] = {
-    "cage_observation.csv": _OBSERVATION_FIELDS,
     "cage_track.csv": _TRACK_FIELDS,
     "lifetime_distribution.csv": _LIFETIME_DISTRIBUTION_FIELDS,
     "cage_event.csv": _EVENT_FIELDS,
@@ -451,7 +450,6 @@ TrackTables = dict[str, list[Row]]
 # straight from the tracking data into their CSV files instead of being kept
 # as row dictionaries next to the (much smaller) per-track and aggregate tables.
 _STREAMED_TABLES: dict[str, Callable[[TrackingResult | TargetSelection], Iterable[Row]]] = {
-    "cage_observation.csv": iter_observation_rows,
     "statistics/tracking_quality.csv": iter_tracking_quality_rows,
 }
 
@@ -620,9 +618,18 @@ def write_track_outputs(
     written = write_tracking_tables(result, root, tables=tables)
     written[TRACK_STATE_NAME] = write_tracking_result(result, root / TRACK_STATE_NAME)
     written[TRACK_INFO_NAME] = write_track_info(result, root, tables=tables)
-    for selection in select_targets(result, targets):
-        directory = write_target_selection(selection, root, run_tables=tables)
+    selections = select_targets(result, targets)
+    for selection in selections:
+        directory = (
+            Path(outdir) if selection.target.kind == "all"
+            else write_target_selection(selection, root, run_tables=tables)
+        )
         written[target_directory_name(selection.target)] = directory
+    from .cage_info import write_cage_info_frames
+    write_cage_info_frames(result, [
+        (selection, written[target_directory_name(selection.target)])
+        for selection in selections
+    ])
     return written
 
 
@@ -1074,6 +1081,7 @@ def _observation_to_dict(item: CageObservation) -> dict[str, object]:
         "center": list(item.center),
         "topology": list(item.topology),
         "guest_ids": list(item.guest_ids),
+        "neighbor_cage_ids": None if item.neighbor_cage_ids is None else list(item.neighbor_cage_ids),
         "match_jaccard": item.match_jaccard,
         "match_shared_fraction": item.match_shared_fraction,
         "match_center_distance_nm": item.match_center_distance_nm,
@@ -1128,6 +1136,11 @@ def _observation_from_dict(value: Mapping[str, object]) -> CageObservation:
         ),
         guest_ids=tuple(
             str(item) for item in _sequence(value.get("guest_ids"), "guest_ids")
+        ),
+        neighbor_cage_ids=(
+            None if value.get("neighbor_cage_ids") is None else tuple(
+                str(item) for item in _sequence(value["neighbor_cage_ids"], "neighbor_cage_ids")
+            )
         ),
         match_jaccard=_optional_float(value.get("match_jaccard")),
         match_shared_fraction=_optional_float(value.get("match_shared_fraction")),

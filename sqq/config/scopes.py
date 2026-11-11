@@ -292,6 +292,15 @@ def normalize_analysis_scopes(config: dict[str, Any]) -> None:
         hydrate_cluster.get("min_cage", 2),
         "hydrate_cluster.min_cage / --cluster-min-cage",
     )
+    hydrate_cluster["phase_ratio"] = finite_float(
+        hydrate_cluster.get("phase_ratio", 0.5), "hydrate_cluster.phase_ratio"
+    )
+    if not 0 <= hydrate_cluster["phase_ratio"] < 1:
+        raise ValueError("hydrate_cluster.phase_ratio / --phase-ratio must be in [0, 1).")
+    rule = str(hydrate_cluster.get("assignment_rule", "majority")).strip().lower()
+    if rule not in {"majority", "legacy"}:
+        raise ValueError("hydrate_cluster.assignment_rule must be majority or legacy.")
+    hydrate_cluster["assignment_rule"] = rule
     parallel = config.setdefault("parallel", {})
     parallel["backend"] = normalize_parallel_backend(parallel.get("backend", "process"))
     parallel["math_threads"] = positive_integer(parallel.get("math_threads", 1), "parallel.math_threads")

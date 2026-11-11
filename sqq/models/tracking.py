@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
-from dataclasses import dataclass, field, fields
+from dataclasses import MISSING, dataclass, field, fields
 from functools import cached_property
 import re
 from typing import Iterable, Literal, Mapping
@@ -93,26 +93,27 @@ def _pickle_compatible_slots(cls):
     values.  Store names going forward and accept both representations.
     """
     names = tuple(item.name for item in fields(cls))
+    defaults = {item.name: item.default for item in fields(cls) if item.default is not MISSING}
 
     def __getstate__(self):
         return {name: getattr(self, name) for name in names}
 
     def __setstate__(self, state):
         if isinstance(state, Mapping):
-            missing = [name for name in names if name not in state]
+            missing = [name for name in names if name not in state and name not in defaults]
             if missing:
                 raise ValueError(
                     "Pickled tracking record is missing field(s): "
                     + ", ".join(missing)
                 )
-            values = tuple(state[name] for name in names)
+            values = tuple(state[name] if name in state else defaults[name] for name in names)
         elif isinstance(state, (tuple, list)):
-            if len(state) != len(names):
+            if len(state) > len(names) or any(name not in defaults for name in names[len(state):]):
                 raise ValueError(
                     f"Pickled tracking record has {len(state)} values; "
                     f"expected {len(names)}."
                 )
-            values = tuple(state)
+            values = tuple(state) + tuple(defaults[name] for name in names[len(state):])
         else:
             raise TypeError("Pickled tracking record state must be a mapping or sequence.")
         for name, value in zip(names, values):
@@ -281,6 +282,7 @@ class TrackCageSnapshot:
     center: tuple[float, float, float]
     topology: tuple[int, ...]
     guest_ids: tuple[str, ...]
+    neighbor_cage_ids: tuple[str, ...] | None = None
 
     def __post_init__(self) -> None:
         local_id = str(self.local_cage_id).strip()
@@ -303,6 +305,11 @@ class TrackCageSnapshot:
         object.__setattr__(self, "phase_labels", phases)
         object.__setattr__(self, "topology", topology)
         object.__setattr__(self, "guest_ids", guests)
+        if self.neighbor_cage_ids is not None:
+            neighbors = tuple(sorted(set(map(str, self.neighbor_cage_ids))))
+            if local_id in neighbors:
+                raise ValueError("A cage cannot be its own neighbor.")
+            object.__setattr__(self, "neighbor_cage_ids", neighbors)
 
     def to_dict(self) -> Row:
         return {
@@ -313,6 +320,7 @@ class TrackCageSnapshot:
             "center": list(self.center),
             "topology": list(self.topology),
             "guest_ids": list(self.guest_ids),
+            "neighbor_cage_ids": None if self.neighbor_cage_ids is None else list(self.neighbor_cage_ids),
         }
 
     @classmethod
@@ -339,6 +347,11 @@ class TrackCageSnapshot:
             guest_ids=tuple(
                 str(item)
                 for item in _as_sequence(value.get("guest_ids", ()), "guest_ids")
+            ),
+            neighbor_cage_ids=(
+                None if value.get("neighbor_cage_ids") is None else tuple(
+                    str(item) for item in _as_sequence(value["neighbor_cage_ids"], "neighbor_cage_ids")
+                )
             ),
         )
 
@@ -371,6 +384,14 @@ class TrackFrameSnapshot:
         local_ids = [cage.local_cage_id for cage in cages]
         if len(local_ids) != len(set(local_ids)):
             raise ValueError(f"Snapshot cage IDs are not unique in frame {self.frame_name}.")
+        by_id = {cage.local_cage_id: cage for cage in cages}
+        for cage in cages:
+            if cage.neighbor_cage_ids is None:
+                continue
+            for neighbor in cage.neighbor_cage_ids:
+                other = by_id.get(neighbor)
+                if other is None or other.neighbor_cage_ids is None or cage.local_cage_id not in other.neighbor_cage_ids:
+                    raise ValueError("Snapshot cage connectivity must be symmetric within its frame.")
         object.__setattr__(self, "frame_index", index)
         object.__setattr__(self, "time_ps", time)
         object.__setattr__(self, "box", box)
@@ -446,6 +467,8 @@ class CageObservation:
     match_diagnostic_source: str = ""
     gap_frames: int = 0
     gap_time_ps: float | None = None
+    # None means legacy state without shared-face evidence, not an isolated cage.
+    neighbor_cage_ids: tuple[str, ...] | None = None
 
 
 @_pickle_compatible_slots

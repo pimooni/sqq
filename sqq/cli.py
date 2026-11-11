@@ -11,6 +11,7 @@ from . import __release_date__, __version__
 from .config import ORDER_PARAMETER_CHOICES
 from .exceptions import SQQError
 from .ui.banner import HELP_BANNER
+from .ui.update_check import start_update_check
 from .workflow.analyze import analyze
 from .workflow.init import initialize_config
 from .workflow.track import track
@@ -167,7 +168,7 @@ def _add_analysis_arguments(
         default=None,
         help=(
             "Worker count or physical-core fraction, e.g. 4, 0.5, or 50%%; "
-            "raw Track currently normalizes this to one worker."
+            "raw Track links frame results in order."
         ),
     )
     command_parser.add_argument(
@@ -203,6 +204,12 @@ def _add_analysis_arguments(
         "--find-cluster",
         choices=("on", "off"),
         help="Enable or disable hydrate-cluster search.",
+    )
+    command_parser.add_argument(
+        "--phase-ratio",
+        type=float,
+        metavar="FRACTION",
+        help="Phase-compatible neighbor fraction threshold (default 0.5; strict >).",
     )
     command_parser.add_argument(
         "--order-parameter",
@@ -314,8 +321,10 @@ def main(argv: list[str] | None = None) -> int:
         print(f"Wrote default SQQ config: {out}")
         return 0
     if args.command == "analyze":
+        start_update_check()
         return _run_user_command(analyze, args)
     if args.command == "track":
+        start_update_check()
         return _run_user_command(track, args)
     if args.command == "vmd":
         return run_vmd_command(args.path)

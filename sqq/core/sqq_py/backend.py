@@ -132,6 +132,8 @@ def analyze_frame(
         hydrate_clusters, hydrate_motifs, hydrate_domains, isolated_cage_ids = analyze_hydrate_clusters(
             all_cages,
             min_cage=int(config.get("hydrate_cluster", {}).get("min_cage", 2)),
+            phase_ratio=float(config.get("hydrate_cluster", {}).get("phase_ratio", 0.5)),
+            assignment_rule=str(config.get("hydrate_cluster", {}).get("assignment_rule", "majority")),
             ring_sizes=ring_sizes_by_id,
             frame=frame,
             rings_by_id=rings_by_id,

@@ -6,19 +6,21 @@ from copy import deepcopy
 from typing import Any
 
 DEFAULT_MODE = "py"
-CONFIG_SCHEMA_VERSION = "0.5.7"
+CONFIG_SCHEMA_VERSION = "0.5.8"
 DEFAULT_ORDER_PARAMETERS = ("f3", "f4")
 CPP_MODE = "cpp"
 CPP_MODES = frozenset({"99", CPP_MODE})
 
-CPP_DEFAULT_OUTPUT_TYPES = (
+DEFAULT_OUTPUT_TYPES = (
     "info",
     "sqq-render",
     "summary-csv",
     "summary-detail-csv",
 )
+CPP_DEFAULT_OUTPUT_TYPES = DEFAULT_OUTPUT_TYPES
 CPP_ALL_OUTPUT_TYPES = (
     "info",
+    "cage-info",
     "gro",
     "cage-gro",
     "f3-gro",
@@ -62,9 +64,9 @@ ORDER_PARAMETER_ALIASES = {
     "dhop_30": "dhop30",
 }
 
-DEFAULT_OUTPUT_TYPES = ("info", "sqq-render", "summary-xlsx")
 ALL_OUTPUT_TYPES = (
     "info",
+    "cage-info",
     "membership-tsv",
     "order-tsv",
     "f3-gro",
@@ -79,6 +81,7 @@ ALL_OUTPUT_TYPES = (
 )
 OUTPUT_TYPE_ORDER = (
     "info",
+    "cage-info",
     "membership-tsv",
     "order-tsv",
     "f3-gro",
@@ -109,7 +112,7 @@ MODE_PRESETS: dict[str, dict[str, Any]] = {
         "bond_mode": "hbond",
         "ring_sizes": [4, 5, 6],
         "find_cluster": True,
-        "output_types": ["info", "sqq-render", "summary-xlsx"],
+        "output_types": list(DEFAULT_OUTPUT_TYPES),
     },
     "py": {
         "engine": "sqq-py",
@@ -224,7 +227,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "occupancy_mode": "polyhedron",
         "occupancy_radius_nm": 0.5,
     },
-    "hydrate_cluster": {"enabled": False, "min_cage": 2},
+    "hydrate_cluster": {"enabled": False, "min_cage": 2, "phase_ratio": 0.5, "assignment_rule": "majority"},
     "hydrate_order": {
         "mcg_guest_resnames": ["CH4", "MET"],
         "mcg_guest_cutoff_nm": 0.90,

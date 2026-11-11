@@ -200,6 +200,7 @@ def normalize_parallel_backend(value: Any) -> str:
 
 
 _RESOLVED_RUN_KEYS = {
+    "command",
     "sqq_version", "release_date", "engine_selector", "engine", "config_output",
     "status", "error", "graph_mode_requested", "graph_mode_effective",
     "graph_mode_reason", "graph_mode_display", "graph_mode_by_group",
@@ -283,6 +284,8 @@ def validate_cpp_cli(args: Any, config: dict[str, Any]) -> None:
     """
     errors: list[str] = []
     if is_cpp_mode(config.get("mode", DEFAULT_MODE)):
+        if getattr(args, "phase_ratio", None) is not None:
+            errors.append("--phase-ratio is only supported by SQQ-Py")
         if getattr(args, "find_half", None) not in (None, False, "off"):
             errors.append("--find-half on is not supported by SQQ-CPP")
         if getattr(args, "find_quasi", None) not in (None, False, "off"):

@@ -100,6 +100,8 @@ def analyze_hydrate_clusters(
     frame: Frame | None = None,
     rings_by_id: dict[str, Ring] | None = None,
     face_geometries: dict[str, tuple[np.ndarray, np.ndarray]] | None = None,
+    phase_ratio: float = 0.5,
+    assignment_rule: str = "majority",
 ) -> tuple[list[HydrateCluster], list[HydrateMotif], list[HydrateDomain], tuple[str, ...]]:
     """Build clusters, identify strict and spatial evidence, and expand phase domains.
 
@@ -108,6 +110,10 @@ def analyze_hydrate_clusters(
     """
     if min_cage < 1:
         raise ValueError("hydrate_cluster.min_cage / --cluster-min-cage must be at least 1.")
+    if not 0 <= phase_ratio < 1:
+        raise ValueError("hydrate_cluster.phase_ratio must be in [0, 1).")
+    if assignment_rule not in {"majority", "legacy"}:
+        raise ValueError("hydrate_cluster.assignment_rule must be majority or legacy.")
     if not cages:
         return [], [], [], ()
 
@@ -211,6 +217,8 @@ def analyze_hydrate_clusters(
                 face_sizes,
                 signatures,
                 phase_edges[phase],
+                phase_ratio=phase_ratio,
+                assignment_rule=assignment_rule,
             )
             for phase in PHASE_TYPES
         }
@@ -224,6 +232,10 @@ def analyze_hydrate_clusters(
         for phase, indexes in accepted_by_cluster[cluster.object_id].items():
             for index in indexes:
                 claims[index].add(phase)
+    if assignment_rule == "majority":
+        resolve_phase_claims(
+            claims, all_seeds, cages, adjacency, shared_faces, face_sizes
+        )
 
     specs = build_domain_specs(
         clusters,
@@ -245,6 +257,7 @@ def analyze_hydrate_clusters(
         claims,
         adjacency,
         domain_members,
+        ambiguous_first=assignment_rule == "majority",
     )
     specs = attach_domain_boundaries(
         specs,
@@ -710,6 +723,8 @@ def expand_phase_from_seeds(
     face_sizes: dict[str, int],
     signatures: dict[int, Counter[tuple[str, int]]],
     seed_edges: set[tuple[int, int]],
+    phase_ratio: float = 0.5,
+    assignment_rule: str = "majority",
 ) -> set[int]:
     """Expand one phase from strict seeds and spatial-core anchors."""
     if not seed_members:
@@ -740,12 +755,72 @@ def expand_phase_from_seeds(
             ):
                 continue
             contact_counts[neighbor] += 1
-            if contact_counts[neighbor] < EXPANSION_MIN_PHASE_CONTACTS:
-                continue
+            if assignment_rule == "legacy":
+                if contact_counts[neighbor] < EXPANSION_MIN_PHASE_CONTACTS:
+                    continue
+            else:
+                supporting, total = phase_neighbor_support(
+                    phase, neighbor, cages, adjacency, shared_faces, face_sizes
+                )
+                if not total or supporting <= phase_ratio * total:
+                    continue
             accepted.add(neighbor)
             compatible_nodes.remove(neighbor)
             queue.append(neighbor)
     return accepted
+
+
+def resolve_phase_claims(
+    claims: dict[int, set[str]],
+    seeds: list[PhaseSeed],
+    cages: list[Cage],
+    adjacency: dict[int, set[int]],
+    shared_faces: dict[tuple[int, int], set[str]],
+    face_sizes: dict[str, int],
+) -> None:
+    """Resolve growth overlaps without overriding phase seed anchors."""
+    anchor_phases: dict[int, set[str]] = defaultdict(set)
+    for seed in seeds:
+        for index in seed.anchor_indexes:
+            anchor_phases[index].add(seed.hydrate_type)
+    for index, phases in list(claims.items()):
+        if len(phases) < 2:
+            continue
+        anchored = phases.intersection(anchor_phases.get(index, ()))
+        if anchored:
+            # One anchor wins over growth evidence; overlapping anchors stay
+            # ambiguous and cannot authenticate an exclusive domain.
+            claims[index] = anchored
+            continue
+        support = {
+            phase: phase_neighbor_support(
+                phase, index, cages, adjacency, shared_faces, face_sizes
+            )[0]
+            for phase in phases
+        }
+        # Every phase has the same denominator for this cage. Integer counts
+        # therefore compare fractions exactly, including ties.
+        best = max(support.values())
+        claims[index] = {phase for phase, count in support.items() if count == best}
+
+
+def phase_neighbor_support(
+    phase: str,
+    index: int,
+    cages: list[Cage],
+    adjacency: dict[int, set[int]],
+    shared_faces: dict[tuple[int, int], set[str]],
+    face_sizes: dict[str, int],
+) -> tuple[int, int]:
+    """Count structurally compatible neighbors against every shared-face neighbor."""
+    neighbors = adjacency[index]
+    supporting = sum(
+        phase_edge_compatible(
+            phase, index, neighbor, cages, shared_faces, face_sizes, set()
+        )
+        for neighbor in neighbors
+    )
+    return supporting, len(neighbors)
 
 
 def phase_edge_compatible(
@@ -852,6 +927,8 @@ def resolve_boundary_cages(
     claims: dict[int, set[str]],
     adjacency: dict[int, set[int]],
     domain_members: set[int],
+    *,
+    ambiguous_first: bool = False,
 ) -> tuple[set[int], set[int]]:
     """Return the external first cage layer and unresolved phase claims."""
     boundary: set[int] = set()
@@ -866,7 +943,9 @@ def resolve_boundary_cages(
                 neighbor in domain_members
                 for neighbor in adjacency[index].intersection(component_set)
             )
-            if touches_domain:
+            if ambiguous_first and len(claims.get(index, set())) > 1:
+                ambiguous.add(index)
+            elif touches_domain:
                 boundary.add(index)
             elif len(claims.get(index, set())) > 1:
                 ambiguous.add(index)

@@ -50,8 +50,8 @@ The public selector is `-e` / `--engine`. Accepted values are discrete presets r
 
 | Engine value | Effective backend | Graph | Search sizes | Auto worker policy | Find cluster | Default output types |
 | --- | --- | --- | --- | --- | --- | --- |
-| `00` | `sqq-py` | `hbond` | 4/5/6 | 100% | on | `info,sqq-render,summary-xlsx` |
-| `py` | `sqq-py` | `auto` | 4/5/6 | 1 worker | off | `info,sqq-render,summary-xlsx` |
+| `00` | `sqq-py` | `hbond` | 4/5/6 | 100% | on | `info,sqq-render,summary-csv,summary-detail-csv` |
+| `py` | `sqq-py` | `auto` | 4/5/6 | 1 worker | off | `info,sqq-render,summary-csv,summary-detail-csv` |
 | `99` | `sqq-cpp` | `hbond` | internal 4/5/6 | 100% | unsupported | `info,sqq-render,summary-csv,summary-detail-csv` |
 | `cpp` | `sqq-cpp` | `auto` | internal 4/5/6 | 1 worker | unsupported | `info,sqq-render,summary-csv,summary-detail-csv` |
 
@@ -147,7 +147,7 @@ The shared public CLI remains the compact Analyze surface listed above. Under SQ
 - `-w` / `--worker` retains the shared worker parser;
 - `--find-half`, `--find-quasi`, and `--find-cluster on` are rejected because those searches are not native features.
 
-Advanced native-compatible settings come from YAML: `graph.pair_id`; cage report/face/validation settings; `parallel.backend` restricted to `process|serial`; `output.structure_layout`; `output.cage_isomer_row`; and `output.type` restricted to `info`, `gro`, `cage-gro`, `sqq-render`, `summary-csv`, `summary-xlsx`, `summary-detail-csv`, `default`, `all`, or `none`.
+Advanced native-compatible settings come from YAML: `graph.pair_id`; cage report/face/validation settings; `parallel.backend` restricted to `process|serial`; `output.structure_layout`; `output.cage_isomer_row`; and the output types listed in Output Layout, including shared `cage-info`.
 
 The C++ output normalizer keeps `gro` as the ordinary classified-GRO umbrella. `sqq-render` owns the complete visualization package and `all` maps to every supported native output. Engine values `99` and `cpp` both default to `info,sqq-render,summary-csv,summary-detail-csv`; ordinary/classified GRO remains explicit. Native detail output contains cage occupancy and cage isomer tables. Public ring output, size 7, shortest-path rings, cluster, ice, Q_l/MCG/DHOP, legacy per-frame VMD or TSV output, fast closure, thread backend, and triclinic input are unsupported. Explicit retained-CLI requests outside the engine-neutral half/quasi compatibility rule fail before frames are analyzed. Generic `auto` half/quasi settings resolve off under C++; legacy YAML that explicitly enables those Python-only searches is downgraded with one warning, incompatible half/quasi output types are removed, and the adjustment is recorded in `sqq_config_resolved.yaml`. There is no `-m c` alias and no Python fallback if `_sqq_cpp` cannot be imported or returns an error.
 
@@ -338,6 +338,8 @@ cage:
 hydrate_cluster:
   enabled: false
   min_cage: 2
+  phase_ratio: 0.5  # choices: 0 <= value < 1; strict greater-than
+  assignment_rule: majority  # choices: majority, legacy
 
 hydrate_order:
   mcg_guest_resname: [CH4, MET]
@@ -363,7 +365,7 @@ ice:
   require_four_coord_neighbor: true
 
 output:
-  type: [info, sqq-render, summary-xlsx]
+  type: [info, sqq-render, summary-csv, summary-detail-csv]
   summary_csv_dir: summary
   cage_isomer_row: nonzero  # choices: nonzero, all
   write_empty_file: false
@@ -849,11 +851,13 @@ sI, sII, and sH expand independently from every strict-seed member and every val
 - have at least one compatible internal fingerprint label;
 - not exceed any expected fingerprint count by more than one;
 - connect through a face label allowed by both endpoint templates; and
-- receive at least two compatible contacts from already accepted phase cages.
+- have a structurally phase-compatible shared-face neighbor fraction strictly greater than `hydrate_cluster.phase_ratio` (default `0.5`) across all adjacent cages, and connect to the accepted phase region.
+
+`--phase-ratio` overrides the YAML threshold. `hydrate_cluster.assignment_rule: legacy` retains the previous two-accepted-contact expansion and overlap handling; an explicit CLI ratio selects `majority`. Strict and spatial seed anchors are not subject to expansion filtering. A cage anchored in one phase retains that phase despite competing growth claims; a cage anchored in multiple phases remains ambiguous between those phases. Only non-anchor overlaps use the largest compatible-neighbor fraction, with equal fractions remaining ambiguous. Compatibility is structural (endpoint cage types and shared-face label), not the neighbor's already-assigned phase. Every neighbor is counted once, including incompatible neighbors in the denominator. Fractions for competing phases have a common denominator and are compared using integer support counts.
 
 For sH, the same edge check includes pentagonal `5^12` contacts, square medium-medium contacts, equatorial medium-large hexagonal contacts, and axial large-large hexagonal contacts. Strict/composite-seed internal edges remain trusted evidence; spatial-core edges must pass the ordinary template check.
 
-After all phases collect claims independently, SQQ forms domains from cages claimed by exactly one phase. Domain edges must remain phase-compatible, and every connected domain component must contain at least one strict or spatial evidence anchor. Keeping anchors distinct from members prevents shared support cages from authenticating a phase by themselves, while seeding from all validated members avoids dropping a legitimate core cage before expansion. Same-phase regions separated by non-domain cages remain separate domains. Domain ids are deterministic within a frame and are not tracked across frames.
+After all phases collect claims independently, SQQ forms domains from cages claimed by exactly one phase. Domain edges must remain phase-compatible, and every connected domain component must contain at least one complete strict or spatial seed anchor set. Overlapping anchors remain ambiguous and cannot authenticate an exclusive domain; a component with no complete unambiguous anchor set is not promoted to a domain. Keeping anchors distinct from members prevents shared support cages from authenticating a phase by themselves, while seeding from all validated members avoids dropping a legitimate core cage before expansion. Same-phase regions separated by non-domain cages remain separate domains. Domain ids are deterministic within a frame and are not tracked across frames.
 
 All spatial scoring is frame-local. No previous/next frame, persistent cage id, hysteresis, or temporal smoothing is used. Therefore one frame analyzed alone has the same phase assignment as that frame analyzed in a trajectory or compatible multi-file group. True topology changes can still cross the fixed spatial thresholds.
 
@@ -863,10 +867,10 @@ After exclusive domains exist, SQQ partitions every reported cluster into mutual
 
 1. `classified_cage_ids` is the union of all final sI, sII, and sH domain members.
 2. For each non-domain cage, inspect its complete shared-face neighbors in the same connected component.
-3. If at least one neighbor is a final domain member, place only the non-domain cage in `boundary_cage_ids`.
+3. In `majority` mode, competing phase claims first place the non-domain cage in `ambiguous_cage_ids`, even when it touches a domain. Otherwise, if at least one neighbor is a final domain member, place only the non-domain cage in `boundary_cage_ids`.
 4. Do not mark the contacted domain cage. A direct shared-face edge between two different phase domains leaves both endpoints classified in their original phases and creates no boundary cage by itself.
 5. Stop after the first external non-phase layer. Boundary membership is not propagated through another non-domain cage.
-6. A remaining non-domain cage with competing phase claims enters `ambiguous_cage_ids`; every other residual cage enters `unclassified_cage_ids`.
+6. In `legacy` mode, boundary contacts retain their original precedence over competing claims. A remaining non-domain cage with competing phase claims enters `ambiguous_cage_ids`; every other residual cage enters `unclassified_cage_ids`.
 
 These four sets are pairwise disjoint and cover the complete cluster:
 
@@ -980,22 +984,24 @@ The versioned JSON state contains frame stamps, configuration, tracks/observatio
 
 ### Track workflow and targets
 
+Raw Track run metadata uses the actual execution policy after worker/task caps and backend resolution (`run.workers_resolved`, `run.parallel_backend`, `run.math_threads_per_worker` in resolved YAML), including failures after execution starts. Requested settings remain separate in the parallel configuration. Imported-source Track records one serial worker because it does not analyze trajectory frames.
+
 `sqq track` has two mutually exclusive data paths:
 
 - raw `-i` input reuses Analyze readers, frame selection, engine dispatch, and `-dt`, then tracks the resulting stream;
-- `--source` imports an existing Analyze `track/track_state.json` and its complete `sqq_render/` bundle without rerunning frame science.
+- `--source` imports an existing Analyze `track/track_state.json` without rerunning frame science. A complete `sqq_render/` bundle is imported and validated when present; genuinely absent coordinates permit cage-info/statistics-only output with a warning. An incomplete package, failed provenance validation, or Track-result source is still rejected.
 
-Source mode reads the Analyze engine from `sqq_config_resolved.yaml`, preserves the original `sqq-py` or `sqq-cpp` identity in terminal and newly resolved metadata, and applies C++ half/quasi capability normalization when the source engine is SQQ-CPP. An explicit `-e` with `--source` cannot change the imported engine: a different engine family (`py` for a `sqq-cpp` source or `cpp` for a `sqq-py` source) is an error, while a same-family preset (`00`/`99`) is accepted with a warning that the stored engine identity is kept. Source mode is read-only with respect to the source directory: it never writes into it, requires the render package to be exactly the four files named by the Tcl manifest, and rejects a Track result directory as a source because Track publishes target packages rather than a run-level `sqq_render/` bundle. Raw-input Track results are terminal for the same reason and store an empty `source_provenance` record.
+Source mode reads the Analyze engine from `sqq_config_resolved.yaml`, preserves the original `sqq-py` or `sqq-cpp` identity, and applies C++ half/quasi capability normalization. An explicit `-e` cannot change the imported engine family; same-family presets retain the stored identity with a warning. Sources remain read-only. A present render package must be exactly the four files named by the Tcl manifest and must pass state/provenance validation. Track results remain terminal, including the new root-level all-target layout and coordinate-free results; `run.command` records the producing command. Raw-input Track state stores an empty `source_provenance` record.
 
 ```bash
 sqq track --source ./result_sqq --target all -o ./result_track
 ```
 
-With neither option, exactly one state is discovered from the current directory. Raw Track accepts one trajectory or one stacked GRO because its target is one physical time series. Before frame analysis, it resolves the exact effective time used at runtime for every selected frame: stored reader time takes precedence, while a missing time uses `input.first_file_time_ps + raw_frame_index * input.frame_time_step_ps`. The complete effective sequence must be finite and nondecreasing, so mixed stored/fallback time metadata cannot fail only after an expensive prefix has run. Raw Track is currently serial: `-w` / `--worker` is normalized to one and the backend to `serial`. Track has a fixed configuration/state/CSV/target-render output set; `--output-type` does not alter it. A source containing several topology groups must be narrowed to one `result_A`/`result_B` directory.
+With neither option, exactly one state is discovered from the current directory. Raw Track accepts one trajectory or one stacked GRO because its target is one physical time series. Before frame analysis, it resolves the exact effective time used at runtime for every selected frame: stored reader time takes precedence, while a missing time uses `input.first_file_time_ps + raw_frame_index * input.frame_time_step_ps`. The complete effective sequence must be finite and nondecreasing. Raw Track can analyze frames in parallel with `-w`, while a single ordered accumulator links their snapshots. Auto workers are capped at two because each worker opens its own trajectory reader; explicit `-w` is honored. Track has a fixed configuration/state/CSV/target-render output set; `--output-type` does not alter it. A source containing several topology groups must be narrowed to one `result_A`/`result_B` directory. Source Track cannot reclassify phases, so `--phase-ratio` requires raw `-i` input.
 
-`--target` accepts `all`, canonical or compact cage types, `sI`/`sII`/`sH`/boundary categories, and persistent IDs. A phase target requires SQQ-Py; SQQ-CPP phase targets fail before analysis. With raw input it automatically resolves `find_cluster` to `on`. Source mode reads imported state as saved and leaves `hydrate_cluster.enabled` untouched in its effective configuration because it cannot add phase labels retroactively; imported state must already contain them. Comma-separated mixed targets are de-duplicated and written to independent `all/`, `type_<type>/`, `phase_<phase>/`, or `cage_<tID>/` directories. Type and phase targets include the full lifecycle of any track that matched at least once, permitting residence and transition analysis outside the matching frames. Persistent-ID targets validate that the requested ID exists. A generated Track renderer passes its complete initial target-ID list to one view update, so target count does not multiply complete redraws.
+`--target` accepts `all`, canonical or compact cage types, `sI`/`sII`/`sH`/boundary categories, and persistent IDs. Phase targets require SQQ-Py and automatically enable cluster search only for raw input; imported state cannot gain missing phase labels retroactively. Mixed targets are de-duplicated. `all` uses the result root's `gro/` and `sqq_render/`, with one run-level statistics set under `track/`; there is no `track/all/` copy. Other targets retain `track/type_<type>/`, `track/phase_<phase>/`, or `track/cage_<tID>/`, each with the same frame/render layout. Type and phase targets include complete selected lifecycles. Persistent-ID targets must exist. Generated renderers pass their initial target-ID list to one view update.
 
-The run-level `track/` directory contains state plus `cage_observation.csv`, `cage_track.csv`, `cage_event.csv`, `cage_population.csv`, `guest_residence.csv`, and `lifetime_distribution.csv`. `statistics/` adds `tracking_quality.csv`, `lifetime_survival.csv`, `cage_lineage.csv`, `guest_event.csv`, `guest_residence_lifetime.csv`, `occupancy_state_lifetime.csv`, and `occupancy_transition.csv`. `network/` always contains directed node/edge CSV tables; an optional PNG is written only when transitions exist and Matplotlib is usable. Reciprocal cage-type directions remain separate. Edge rates use accumulated directly observed source-state exposure, never first-to-last event span. Each target directory contains target-filtered copies of these tables, `track_info.md`, and `sqq_render/{sqq_track.gro,sqq_track.xtc,sqq_track.membership.tsv,sqq_track.vmd.tcl}`. Target tables are not recomputed from scratch: every per-track row of a target (`cage_track.csv`, `guest_residence.csv`, `statistics/guest_residence_lifetime.csv`, `statistics/occupancy_state_lifetime.csv`) is the run-level row with the `target` column relabelled and is obtained by filtering on track ID; observation-level tables are streamed from the selection; only frame-level and aggregate tables (population, events, lineage, transitions, survival, distribution, network) are rebuilt from the selected set. Target membership TSVs are written in batches of at most 128 destinations: ordinary requests still use one source read, while unusually large target lists use additional bounded passes instead of keeping an unbounded number of files and target maps open. Duplicate normalized destination paths are rejected. The GRO/XTC are hard-linked when the filesystem permits and copied otherwise. These coordinate files are logically immutable SQQ artifacts: unlinking or atomically replacing one path is safe, but directly editing a hard-linked file in place can also alter its sibling target packages. A target that matches no track is still published with empty tables and a selection-free render package, and the final page names it in `Warnings`; a phase target on imported frames without labels says they cannot be added retroactively, while raw Track reports that its automatically enabled cluster search produced no hydrate phase labels.
+The run-level `track/` directory contains state, `track_info.md`, `cage_track.csv`, `cage_event.csv`, `cage_population.csv`, `guest_residence.csv`, and `lifetime_distribution.csv`. `statistics/` adds tracking quality, lifetime survival, lineage, guest events/residence, and occupancy-state statistics. `network/` contains directed node/edge CSVs and an optional PNG; rates use directly observed source-state exposure. Filtered targets reuse per-track rows and rebuild only selection-dependent aggregates. All-target reports are not copied into a second directory. The merged `cage_observation.csv` is replaced by the shared per-frame cage-info writer described below. Target membership TSVs use bounded batches of at most 128 destinations; GRO/XTC are hard-linked when permitted and copied otherwise. Treat coordinate files as immutable: unlinking or replacing one path is safe, while an in-place edit may change sibling targets. Empty selections still produce header-only frame lists and empty statistics; rendering is selection-free when coordinates are available, and the final page reports the empty target.
 
 A raw-input persistent-ID target with pre-birth frames needs the history of its birth water set before the cage existed. While the single analysis pass runs, each frame is reduced to one compact precursor record (water-oxygen identities, residues, coordinates, the render atom mapping for the configured atom scope, water-water edges, and the water sets of rings, half-cages, quasi-cages, and cages) and spooled as JSON into the run-private workspace only until every requested persistent ID has first appeared. Later frames do not extend the spool. After tracking, records from frame 0 through the latest required birth frame are read and classified one at a time, so the complete prefix is never retained in memory. They classify each birth water set backwards through dispersed, connected, ring, half/quasi, and cage states, write `precursor_state.csv` and `water_history.csv`, and add precursor membership to that target's VMD package. If a record is missing, the prefix is re-analyzed through the shared runner (`Precursor Pass`) and classified as each frame completes, so both paths produce identical files without retaining the fallback record sequence. A target already present in the first selected frame has no precursor interval. Imported state lacks full pre-cage graph/ring/patch objects and writes an explicit unavailable record instead.
 
@@ -1007,7 +1013,7 @@ CLI Analyze and raw Track retain frame stamps plus only active/dormant cage matc
 
 The bounded-memory path was exercised on a 1.417 GB, 1,001-frame LAMMPS trajectory. Analyze completed in 905.678 s with a 1.605 GB peak aggregate working set; source Track completed in 12.943 s with a 169.964 MB peak. A raw SQQ-Py Track run selecting 63 frames completed in 663.684 s with a 244.113 MB peak, stayed near 195-202 MB during analysis, and left no private Track workspace after successful publication. These measurements characterize resource use; they do not alter sampling, precision, or any scientific acceptance rule.
 
-The ordered runtime sink consumes each compact snapshot before the executor stores a lightweight outcome with both `result` and `snapshot` cleared, so workflow bookkeeping does not recreate the sequence outside the accumulator. Per-observation records (`FrameStamp`, `TrackCageSnapshot`, `TrackFrameSnapshot`, `CageObservation`, `CageTrack`, `TrackEvent`, and the engine's internal state records) are slotted dataclasses. `track_state.json` is streamed frame by frame, track by track, and event by event in the same `indent=2` layout that `json.dumps` produces for the serialized state, and `cage_observation.csv` plus `statistics/tracking_quality.csv` are written directly from the ordered observation view. Thus neither the complete observation/event object history, complete JSON tree/text, nor per-observation row dictionaries are retained in workflow memory. The SQLite ordering keys reproduce the former stable frame/track/cage and frame/emission ordering; regression comparison covers state and every CSV byte.
+The ordered runtime sink consumes each compact snapshot before the executor stores a lightweight outcome with both `result` and `snapshot` cleared, so bookkeeping does not recreate the trajectory history. Per-observation records are slotted dataclasses. JSON state is streamed frame by frame, track by track, and event by event; tracking quality uses the ordered observation view directly. Cage-info materializes only current-frame rows and sparse neighbor mappings. SQLite ordering preserves deterministic frame/track/cage and event order. The observation API remains available without the former merged observation CSV.
 
 Outside opt-in scientific geometry validation, both engine adapters compute the published cage center through the same engine-independent, deterministically ordered PBC-connected centroid helper. Native cage recognition and occupancy remain native; this shared final reduction removes approximately machine-epsilon summation-order differences that could otherwise perturb an exactly tied Track assignment. It changes no distance cutoff, accepted cage, coordinate precision, or matching tolerance.
 
@@ -1049,20 +1055,45 @@ Rules:
 
 ## Output Layout
 
+### Per-frame cage information
+
+Analyze opts in with `--output-type cage-info` or `default,cage-info`; Track always writes the same format. Both engines use one writer and the same physical shared-face cage graph, independent of cluster/phase search. The optional output does not enable ordinary GRO structures.
+
+```text
+result_sqq/
+  gro/<frame>/cage_info_<frame>.csv
+  track/track_state.json, cage_track.csv, cage_event.csv, ...
+  sqq_render/...                         # selected Analyze output; Track with coordinates
+  track/type_512/
+    gro/<frame>/cage_info_<frame>.csv     # filtered target only
+    sqq_render/...
+    target statistics
+```
+
+`all` uses the root-level `gro/` and `sqq_render/` without a `track/all/` duplicate. Non-all targets retain their existing `track/type_*`, `track/phase_*`, or `track/cage_t*` directories. Without an all target, Track does not write a root-level full-system frame list. Every cage-info list uses this layout even for one ordinary GRO/XYZ; other structure outputs keep their existing compact/separated routing.
+
+Each CSV has one complete cage per row and includes frame index/name/time, persistent and local cage IDs, cage type/phase, water and guest identities/counts, center coordinates, existing match diagnostics, `connectivity`, and `neighbor_count`. The redundant `target` column is omitted; the containing directory identifies a filtered selection. `connectivity` is a single CSV cell containing unique, numerically sorted `tID`s separated by commas. A physical shared face connects cages; an edge or vertex alone does not. Full-system neighbors remain in filtered-target rows. Known isolated cages have an empty connectivity cell and count zero. Legacy state without face evidence has `NA` in both fields and raises one warning, never a fabricated zero.
+
+Snapshot/observation records persist optional local neighbor IDs. Missing fields remain readable from earlier JSON/pickle state. The writer reads the ordered observation stream once, builds a local-to-persistent ID map for one frame, validates symmetry, and atomically writes each target's file. Only current-frame row data are materialized; no dense cage matrix or trajectory-wide CSV buffer is built. Every successful empty frame still has a header-only CSV. Failed/invalid tracking groups are reported instead of publishing empty successful lists. Unsafe or colliding frame directory names are rejected.
+
+This replaces the former merged `track/cage_observation.csv`; consumers must switch to `gro/*/cage_info_*.csv`. The in-memory observation API and cross-frame lifetime/event tables remain available. Analyze cage-info and Track all exported from its state use identical columns and values.
+
+### General output routing
+
 One shared job-shape rule owns per-frame placement for both engines and every scheduler. A single ordinary one-frame GRO or XYZ uses the compact frame-root layout. Any trajectory-like input, including one or more XTC/TRR/LAMMPS/DCD paths or a stacked GRO, and any job containing multiple independent GRO/XYZ files uses the separated layout: report/TSV files under `info/` and selected structures under `gro/<frame>/`.
 
 Output selection is positive and engine-preset-specific. The four accepted engine values are:
 
 | Engine value | Default `output.type` |
 | --- | --- |
-| `00` | `info,sqq-render,summary-xlsx` |
-| `py` | `info,sqq-render,summary-xlsx` |
+| `00` | `info,sqq-render,summary-csv,summary-detail-csv` |
+| `py` | `info,sqq-render,summary-csv,summary-detail-csv` |
 | `99` | `info,sqq-render,summary-csv,summary-detail-csv` |
 | `cpp` | `info,sqq-render,summary-csv,summary-detail-csv` |
 
-Supported SQQ-Py canonical names are `info`, `membership-tsv`, `order-tsv`, `f3-gro`, `f4-gro`, `sqq-render`, `gro`, `ring-gro`, `half-gro`, `quasi-gro`, `cage-gro`, `ice-gro`, `cluster-gro`, `summary-xlsx`, `summary-csv`, `summary-detail-csv`, and `cluster-detail`. `gro` expands to the five ordinary ring/half/quasi/cage/ice subtypes. `sqq-render` writes one indivisible four-file visualization package. `cluster-gro` is separate and requires resolved cluster search. `default` expands to the selected engine preset and may be combined with extra types. `all` and `none` are exclusive.
+Supported SQQ-Py canonical names are `info`, `cage-info`, `membership-tsv`, `order-tsv`, `f3-gro`, `f4-gro`, `sqq-render`, `gro`, `ring-gro`, `half-gro`, `quasi-gro`, `cage-gro`, `ice-gro`, `cluster-gro`, `summary-xlsx`, `summary-csv`, `summary-detail-csv`, and `cluster-detail`. `gro` expands to the five ordinary ring/half/quasi/cage/ice subtypes. `sqq-render` writes one indivisible four-file visualization package. `cluster-gro` is separate and requires resolved cluster search. `default` expands to the selected engine preset and may be combined with extra types. `all` and `none` are exclusive.
 
-SQQ-CPP accepts `info`, `gro`, `cage-gro`, `f3-gro`, `f4-gro`, `sqq-render`, `summary-csv`, `summary-xlsx`, `summary-detail-csv`, `default`, `all`, and `none`. `gro` enables the supported ordinary classified cage GRO path. Neither `99` nor `cpp` selects `gro` or `cage-gro` by default. Cluster types are unsupported. `sqq_config_resolved.yaml` is mandatory for every engine value.
+SQQ-CPP accepts `info`, `cage-info`, `gro`, `cage-gro`, `f3-gro`, `f4-gro`, `sqq-render`, `summary-csv`, `summary-xlsx`, `summary-detail-csv`, `default`, `all`, and `none`. `gro` enables the supported ordinary classified cage GRO path. Neither `99` nor `cpp` selects `gro` or `cage-gro` by default. Cluster types are unsupported. `sqq_config_resolved.yaml` is mandatory for every engine value.
 
 For any separated job (multiple standalone GRO/XYZ files, one or more XTC/TRR/LAMMPS/DCD trajectories, or one stacked GRO), the requested root directly owns `sqq_config_resolved.yaml`, `sqq_output_manifest.json`, optional `summary.xlsx`, optional `summary/`, `info/`, optional `gro/`, and optional `sqq_render/`. All per-frame Markdown reports are flat files under `info/`; selected per-frame structures are under `gro/<frame>/`. A single ordinary one-frame GRO or XYZ retains its compact frame-root layout. The render directory contains:
 
@@ -1079,7 +1110,6 @@ Every completed Analyze sequence owns the following tracking state, compatibilit
 ```text
 track/
   track_state.json
-  cage_observation.csv
   cage_track.csv
   cage_event.csv
   cage_population.csv
@@ -1163,7 +1193,7 @@ Before creating run state, Analyze and Track reserve an output root. A missing o
 
 Run-private fragment workspaces remain separately scoped by unique identifiers. Ownership-manifest paths are validated as relative and inside the resolved output root; invalid, absolute, parent-traversing, or out-of-root entries are ignored.
 
-Engine values `00` and `py` write per-frame info, the four-file run-level `sqq_render/` package, and `summary.xlsx`; ordinary/category/cluster GRO and detail CSV files are not default output. `summary-xlsx` owns the workbook. `summary-csv`, `summary-detail-csv`, and `cluster-detail` write disjoint CSV filenames under the single `output.summary_csv_dir`, which defaults to `summary`.
+All engine presets default to per-frame info, the four-file `sqq_render/` package, and main and detail CSV reports. Ordinary/category/cluster GRO files are not default output. Select `summary-xlsx` explicitly for a workbook. `summary-csv`, `summary-detail-csv`, and `cluster-detail` write disjoint CSV filenames under `output.summary_csv_dir`, which defaults to `summary`.
 `cluster-detail` separately owns `hydrate_domain.csv` and `hydrate_cluster_detail.csv`. Explicit `cluster-detail` and `cluster-gro` require resolved cluster search on. Cluster search populates selected info and main-summary outputs without adding an unselected output type. Every engine preset requires `cluster-gro` explicitly through YAML `output.type`. Search off writes no cluster files. If no per-frame type remains selected, the pipeline removes an empty frame directory.
 
 Per-frame output folders use the default grouped structure:

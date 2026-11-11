@@ -1,5 +1,17 @@
 # SQQ Update Notes
 
+## Version 0.5.8
+
+Release date: Nov 11, 2026 (single's day).
+
+- **Track:** Raw trajectories can use parallel frame analysis (`-w`); cage identities are still linked in frame order. Imported-source Track remains serial.
+- **Phase:** SQQ-Py adds `--phase-ratio`, requiring a shared-face neighbor match fraction strictly above `0.5` by default. Set `hydrate_cluster.assignment_rule: legacy` to retain the previous rule.
+- **Cage information:** Track replaces `cage_observation.csv` with `gro/<frame>/cage_info_<frame>.csv`, including shared-face neighbor IDs and counts. Analyze can write the same format with `--output-type cage-info`. Track `all` no longer duplicates results under `track/all/`.
+- **Release notices:** Interactive Analyze and Track check the latest GitHub release in the background, cache it for 24 hours, and never install updates. Disable with `SQQ_NO_UPDATE_CHECK=1`.
+- **Documentation:** Updated the published citation and documented default VMD cage colors and engine report formats.
+
+Development checks covered phase boundaries, serial/parallel Track equivalence, and matching per-frame cage CSVs across Py, native CPP, and imported-source Track.
+
 ## Version 0.5.7
 
 ### Short Summary

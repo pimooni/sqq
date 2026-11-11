@@ -70,6 +70,10 @@ def apply_cli_overrides(config: dict[str, Any], args: Namespace) -> None:
         )
 
     worker = getattr(args, "worker", None)
+    phase_ratio = getattr(args, "phase_ratio", None)
+    if phase_ratio is not None:
+        config["hydrate_cluster"]["phase_ratio"] = phase_ratio
+        config["hydrate_cluster"]["assignment_rule"] = "majority"
     if worker is not None:
         config["parallel"]["workers"] = worker
 

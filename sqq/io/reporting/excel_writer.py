@@ -113,7 +113,7 @@ def format_summary_dashboard_sheet(worksheet) -> None:
                 row[1].font = Font(color="111827", bold=False)
                 row[1].alignment = Alignment(horizontal="left", vertical="top", wrap_text=True)
                 if row[0].value == "Publication" and isinstance(row[1].value, str):
-                    journal = "Journal of Physical Chemistry A"
+                    journal = "J. Phys. Chem. A"
                     if journal in row[1].value:
                         try:
                             from openpyxl.cell.rich_text import CellRichText, TextBlock

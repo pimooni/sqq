@@ -2,14 +2,15 @@
 
 from __future__ import annotations
 
-from collections import defaultdict
-from dataclasses import dataclass
+from collections import Counter, defaultdict
+from dataclasses import dataclass, replace
 from typing import Iterable, Mapping, Sequence
 
 import numpy as np
 
 from ...models import Cage, FrameResult, Ring
 from ...models.tracking import FrameStamp, TrackCageSnapshot, TrackFrameSnapshot
+from ..sqq_py.phase import build_cage_graph, build_ring_face_geometries
 
 _PHASE_ALIASES = {
     "i": "sI",
@@ -49,6 +50,7 @@ class _CageState:
     center: tuple[float, float, float]
     topology: tuple[int, ...]
     guest_ids: tuple[str, ...]
+    neighbor_cage_ids: tuple[str, ...] | None = None
 
 def snapshot_from_frame_result(
     result: FrameResult,
@@ -77,6 +79,7 @@ def snapshot_from_frame_result(
                 center=state.center,
                 topology=state.topology,
                 guest_ids=state.guest_ids,
+                neighbor_cage_ids=state.neighbor_cage_ids,
             )
             for state in states
         ),
@@ -102,6 +105,7 @@ def _snapshot_states(snapshot: TrackFrameSnapshot) -> list[_CageState]:
                 center=cage.center,
                 topology=cage.topology,
                 guest_ids=cage.guest_ids,
+                neighbor_cage_ids=cage.neighbor_cage_ids,
             )
             for cage in snapshot.cages
         ),
@@ -136,9 +140,21 @@ def _frame_states(result: FrameResult) -> list[_CageState]:
     }
     phase_by_cage = _phase_labels_by_cage(result)
     cages = result.all_cages or result.cages
+    face_counts = Counter(face for cage in cages for face in cage.rings)
+    shared_rings = {
+        face: ring_by_id[face] for face, count in face_counts.items()
+        if count > 1 and face in ring_by_id
+    }
+    geometries = build_ring_face_geometries(result.frame, shared_rings)
+    adjacency, _, _ = build_cage_graph(
+        cages, face_geometries=geometries, box=result.frame.box
+    )
     states = [
-        _cage_state(cage, oxygen_to_identity, ring_by_id, phase_by_cage)
-        for cage in cages
+        replace(
+            _cage_state(cage, oxygen_to_identity, ring_by_id, phase_by_cage),
+            neighbor_cage_ids=tuple(sorted(cages[j].object_id for j in adjacency[index])),
+        )
+        for index, cage in enumerate(cages)
     ]
     local_ids = [state.local_cage_id for state in states]
     if len(local_ids) != len(set(local_ids)):

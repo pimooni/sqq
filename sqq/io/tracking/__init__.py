@@ -1,5 +1,7 @@
 """Persistent tracking state, tables, and transition-network outputs."""
 
+from .cage_info import write_cage_info_frames
+
 from .network import (
     cage_transition_edge_rows,
     cage_transition_node_rows,
@@ -49,6 +51,7 @@ __all__ = [
     "write_cage_transition_plot",
     "write_target_selection",
     "write_track_info",
+    "write_cage_info_frames",
     "write_track_outputs",
     "write_tracking_result",
     "write_tracking_tables",

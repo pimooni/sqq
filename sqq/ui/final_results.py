@@ -24,6 +24,7 @@ from .run_header import (
     compact_ring_scope,
     compact_sqq_display,
 )
+from .update_check import available_update
 
 _ANSI_BOLD = "\x1b[1m"
 _ANSI_RESET = "\x1b[0m"
@@ -58,6 +59,8 @@ def render_final_results(
         _bold("Basic Information", ansi),
     ]
     _append_basic_information(lines, run_info, config)
+    if (update_notice := available_update()) is not None:
+        _add_field(lines, "Update", update_notice)
 
     lines.extend(["", _bold("Configuration", ansi)])
     if track_run:
@@ -450,7 +453,10 @@ def _append_track_configuration(
             f"ambiguity margin {track_config.get('ambiguity_score_margin', 1.0)}"
         ),
     )
-    _add_field(lines, "Output", "Track tables, statistics, network, sqq-render")
+    outputs = "cage-info, Track tables, statistics, network"
+    if "sqq-render" in tuple(run_info.get("completed_outputs", ())):
+        outputs += ", sqq-render"
+    _add_field(lines, "Output", outputs)
 
 
 def _is_track_run(run_info: Mapping[str, Any]) -> bool:

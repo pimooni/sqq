@@ -343,6 +343,7 @@ def config_with_run_metadata(config: dict[str, Any], run_info: dict[str, Any]) -
     run = enriched.setdefault("run", {})
     parallel = config.get("parallel", {})
     run.update({
+        "command": run_info.get("command", "analyze"),
         "sqq_version": run_info.get("sqq_version", __version__),
         "release_date": run_info.get("release_date", __release_date__),
         "engine_selector": config.get("mode", DEFAULT_MODE),

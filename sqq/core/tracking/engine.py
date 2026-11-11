@@ -1054,6 +1054,7 @@ def _observation(
         center=state.center,
         topology=state.topology,
         guest_ids=state.guest_ids,
+        neighbor_cage_ids=state.neighbor_cage_ids,
         match_jaccard=None if evidence is None else evidence.jaccard,
         match_shared_fraction=None if evidence is None else evidence.shared_fraction,
         match_shared_waters=None if evidence is None else evidence.shared_waters,

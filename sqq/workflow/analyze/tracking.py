@@ -10,11 +10,13 @@ from typing import Any
 import warnings
 
 from ...core.tracking import TrackingAccumulator, snapshot_from_frame_result
+from ...config import output_enabled
 from ...io.tracking import (
     build_track_tables,
     write_track_info,
     write_tracking_result,
     write_tracking_tables,
+    write_cage_info_frames,
 )
 from ...models.tracking import TrackFrameSnapshot, TrackingConfig, TrackingResult
 from ...runtime.contracts import FrameTask, RunPlan, TaskOutcome
@@ -199,6 +201,9 @@ def write_analyze_tracking_outputs(
         write_tracking_tables(result, track_root, tables=tables)
         write_tracking_result(result, track_root / "track_state.json")
         write_track_info(result, track_root, tables=tables)
+        config = plan.context.config if key == "run" else plan.context.group_configs[key]
+        if output_enabled(config, "cage-info"):
+            write_cage_info_frames(result, [(None, root)])
 
 
 __all__ = [

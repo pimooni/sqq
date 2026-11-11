@@ -63,9 +63,12 @@ from ...runtime.output_lock import reserve_output_directory
 from ...ui.diagnostics import RunDiagnostics, capture_run_warnings
 from ...ui.formatting import format_time_zone
 from ...ui.progress import (
+    ParallelRunProgressDisplay,
     RunProgressDisplay,
+    compact_worker_policy,
     print_output_directory_notice,
 )
+from ...runtime.parallel.policy import worker_policy_text
 from ...ui.run_header import input_format_label, print_run_banner, print_track_header
 from ...ui import completed_run_statistics, print_final_results, refresh_terminal
 from ...runtime.session import AnalysisEvent, AnalysisRunner, AnalysisSink
@@ -152,19 +155,34 @@ class _TrackingAnalysisSink(AnalysisSink):
 class _TrackProgressSink:
     """Translate shared runner events into the Track progress panel."""
 
-    def __init__(self, display: RunProgressDisplay) -> None:
+    def __init__(
+        self, display: RunProgressDisplay | ParallelRunProgressDisplay
+    ) -> None:
         self.display = display
+        self.parallel = isinstance(display, ParallelRunProgressDisplay)
 
     def __call__(self, event: AnalysisEvent) -> None:
         task = event.task
-        if event.kind == "task-start" and task is not None:
+        if task is None:
+            return
+        if self.parallel:
+            if event.kind == "task-start":
+                self.display.start_file(task.task_index, task.display_name)
+            elif event.kind == "stage" and event.stage is not None:
+                self.display.update_stage(task.task_index, event.stage)
+            elif event.kind in {"task-complete", "task-cancelled"}:
+                self.display.complete_file(
+                    task.task_index,
+                    event.kind == "task-complete" and event.status == "ok",
+                )
+        elif event.kind == "task-start":
             self.display.start_frame(task.frame_index, task.display_name)
         elif event.kind == "stage" and event.stage is not None:
             self.display.update_stage(event.stage)
-        elif event.kind == "task-complete":
-            self.display.complete_frame(event.status == "ok")
-        elif event.kind == "task-cancelled":
-            self.display.complete_frame(False)
+        elif event.kind in {"task-complete", "task-cancelled"}:
+            self.display.complete_frame(
+                event.kind == "task-complete" and event.status == "ok"
+            )
 
 
 def _track_executed_features(
@@ -297,6 +315,8 @@ def _prepare_track(args: Namespace) -> _TrackPreparation:
     _update_track_config(config, args, targets)
     source_state_path: Path | None = None
     if not getattr(args, "input", None):
+        if getattr(args, "phase_ratio", None) is not None:
+            raise ValueError("--phase-ratio requires raw --input; --source uses existing Analyze phase labels.")
         source_root = Path(source_value or Path.cwd())
         source_state_path = discover_track_state(source_root)
         source_engine = _source_engine_selector(source_state_path)
@@ -360,6 +380,9 @@ def _track_locked(
     source_state_path = prepared.source_state_path
     requested_tracking = prepared.requested_tracking
     published_render_scripts: list[str] = []
+    execution_metadata: dict[str, Any] = {
+        "workers": 1, "parallel_backend": "serial", "math_threads": 1
+    }
     tracking_workspace = (
         TemporaryDirectory(
             prefix=".sqq-track-state-",
@@ -387,6 +410,7 @@ def _track_locked(
                     requested_tracking,
                     source_root=Path(temporary) / "source",
                     tracking_spool_dir=Path(tracking_workspace.name),
+                    execution_metadata=execution_metadata,
                 )
                 source = None
             else:
@@ -411,8 +435,16 @@ def _track_locked(
                     )
                 config.setdefault("track", {}).update(result.config.to_dict())
                 source_bundle = discover_sqq_cage_bundle(
-                    source, state_path=state_path
+                    source, state_path=state_path,
+                    allow_missing=not bool(result.source_provenance),
                 )
+                if not source_bundle.complete:
+                    warnings.warn(
+                        "The Analyze source has no render coordinates; Track will write "
+                        "cage-info and statistics without a render package. Include "
+                        "sqq-render when running Analyze to enable rendering.",
+                        UserWarning, stacklevel=2,
+                    )
                 analysis_plan = None
                 metadata = {
                     "source": str(source.resolve()),
@@ -444,10 +476,8 @@ def _track_locked(
                 else None
             )
             analysis_completed_at = perf_counter()
-            validate_tracking_source_bundle(
-                source_bundle,
-                result=result,
-            )
+            if source_bundle.complete:
+                validate_tracking_source_bundle(source_bundle, result=result)
             written = write_track_outputs(
                 result,
                 output,
@@ -460,7 +490,7 @@ def _track_locked(
                     for selection in selections
                 ],
                 source_bundle,
-            )
+            ) if source_bundle.complete else []
             for bundle in bundles:
                 if bundle.complete and bundle.script_path is not None:
                     published_render_scripts.append(str(bundle.script_path.resolve()))
@@ -493,7 +523,7 @@ def _track_locked(
         citation_evidence = completed_citation_evidence(
             config,
             successful_frames=len(result.frames),
-            completed_outputs=("sqq-render",),
+            completed_outputs=("cage-info", "sqq-render") if published_render_scripts else ("cage-info",),
             track=True,
             occupancy_evaluated=has_guest_observations,
             guest_residence_evaluated=has_guest_observations,
@@ -527,8 +557,10 @@ def _track_locked(
             track=True,
         )
         completed_outputs = tuple(statistics.get("completed_outputs", ()))
-        if "sqq-render" not in completed_outputs:
-            statistics["completed_outputs"] = completed_outputs + ("sqq-render",)
+        for name in (("cage-info", "sqq-render") if published_render_scripts else ("cage-info",)):
+            if name not in completed_outputs:
+                completed_outputs += (name,)
+        statistics["completed_outputs"] = completed_outputs
         statistics["render_script_paths"] = tuple(published_render_scripts)
         statistics["diagnostic_messages"] = diagnostics.consume()
         refresh_terminal()
@@ -546,6 +578,7 @@ def _track_locked(
                 "source_frames_total": 0,
                 "native_frame_interval_ps": None,
                 "raw_frame_step": 1,
+                **execution_metadata,
             },
             targets,
             None,
@@ -570,6 +603,7 @@ def _track_input(
     *,
     source_root: Path,
     tracking_spool_dir: Path,
+    execution_metadata: dict[str, Any] | None = None,
 ) -> tuple[
     TrackingResult,
     RenderBundle,
@@ -594,13 +628,6 @@ def _track_input(
         str(topology.resolve()) if topology is not None else None
     )
     _prepare_lammps_metadata(config, trajectory, topology, args)
-    config["parallel"]["workers"] = 1
-    config["parallel"]["backend"] = "serial"
-    config.setdefault("adjustments", [])
-    adjustment = "sqq track analyzes selected frames serially before linking"
-    if adjustment not in config["adjustments"]:
-        config["adjustments"].append(adjustment)
-
     # Track owns a temporary Analyze workspace.  Only the render fragments are
     # needed there; target-specific reports are published later by io.tracking.
     execution_config = deepcopy(config)
@@ -650,6 +677,12 @@ def _track_input(
         if any(target.kind == "track" for target in targets)
         else None
     )
+    workers = plan.policy.workers
+    if config.get("parallel", {}).get("workers") in (None, "auto"):
+        # Each worker owns a trajectory reader; keep the automatic memory
+        # footprint conservative while still overlapping independent frames.
+        workers = min(workers, 2)
+    backend = plan.policy.backend if workers > 1 else "serial"
     plan = replace(
         plan,
         context=replace(
@@ -663,16 +696,23 @@ def _track_input(
         ),
         policy=replace(
             plan.policy,
-            backend="serial",
-            workers=1,
+            backend=backend,
+            workers=workers,
             strict=True,
-            in_flight_limit=1,
+            in_flight_limit=max(1, workers * 2),
         ),
     )
 
     accumulator = TrackingAccumulator(
         tracking_config, spool_dir=tracking_spool_dir
     )
+    actual_execution = {
+        "workers": plan.policy.workers,
+        "parallel_backend": plan.policy.backend,
+        "math_threads": plan.policy.math_threads,
+    }
+    if execution_metadata is not None:
+        execution_metadata.update(actual_execution)
     tracking_sink = _TrackingAnalysisSink(
         accumulator,
         precursor_target_ids=tuple(
@@ -680,18 +720,35 @@ def _track_input(
         ),
         precursor_spool_dir=precursor_spool_dir,
     )
-    progress = RunProgressDisplay(
-        total=selected_frames,
-        total_started_at=started,
-        include_cluster_stage=bool(
-            config.get("hydrate_cluster", {}).get("enabled", False)
-        ),
-        cpp_mode=is_cpp_mode(config.get("mode", DEFAULT_MODE)),
-        include_patch_stage=bool(
-            config.get("half_cage", {}).get("enabled", False)
-            or config.get("quasi_cage", {}).get("enabled", False)
-        ),
+    include_cluster = bool(config.get("hydrate_cluster", {}).get("enabled", False))
+    include_patch = bool(
+        config.get("half_cage", {}).get("enabled", False)
+        or config.get("quasi_cage", {}).get("enabled", False)
     )
+    cpp_mode = is_cpp_mode(config.get("mode", DEFAULT_MODE))
+    if backend != "serial":
+        progress: RunProgressDisplay | ParallelRunProgressDisplay = (
+            ParallelRunProgressDisplay(
+                selected_frames,
+                workers,
+                started,
+                include_cluster,
+                cpp_mode=cpp_mode,
+                include_patch_stage=include_patch,
+                math_threads=plan.policy.math_threads,
+                policy=compact_worker_policy(worker_policy_text(config)),
+                unit="Frames",
+                backend=backend,
+            )
+        )
+    else:
+        progress = RunProgressDisplay(
+            total=selected_frames,
+            total_started_at=started,
+            include_cluster_stage=include_cluster,
+            cpp_mode=cpp_mode,
+            include_patch_stage=include_patch,
+        )
     try:
         outcomes = AnalysisRunner(
             plan,
@@ -722,6 +779,7 @@ def _track_input(
         "source_frames_total": int(plan.sampling.get("total_frames", selected_frames)),
         "native_frame_interval_ps": plan.sampling.get("native_frame_interval_ps"),
         "raw_frame_step": int(plan.sampling.get("raw_frame_step", 1)),
+        **actual_execution,
     }
     return result, bundle, plan, metadata
 
@@ -888,9 +946,9 @@ def _run_info(
         "frames_ok": frames if status == "completed" else 0,
         "frames_failed": 0 if status == "completed" else 1,
         "failures": [] if not error else [{"frame": "", "source": "", "error": error}],
-        "workers": 1,
-        "parallel_backend": "serial",
-        "math_threads": int(config.get("parallel", {}).get("math_threads", 1)),
+        "workers": int(metadata.get("workers", 1)),
+        "parallel_backend": str(metadata.get("parallel_backend", "serial")),
+        "math_threads": int(metadata.get("math_threads", 1)),
         "target": ",".join(target.raw for target in targets),
         "track_count": len(result.tracks) if result is not None else 0,
         "gap_frame": result.config.gap_frame if result is not None else None,

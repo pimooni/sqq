@@ -6,19 +6,19 @@
 
 **SQQ (Shell Quant Qualifier): Python Joint Toolkit for Water-Shell Topology Analysis.**
 
-Current release version: **0.5.7** (Sep 25, 2026; Mid-Autumn Day)
+Current release version: **0.5.8** — Nov 11, 2026 (single's day)
 
 SQQ identifies water-network rings, cages, hydrate phases, guest occupancy, order parameters, and persistent cage tracks from molecular-dynamics structures and trajectories. It provides the complete SQQ-Py workflow and a focused native SQQ-CPP cage engine.
 
 Detailed definitions are in [docs/design.md](docs/design.md); release history is in [docs/update.md](docs/update.md).
 
-## Changed in 0.5.7
+## Changed in 0.5.8
 
-- Reduced memory use for long trajectories and large Track runs.
-- Faster render output, imported-result validation, and tracking of selected cages.
-- Clearer progress and warnings, with unchanged scientific results for the same input.
+- Parallel frame analysis for raw Track and a configurable phase threshold.
+- Unified per-frame cage CSVs with shared-face connectivity.
+- Updated publication citation and optional release notices.
 
-See [Version 0.5.7](docs/update.md#version-057) for complete release notes.
+See [Version 0.5.8](docs/update.md#version-058) for release notes.
 
 ## Acknowledgements
 
@@ -62,7 +62,7 @@ sqq -h
 
 ## Quick Start
 
-The default `py` engine analyzes the water network, 4/5/6-membered rings and cages, F3/F4, writes per-frame information, creates a VMD package, and produces `summary.xlsx`.
+The default `py` engine analyzes the water network, 4/5/6-membered rings and cages, and F3/F4. It writes per-frame information, a VMD package, and CSV reports under `summary/`.
 
 ### Configuration
 
@@ -117,6 +117,8 @@ sqq track -i traj.xtc -t topol.gro -dt 100 --target 512,t133 -o ./result_track
 
 Track targets may be `all`, cage types, hydrate phases, or persistent IDs such as `t133`.
 
+For SQQ-Py phase expansion, `--phase-ratio 0.5` (or `hydrate_cluster.phase_ratio` in YAML) requires more than half of a cage's shared-face neighbors to match the phase structure. Seed anchors take precedence over growth claims; anchors shared by multiple phases remain ambiguous. The default is `0.5`; `hydrate_cluster.assignment_rule: legacy` preserves the previous two-contact expansion. `--source` Track uses saved phase labels and cannot change this threshold.
+
 ### Visualize results
 
 ```bash
@@ -130,8 +132,8 @@ Values `00` and `99` are compatibility presets, not points on a continuous scale
 
 | Value | Backend | Graph | Workers | Cluster | Default outputs |
 | --- | --- | --- | ---: | --- | --- |
-| `00` | SQQ-Py | `hbond` | 100% | on | `info,sqq-render,summary-xlsx` |
-| `py` | SQQ-Py | `auto` | 1 | off | `info,sqq-render,summary-xlsx` |
+| `00` | SQQ-Py | `hbond` | 100% | on | `info,sqq-render,summary-csv,summary-detail-csv` |
+| `py` | SQQ-Py | `auto` | 1 | off | `info,sqq-render,summary-csv,summary-detail-csv` |
 | `99` | SQQ-CPP | `hbond` | 100% | unsupported | `info,sqq-render,summary-csv,summary-detail-csv` |
 | `cpp` | SQQ-CPP | `auto` | 1 | unsupported | `info,sqq-render,summary-csv,summary-detail-csv` |
 
@@ -208,7 +210,7 @@ hydrate_cluster:
 order_parameter:
   enabled: [f3, f4]
 output:
-  type: [info, sqq-render, summary-xlsx]
+  type: [info, sqq-render, summary-csv, summary-detail-csv]
 render:
   atom_scope: full
 track:
@@ -229,38 +231,26 @@ SQQ builds an `hbond`, `oo`, or explicit-pair water graph; finds rings and half/
 
 | Target | Selection | Directory |
 | --- | --- | --- |
-| `all` | Every cage | `all/` |
-| `512,51264` | Tracks that ever match each type | `type_512/`, `type_51264/` |
-| `sI,sII,sH` | Tracks in each phase | `phase_sI/`, etc. |
-| `t133` | One persistent lifecycle | `cage_t133/` |
+| `all` | Every cage | Result root; no `track/all/` duplicate |
+| `512,51264` | Tracks that ever match each type | `track/type_512/`, `track/type_51264/` |
+| `sI,sII,sH` | Tracks in each phase | `track/phase_sI/`, etc. |
+| `t133` | One persistent lifecycle | `track/cage_t133/` |
 
 Mixed targets are written independently, and type/phase targets retain complete selected lifecycles. Phase targets require SQQ-Py cluster labels; imported state cannot create missing labels retroactively. A target that matches no cage is still written (empty tables, render package without selections) and is named in the final `Warnings` row.
 
-Matching remains water-shell-first; guest exchange does not create a cage ID. Each continuation is checked against the track's most recently observed shell, so gradual water exchange can preserve an ID while every adjacent or gap-bounding pair still passes the configured thresholds even after overlap with the initial shell reaches zero. Version 0.5.6 diagnostics and derived statistics do not change the default `tID` assignment. Raw Track is currently serial and is required for pre-cage precursor history; since 0.5.7 that history is reconstructed from compact per-frame records spooled during the single analysis pass, so the prefix is not analyzed twice.
+Matching remains water-shell-first; guest exchange does not create a cage ID. Each continuation is checked against the track's most recently observed shell, so gradual water exchange can preserve an ID while every adjacent or gap-bounding pair still passes the configured thresholds even after overlap with the initial shell reaches zero. Version 0.5.6 diagnostics and derived statistics do not change the default `tID` assignment. Raw Track can analyze frames with multiple workers (`-w`); results are linked in frame order. Pre-cage precursor history is reconstructed from compact per-frame records spooled during the single analysis pass.
 
 Raw Track validates the final effective time of every selected frame before analysis, including configured fallback times for frames without stored time. Times may be irregular or equal but cannot decrease; physical gaps and duration statistics use those actual times, while `gap_frame` remains a selected-frame count. Analyze keeps valid per-frame scientific output if snapshot reduction is unsuitable, but omits that topology group's persistent Track state with a warning. Schema 2/3 state can recover partial diagnostics from archived thresholds; schema 1 retains its raw evidence without inventing threshold-dependent classifications.
 
 Only directly consecutive observations produce resolved type, phase, guest, or occupancy changes. A change across a permitted recognition gap is recorded as unresolved, and affected residence segments remain gap-censored lower bounds. Split/merge confirmation additionally requires persistent destination shells and independent branch-water contributions; overlap between already persistent neighboring cages is retained only as non-confirmable candidate evidence.
 
-```text
-result_track/track/
-  track_state.json
-  {cage_observation,cage_track,cage_event,cage_population}.csv
-  {guest_residence,lifetime_distribution}.csv
-  statistics/{tracking_quality,lifetime_survival,cage_lineage,...}.csv
-  network/{cage_transition_nodes,cage_transition_edges}.csv
-  <target>/
-    filtered tables and statistics
-    precursor_state.csv, water_history.csv       # persistent-ID target; source may report unavailable
-    sqq_render/{sqq_track.gro,sqq_track.xtc,
-                sqq_track.membership.tsv,sqq_track.vmd.tcl}
-```
+Track uses the output layout below: run-level statistics under `track/`, all-cage frame lists under `gro/`, and rendering under `sqq_render/`. Filtered targets use the same frame/render layout inside their target directory. Persistent-ID targets additionally report precursor availability.
 
 See [Cross-Frame Cage Tracking](docs/design.md#cross-frame-cage-tracking) for exact matching, duration, event, network, and source/raw definitions.
 
 Track target GRO/XTC files may be hard-linked to avoid duplicate trajectory data. Treat them as immutable SQQ output: deleting or atomically replacing one path is safe, but editing a hard-linked file in place can also alter a sibling target package.
 
-New Analyze state binds its matching configuration and complete render package to topology, component, atom, cage, selected-frame/time, and SHA-256 provenance; the digests are taken while the package is written. `sqq track --source` re-hashes and validates those records before publishing any target result; older states remain readable through structural validation.
+When an Analyze render package exists, its saved provenance is revalidated before Track publishes results. An Analyze result without render coordinates can still supply cage-info and statistics; Track warns and omits rendering. Partial or corrupted packages remain errors.
 
 Track workflow memory is bounded by active/dormant matching state rather than the complete observation history: observations and events use a run-private disk spool, the JSON state and observation-level tables are streamed record by record, and per-target tables reuse the run-level rows. The public in-memory tracking API remains available for programmatic use. The release gate includes a real 1.417 GB / 1,001-frame LAMMPS run plus exact SQQ-Py/SQQ-CPP Track-output comparisons; no scientific tolerance is widened for these optimizations.
 
@@ -270,6 +260,7 @@ Track workflow memory is bounded by active/dormant matching state rather than th
 | --- | --- |
 | `default` / `all` / `none` | Engine defaults / all currently applicable outputs / no optional output |
 | `info` | Per-frame Markdown |
+| `cage-info` | Per-frame cage CSV with persistent IDs and shared-face neighbor IDs; Py/CPP |
 | `sqq-render` | Indivisible GRO/XTC/membership-TSV/Tcl package |
 | `summary-xlsx` / `summary-csv` | Main workbook / CSV tables |
 | `summary-detail-csv` | Cage occupancy/isomer details; Py also adds quasi isomers |
@@ -282,13 +273,16 @@ Track workflow memory is bounded by active/dormant matching state rather than th
 
 `default,summary-detail-csv` extends the engine default. `all` and `none` are exclusive. Track output is fixed and cannot be reduced with `--output-type`.
 
+Use `--output-type cage-info` alone or `default,cage-info` with Analyze. Track writes the same `gro/<frame>/cage_info_<frame>.csv` format by default, replacing the merged `cage_observation.csv`. Connectivity is one quoted CSV cell; legacy state without face evidence reports `NA`, not zero neighbors.
+
 ```text
 result_sqq/
   sqq_config_resolved.yaml
   sqq_output_manifest.json
   summary.xlsx and/or summary/
   info/frame_*_info.md
-  gro/<frame>/                         # selected structures
+  gro/<frame>/cage_info_<frame>.csv     # optional in Analyze; default in Track
+  gro/<frame>/...                      # selected structures
   sqq_render/
     sqq_cage.gro
     sqq_cage.xtc
@@ -296,7 +290,7 @@ result_sqq/
     sqq_cage.vmd.tcl
   track/
     track_state.json
-    compatibility tables
+    lifetime and event tables
     statistics/
     network/
 ```
@@ -333,13 +327,25 @@ sqq pick center
 sqq target save
 ```
 
-The default is opaque `cage all` with context hidden. Picking makes unselected objects transparent, highlights cages in yellow and guests in orange, and leaves labels off. DynamicBonds style changes persist across earlier and later frames; explicit SQQ style/reset commands may intentionally replace them. Full picking, color, target-validation, and representation rules are in [Output Layout](docs/design.md#output-layout).
+The default view shows all cages as opaque, colored by cage type:
+
+| Cage type | SQQ code | Default VMD color |
+| --- | --- | --- |
+| 5¹² | `512` | Green |
+| 5¹²6² | `51262` | Blue |
+| 5¹²6³ | `51263` | Red |
+| 5¹²6⁴ | `51264` | Orange |
+| 4³5⁶6³ | `435663` | Cyan |
+| 5¹²6⁸ | `51268` | Purple |
+| Other types | — | Gray |
+
+Picking makes unselected objects transparent, highlights cages in yellow and guests in orange, and leaves labels off. DynamicBonds style changes persist across frames. See [Output Layout](docs/design.md#output-layout) for the full VMD command reference.
 
 ## Citation Recommendation
 
 Cages were identified and analyzed using SQQ.<br>
-Publication: J. PANG & Q. SUN. SQQ: Python Joint Toolkit for Water-Shell Topology Analysis. *Journal of Physical Chemistry A*.<br>
-DOI: [http://doi.org/10.1021/acs.jpca.6c05769](http://doi.org/10.1021/acs.jpca.6c05769)<br>
+Publication: J. PANG & Q. SUN. SQQ: Python Joint Toolkit for Water-Shell Topology Analysis. *J. Phys. Chem. A* 2026, 130 (41), 8187–8199.<br>
+DOI: [https://doi.org/10.1021/acs.jpca.6c05769](https://doi.org/10.1021/acs.jpca.6c05769)<br>
 GitHub: [https://github.com/pimooni/sqq](https://github.com/pimooni/sqq)
 
 ## Python API
